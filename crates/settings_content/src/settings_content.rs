@@ -138,6 +138,50 @@ pub enum ReduceMotionMode {
     Off,
 }
 
+/// Interface language for the application UI.
+///
+/// Default: system
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum UiLanguage {
+    /// Follow the operating system language
+    #[default]
+    System,
+    English,
+    ChineseSimplified,
+    ChineseTraditional,
+    Japanese,
+    Korean,
+    Spanish,
+    French,
+    German,
+    PortugueseBrazil,
+    Russian,
+    Arabic,
+    Hindi,
+    Italian,
+    Dutch,
+    Turkish,
+    Polish,
+    Vietnamese,
+    Thai,
+    Indonesian,
+    Ukrainian,
+}
+
 #[with_fallible_options]
 #[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct SettingsContent {
@@ -248,6 +292,11 @@ pub struct SettingsContent {
     ///
     /// Default: off
     pub reduce_motion: Option<ReduceMotionMode>,
+
+    /// Interface language. Defaults to the operating system language.
+    ///
+    /// Default: system
+    pub ui_language: Option<UiLanguage>,
 
     /// The URL of the Zed server to connect to.
     pub server_url: Option<String>,

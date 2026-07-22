@@ -6973,6 +6973,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "i18n"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "settings",
+ "strum 0.27.2",
+ "sys-locale",
+]
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.64"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7273,6 +7283,7 @@ dependencies = [
  "gpui_platform",
  "gpui_tokio",
  "http_client",
+ "i18n",
  "image_viewer",
  "language",
  "language_selector",
@@ -7284,12 +7295,14 @@ dependencies = [
  "outline",
  "parking_lot",
  "paths",
+ "platform_title_bar",
  "project",
  "release_channel",
  "reqwest_client",
  "search",
  "session",
  "settings",
+ "strum 0.27.2",
  "tab_switcher",
  "task",
  "terminal",
@@ -13841,6 +13854,7 @@ dependencies = [
  "heck 0.5.0",
  "http_client",
  "http_proxy",
+ "i18n",
  "itertools 0.14.0",
  "language",
  "language_model",

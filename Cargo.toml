@@ -32,6 +32,7 @@ gpui.workspace = true
 gpui_platform = { workspace = true, features = ["font-kit"] }
 gpui_tokio.workspace = true
 http_client.workspace = true
+i18n.workspace = true
 image_viewer.workspace = true
 language.workspace = true
 language_selector.workspace = true
@@ -43,12 +44,14 @@ node_runtime.workspace = true
 outline.workspace = true
 parking_lot.workspace = true
 paths.workspace = true
+platform_title_bar.workspace = true
 project.workspace = true
 release_channel.workspace = true
 reqwest_client.workspace = true
 session.workspace = true
 search.workspace = true
 settings.workspace = true
+strum.workspace = true
 task.workspace = true
 tab_switcher.workspace = true
 terminal.workspace = true
@@ -147,6 +150,7 @@ members = [
     "crates/http_client",
     "crates/http_client_tls",
     "crates/http_proxy",
+    "crates/i18n",
     "crates/icons",
     "crates/image_viewer",
     "crates/json_schema_store",
@@ -360,6 +364,7 @@ html_to_markdown = { path = "crates/html_to_markdown" }
 http_client = { path = "crates/http_client" }
 http_client_tls = { path = "crates/http_client_tls" }
 http_proxy = { path = "crates/http_proxy" }
+i18n = { path = "crates/i18n" }
 icons = { path = "crates/icons" }
 image_viewer = { path = "crates/image_viewer" }
 edit_prediction_types = { path = "crates/edit_prediction_types" }

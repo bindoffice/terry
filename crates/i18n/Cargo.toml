@@ -1,0 +1,19 @@
+[package]
+name = "i18n"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/i18n.rs"
+doctest = false
+
+[dependencies]
+gpui.workspace = true
+settings.workspace = true
+strum.workspace = true
+sys-locale.workspace = true

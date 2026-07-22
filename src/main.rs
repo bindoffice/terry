@@ -1,5 +1,8 @@
-mod terminal_list_panel;
+mod app_menus;
+mod app_title_bar;
 mod file_list_panel;
+mod settings_window;
+mod terminal_list_panel;
 
 use std::sync::Arc;
 
@@ -9,7 +12,7 @@ use db::kvp::KeyValueStore;
 use fs::{Fs, RealFs};
 use futures::channel::oneshot;
 use git::GitHostingProviderRegistry;
-use gpui::{AppContext as _, Application, TaskExt};
+use gpui::{AppContext as _, Application, TaskExt, point, px};
 use gpui_tokio::Tokio;
 use language::LanguageRegistry;
 use node_runtime::{NodeBinaryOptions, NodeRuntime};
@@ -20,7 +23,6 @@ use session::{AppSession, Session};
 use settings::{KeybindSource, KeymapFile, Settings, SettingsStore, DEFAULT_KEYMAP_PATH, VIM_KEYMAP_PATH};
 use terminal_list_panel::TerminalListPanel;
 use file_list_panel::FileListPanel;
-use terminal_view::terminal_panel::TerminalPanel;
 use theme::{ActiveTheme, LoadThemes};
 use util::ResultExt;
 use uuid::Uuid;
@@ -73,10 +75,13 @@ fn main() {
         cx.set_global(app_db);
         menu::init();
         zed_actions::init();
+        app_menus::init(cx);
 
         release_channel::init(app_version, cx);
         gpui_tokio::init(cx);
         settings::init(cx);
+        i18n::init(cx);
+        settings_window::init(cx);
 
         let user_agent = format!(
             "Ink/{} ({}; {})",
@@ -141,6 +146,9 @@ fn main() {
 
         editor::init(cx);
         workspace::init(app_state.clone(), cx);
+        terminal_list_panel::init(cx);
+        file_list_panel::init(cx);
+        app_title_bar::init(cx);
         command_palette_hooks::init(cx);
         search::init(cx);
         cx.set_global(workspace::PaneSearchBarCallbacks {
@@ -174,6 +182,7 @@ fn main() {
 
         handle_keymap_file_changes(user_keymap_file_rx, user_keymap_watcher, cx);
 
+        cx.set_menus(app_menus::app_menus(cx));
         cx.activate(true);
 
         workspace::open_new(OpenOptions::default(), app_state.clone(), cx, {
@@ -187,13 +196,14 @@ fn main() {
 
 fn init_workspace(workspace: &mut Workspace, window: &mut gpui::Window, cx: &mut gpui::Context<Workspace>) {
     let workspace_handle = cx.entity();
-    let panel = cx.new(|cx| TerminalListPanel::new(workspace_handle.clone(), cx));
-    workspace.add_panel(panel, window, cx);
+    let display_pane = workspace.active_pane().clone();
+    let project = workspace.project().clone();
+    let panel = cx.new(|cx| TerminalListPanel::new(workspace_handle.clone(), display_pane, project, window, cx));
+    workspace.add_panel(panel.clone(), window, cx);
 
     let file_panel = cx.new(|cx| FileListPanel::new(workspace_handle, cx));
     workspace.add_panel(file_panel, window, cx);
 
-    let search_button = cx.new(|_| search::search_status_button::SearchButton::new());
     let active_file_name = cx.new(|_| workspace::active_file_name::ActiveFileName::new());
     let active_buffer_encoding =
         cx.new(|_| encoding_selector::ActiveBufferEncoding::new(workspace));
@@ -204,7 +214,6 @@ fn init_workspace(workspace: &mut Workspace, window: &mut gpui::Window, cx: &mut
     let cursor_position = cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
 
     workspace.status_bar().update(cx, |status_bar, cx| {
-        status_bar.add_left_item(search_button, window, cx);
         status_bar.add_left_item(active_file_name, window, cx);
         status_bar.add_right_item(active_buffer_encoding, window, cx);
         status_bar.add_right_item(active_buffer_language, window, cx);
@@ -213,11 +222,10 @@ fn init_workspace(workspace: &mut Workspace, window: &mut gpui::Window, cx: &mut
         status_bar.add_right_item(cursor_position, window, cx);
     });
 
-    let working_directory = std::env::current_dir().ok();
-    TerminalPanel::add_center_terminal(workspace, window, cx, move |project, cx| {
-        project.create_terminal_shell(working_directory, cx)
-    })
-    .detach_and_log_err(cx);
+    // Seed the terminal list panel with a default group holding one terminal.
+    panel.update(cx, |panel, cx| {
+        panel.create_default_group(window, cx);
+    });
 }
 
 fn build_window_options(_display_uuid: Option<Uuid>, cx: &mut gpui::App) -> gpui::WindowOptions {
@@ -225,7 +233,8 @@ fn build_window_options(_display_uuid: Option<Uuid>, cx: &mut gpui::App) -> gpui
         titlebar: Some(gpui::TitlebarOptions {
             title: Some("Ink".into()),
             appears_transparent: true,
-            ..Default::default()
+            // Keep traffic lights clear of the custom title text.
+            traffic_light_position: Some(point(px(12.), px(12.))),
         }),
         focus: true,
         show: true,
@@ -263,6 +272,7 @@ fn reload_keymaps(cx: &mut gpui::App, mut user_key_bindings: Vec<gpui::KeyBindin
         key_binding.set_meta(KeybindSource::User.meta());
     }
     cx.bind_keys(user_key_bindings);
+    cx.set_menus(app_menus::app_menus(cx));
 }
 
 fn load_default_keymap(cx: &mut gpui::App) {

@@ -2,12 +2,29 @@ use std::path::PathBuf;
 
 use gpui::{
     Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString,
-    Subscription, TaskExt, WeakEntity, Window, div, px,
+    Subscription, TaskExt, WeakEntity, Window, actions, div, px,
 };
 use ui::{IconButton, IconName, Label, LabelSize, Tooltip, prelude::*};
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
-use workspace::{OpenOptions, ToggleLeftDock};
+use workspace::OpenOptions;
+
+actions!(
+    file_list_panel,
+    [
+        /// Toggles focus on the file list panel.
+        ToggleFocus
+    ]
+);
+
+pub fn init(cx: &mut App) {
+    cx.observe_new(|workspace: &mut Workspace, _, _| {
+        workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
+            workspace.toggle_panel_focus::<FileListPanel>(window, cx);
+        });
+    })
+    .detach();
+}
 
 struct FileEntry {
     path: PathBuf,
@@ -26,7 +43,12 @@ pub struct FileListPanel {
 impl FileListPanel {
     pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        let _workspace_subscription = cx.subscribe(&workspace, |_, _, _, cx| cx.notify());
+        let _workspace_subscription = cx.subscribe(&workspace, |this, _, event, cx| {
+            if let workspace::Event::ActiveItemChanged = event {
+                this.update_from_active_item(cx);
+            }
+            cx.notify();
+        });
         let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         Self {
             workspace: workspace.downgrade(),
@@ -34,6 +56,19 @@ impl FileListPanel {
             position: DockPosition::Left,
             current_dir,
             _workspace_subscription,
+        }
+    }
+
+    fn update_from_active_item(&mut self, cx: &mut Context<Self>) {
+        if let Some(workspace) = self.workspace.upgrade() {
+            if let Some(active_item) = workspace.read(cx).active_item(cx) {
+                if let Some(terminal_view) = active_item.downcast::<terminal_view::TerminalView>() {
+                    if let Some(cwd) = terminal_view.read(cx).terminal().read(cx).working_directory() {
+                        self.current_dir = cwd;
+                        cx.notify();
+                    }
+                }
+            }
         }
     }
 
@@ -126,14 +161,14 @@ impl Render for FileListPanel {
                     .py_1()
                     .items_center()
                     .justify_between()
-                    .child(Label::new("Files").size(LabelSize::Small))
+                    .child(Label::new(i18n::t("files")).size(LabelSize::Small))
                     .child(
                         h_flex()
                             .gap_1()
                             .child(
                                 IconButton::new("navigate-up", IconName::ArrowUp)
                                     .icon_size(IconSize::Small)
-                                    .tooltip(Tooltip::text("Up One Level"))
+                                    .tooltip(Tooltip::text(i18n::t("up_one_level")))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.navigate_up(cx);
                                     })),
@@ -141,7 +176,7 @@ impl Render for FileListPanel {
                             .child(
                                 IconButton::new("refresh-files", IconName::ArrowCircle)
                                     .icon_size(IconSize::Small)
-                                    .tooltip(Tooltip::text("Refresh"))
+                                    .tooltip(Tooltip::text(i18n::t("refresh")))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.refresh(cx);
                                     })),
@@ -234,15 +269,16 @@ impl Panel for FileListPanel {
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        Some("File List")
+        Some(i18n::t_str("file_list"))
     }
 
     fn toggle_action(&self) -> Box<dyn Action> {
-        Box::new(ToggleLeftDock)
+        Box::new(ToggleFocus)
     }
 
     fn starts_open(&self, _window: &Window, _cx: &App) -> bool {
-        true
+        // Prefer the terminal list as the default left dock panel.
+        false
     }
 
     fn activation_priority(&self) -> u32 {

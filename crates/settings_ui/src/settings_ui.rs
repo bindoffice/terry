@@ -546,6 +546,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::MultiCursorModifier>(render_dropdown)
         .add_basic_renderer::<settings::HideMouseMode>(render_dropdown)
         .add_basic_renderer::<settings::ReduceMotionMode>(render_dropdown)
+        .add_basic_renderer::<settings::UiLanguage>(render_ui_language_dropdown)
         .add_basic_renderer::<settings::CurrentLineHighlight>(render_dropdown)
         .add_basic_renderer::<settings::ShowWhitespaceSetting>(render_dropdown)
         .add_basic_renderer::<settings::SoftWrap>(render_dropdown)
@@ -5031,6 +5032,76 @@ where
     .disabled(disabled)
     .tab_index(0)
     .title_case(should_do_titlecase)
+    .into_any_element()
+}
+
+/// Dropdown for [`settings::UiLanguage`] showing each language's native name.
+fn render_ui_language_dropdown(
+    field: SettingField<settings::UiLanguage>,
+    file: SettingsUiFile,
+    _metadata: Option<&SettingsFieldMetadata>,
+    title: &'static str,
+    description: &'static str,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    // Must stay aligned with `UiLanguage` variant declaration order.
+    const LABELS: &[&str] = &[
+        "System",
+        "English",
+        "简体中文",
+        "繁體中文",
+        "日本語",
+        "한국어",
+        "Español",
+        "Français",
+        "Deutsch",
+        "Português (Brasil)",
+        "Русский",
+        "العربية",
+        "हिन्दी",
+        "Italiano",
+        "Nederlands",
+        "Türkçe",
+        "Polski",
+        "Tiếng Việt",
+        "ไทย",
+        "Bahasa Indonesia",
+        "Українська",
+    ];
+
+    let variants = <settings::UiLanguage as strum::VariantArray>::VARIANTS;
+    debug_assert_eq!(variants.len(), LABELS.len());
+
+    let current_value = get_current_value(&SettingsStore::global(cx), &file, &field, cx);
+    let (current_value, disabled) = current_value
+        .map(|current_value| (*current_value.value, current_value.disabled))
+        .unwrap_or((settings::UiLanguage::System, false));
+
+    EnumVariantDropdown::new("ui-language", current_value, variants, LABELS, {
+        move |value, window, cx| {
+            if value == current_value {
+                return;
+            }
+            update_settings_file(
+                file.clone(),
+                field.json_path,
+                window,
+                cx,
+                move |settings, app| {
+                    (field.write)(settings, Some(value), app);
+                },
+            )
+            .log_err();
+        }
+    })
+    .aria_label(title)
+    .when(!description.is_empty(), |this| {
+        this.aria_description(description)
+    })
+    .disabled(disabled)
+    .tab_index(0)
+    .title_case(false)
     .into_any_element()
 }
 

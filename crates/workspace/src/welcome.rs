@@ -375,13 +375,14 @@ impl WelcomePage {
             )
     }
 
-    fn render_recent_project_section(
+    fn render_recent_section(
         &self,
+        title: &'static str,
         recent_projects: Vec<impl IntoElement>,
     ) -> impl IntoElement {
         v_flex()
             .w_full()
-            .child(SectionHeader::new("Recent Projects"))
+            .child(SectionHeader::new(title))
             .children(recent_projects)
     }
 
@@ -419,27 +420,47 @@ impl Render for WelcomePage {
 
         let ai_enabled = AgentSettings::get_global(cx).enabled(cx);
 
-        let recent_projects = self
-            .recent_workspaces
-            .as_ref()
-            .into_iter()
-            .flatten()
-            .take(5)
+        let workspaces = self.recent_workspaces.as_ref().into_iter().flatten().collect::<Vec<_>>();
+        let recent_terminals = workspaces
+            .iter()
             .enumerate()
-            .map(|(index, workspace)| {
+            .filter(|(_, w)| matches!(w.location, SerializedWorkspaceLocation::Remote(_)))
+            .take(5)
+            .map(|(original_index, w)| {
                 self.render_recent_project(
-                    index,
-                    first_section_entries + index,
-                    &workspace.location,
-                    &workspace.identity_paths,
+                    original_index,
+                    next_tab_index + original_index,
+                    &w.location,
+                    &w.identity_paths,
                 )
             })
             .collect::<Vec<_>>();
 
-        let showing_recent_projects =
-            self.fallback_to_recent_projects && !recent_projects.is_empty();
+        let recent_folders = workspaces
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| matches!(w.location, SerializedWorkspaceLocation::Local))
+            .take(5)
+            .map(|(original_index, w)| {
+                self.render_recent_project(
+                    original_index,
+                    next_tab_index + workspaces.len() + original_index,
+                    &w.location,
+                    &w.identity_paths,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let showing_recent_projects = self.fallback_to_recent_projects && (!recent_terminals.is_empty() || !recent_folders.is_empty());
         let second_section = if showing_recent_projects {
-            self.render_recent_project_section(recent_projects)
+            v_flex()
+                .gap_6()
+                .when(!recent_terminals.is_empty(), |this| {
+                    this.child(self.render_recent_section("Recent Terminals", recent_terminals))
+                })
+                .when(!recent_folders.is_empty(), |this| {
+                    this.child(self.render_recent_section("Recent Folders", recent_folders))
+                })
                 .into_any_element()
         } else {
             second_section

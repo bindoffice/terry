@@ -211,6 +211,7 @@ impl VsCodeSettings {
                 "off" => Some(ReduceMotionMode::Off),
                 _ => None,
             }),
+            ui_language: None,
             remote: RemoteSettingsContent::default(),
             repl: None,
             server_url: None,
