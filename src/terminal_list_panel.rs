@@ -377,6 +377,12 @@ impl Render for TerminalListPanel {
         let theme = cx.theme().clone();
         let active_group_id = self.active_group_id;
 
+        let active_terminal_id = self
+            .display_pane_entity(cx)
+            .and_then(|pane| pane.read(cx).active_item())
+            .and_then(|item| item.downcast::<TerminalView>())
+            .map(|tv| tv.entity_id());
+
         // Snapshot everything needed for rendering so we don't borrow `self`
         // while building click listeners.
         let mut groups_snapshot: Vec<(
@@ -512,6 +518,7 @@ impl Render for TerminalListPanel {
 
             if is_expanded {
                 for (ix, (terminal_view, title)) in terminals.into_iter().enumerate() {
+                    let is_terminal_active = Some(terminal_view.entity_id()) == active_terminal_id;
                     rows.push(
                         div()
                             .id(SharedString::from(format!("term-{}-{ix}", group_id.0)))
@@ -521,6 +528,8 @@ impl Render for TerminalListPanel {
                             .mx_1()
                             .rounded_md()
                             .cursor_pointer()
+                            .when(is_terminal_active, |el| el.bg(cx.theme().colors().element_selected))
+                            .when(!is_terminal_active, |el| el.hover(|style| style.bg(cx.theme().colors().element_hover)))
                             .child(
                                 h_flex()
                                     .gap_1()

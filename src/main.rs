@@ -234,7 +234,7 @@ fn build_window_options(_display_uuid: Option<Uuid>, cx: &mut gpui::App) -> gpui
             title: Some("Ink".into()),
             appears_transparent: true,
             // Keep traffic lights clear of the custom title text.
-            traffic_light_position: Some(point(px(12.), px(12.))),
+            traffic_light_position: Some(point(px(12.), px(11.))),
         }),
         focus: true,
         show: true,

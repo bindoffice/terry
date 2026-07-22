@@ -23,12 +23,14 @@ impl Render for AppTitleBar {
             titlebar.set_children([div()
                 .flex()
                 .items_center()
+                .h_full()
                 .justify_between()
                 .w_full()
                 .pr_2()
                 .child(
                     Label::new("Ink")
                         .size(LabelSize::Small)
+                        .weight(gpui::FontWeight::BOLD)
                         .color(Color::Muted),
                 )
                 .child(
