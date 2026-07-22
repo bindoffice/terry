@@ -114,6 +114,19 @@ impl FileListPanel {
 
     fn entry_clicked(&mut self, entry: FileEntry, window: &mut Window, cx: &mut Context<Self>) {
         if entry.is_dir {
+            if window.modifiers().secondary() {
+                if let Some(workspace) = self.workspace.upgrade() {
+                    if let Some(active_item) = workspace.read(cx).active_item(cx) {
+                        if let Some(terminal_view) = active_item.downcast::<terminal_view::TerminalView>() {
+                            let path_str = entry.path.to_string_lossy().to_string();
+                            let terminal = terminal_view.read(cx).terminal().clone();
+                            terminal.update(cx, |t, _cx| {
+                                t.input(format!("cd {:?}\n", path_str).into_bytes());
+                            });
+                        }
+                    }
+                }
+            }
             self.current_dir = entry.path;
             cx.notify();
         } else {
@@ -165,6 +178,20 @@ impl Render for FileListPanel {
                     .child(
                         h_flex()
                             .gap_1()
+                            .child(
+                                IconButton::new("show-terminal-list", IconName::Terminal)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text(i18n::t("terminal_list")))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(crate::terminal_list_panel::ToggleFocus), cx);
+                                    }),
+                            )
+                            .child(
+                                IconButton::new("show-file-list", IconName::File)
+                                    .icon_size(IconSize::Small)
+                                    .toggle_state(true)
+                                    .tooltip(Tooltip::text(i18n::t("file_list"))),
+                            )
                             .child(
                                 IconButton::new("navigate-up", IconName::ArrowUp)
                                     .icon_size(IconSize::Small)

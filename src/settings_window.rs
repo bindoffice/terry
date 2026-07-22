@@ -41,6 +41,8 @@ const LANGUAGE_LABELS: &[&str] = &[
 pub struct SettingsWindow {
     focus_handle: FocusHandle,
     language_menu: Entity<ContextMenu>,
+    font_size_menu: Entity<ContextMenu>,
+    font_family_menu: Entity<ContextMenu>,
     last_language: Option<UiLanguage>,
 }
 
@@ -49,11 +51,15 @@ impl SettingsWindow {
         let focus_handle = cx.focus_handle();
         let language = Self::current_language(cx);
         let language_menu = build_language_menu(language, window, cx);
+        let font_size_menu = build_font_size_menu(window, cx);
+        let font_family_menu = build_font_family_menu(window, cx);
         cx.observe_global::<SettingsStore>(|_, cx| cx.notify())
             .detach();
         Self {
             focus_handle,
             language_menu,
+            font_size_menu,
+            font_family_menu,
             last_language: Some(language),
         }
     }
@@ -95,7 +101,12 @@ impl Render for SettingsWindow {
             self.last_language = Some(language);
         }
 
+        self.font_family_menu = build_font_family_menu(window, cx);
+        self.font_size_menu = build_font_size_menu(window, cx);
+
         let language_label = Self::current_language_label(cx);
+        let current_font_size = theme_settings::ThemeSettings::get_global(cx).buffer_font_size(cx);
+        let current_font_family = theme_settings::ThemeSettings::get_global(cx).buffer_font.family.clone();
 
         div()
             .id("ink-settings")
@@ -140,6 +151,28 @@ impl Render for SettingsWindow {
                             .flex_col()
                             .gap_1()
                             .child(Label::new(i18n::t("appearance")))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        DropdownMenu::new(
+                                            "ui-font-family",
+                                            current_font_family.clone(),
+                                            self.font_family_menu.clone(),
+                                        )
+                                        .style(ui::DropdownStyle::Outlined)
+                                        .trigger_size(ButtonSize::Medium),
+                                    )
+                                    .child(
+                                        DropdownMenu::new(
+                                            "ui-font-size",
+                                            format!("{}px", f32::from(current_font_size)),
+                                            self.font_size_menu.clone(),
+                                        )
+                                        .style(ui::DropdownStyle::Outlined)
+                                        .trigger_size(ButtonSize::Medium),
+                                    )
+                            )
                             .child(
                                 Button::new("select-theme", i18n::t("select_theme"))
                                     .style(ButtonStyle::Outlined)
@@ -203,6 +236,60 @@ fn build_language_menu(
                     let fs = <dyn Fs>::global(cx);
                     update_settings_file(fs, cx, move |content, _| {
                         content.ui_language = Some(variant);
+                    });
+                },
+            );
+        }
+        menu
+    })
+}
+
+fn build_font_size_menu(window: &mut Window, cx: &mut App) -> Entity<ContextMenu> {
+    ContextMenu::build(window, cx, |mut menu, _, _| {
+        for size in [11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 24.0] {
+            let label = format!("{}", size);
+            menu = menu.entry(
+                label,
+                None,
+                move |_window, cx| {
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content.theme.buffer_font_size = Some(settings::FontSize(size));
+                        content.theme.ui_font_size = Some(settings::FontSize(size));
+                        content.terminal.get_or_insert_default().font_size = Some(settings::FontSize(size));
+                    });
+                },
+            );
+        }
+        menu
+    })
+}
+
+fn build_font_family_menu(window: &mut Window, cx: &mut App) -> Entity<ContextMenu> {
+    ContextMenu::build(window, cx, |mut menu, _, _| {
+        for family in [
+            ".SystemUIFont",
+            "Menlo",
+            "Monaco",
+            "Consolas",
+            "Courier New",
+            "Fira Code",
+            "JetBrains Mono",
+            "Hack"
+        ] {
+            let family_str = family.to_string();
+            let label = if family == ".SystemUIFont" { "System" } else { family };
+            menu = menu.entry(
+                label.to_string(),
+                None,
+                move |_window, cx| {
+                    let fs = <dyn Fs>::global(cx);
+                    let font_family = family_str.clone();
+                    update_settings_file(fs, cx, move |content, _| {
+                        let name = settings::FontFamilyName(std::sync::Arc::from(font_family.as_str()));
+                        content.theme.buffer_font_family = Some(name.clone());
+                        content.theme.ui_font_family = Some(name.clone());
+                        content.terminal.get_or_insert_default().font_family = Some(name);
                     });
                 },
             );

@@ -500,8 +500,12 @@ impl Render for TerminalListPanel {
                                     )
                             }),
                     )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.switch_group(group_id, window, cx);
+                    .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                        if event.click_count() == 2 {
+                            this.start_renaming(group_id, window, cx);
+                        } else {
+                            this.switch_group(group_id, window, cx);
+                        }
                     }))
                     .into_any_element(),
             );
@@ -551,6 +555,20 @@ impl Render for TerminalListPanel {
                     .child(
                         h_flex()
                             .gap_1()
+                            .child(
+                                IconButton::new("show-terminal-list", IconName::Terminal)
+                                    .icon_size(IconSize::Small)
+                                    .toggle_state(true)
+                                    .tooltip(Tooltip::text(i18n::t("terminal_list"))),
+                            )
+                            .child(
+                                IconButton::new("show-file-list", IconName::File)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text(i18n::t("file_list")))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(crate::file_list_panel::ToggleFocus), cx);
+                                    }),
+                            )
                             .child(
                                 IconButton::new("new-group", IconName::FolderAdd)
                                     .icon_size(IconSize::Small)
