@@ -10,6 +10,28 @@ use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 use workspace::{ItemHandle, Pane};
 
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PersistedTerminal {
+    cwd: Option<PathBuf>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PersistedGroup {
+    name: String,
+    collapsed: bool,
+    terminals: Vec<PersistedTerminal>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PersistedSession {
+    groups: Vec<PersistedGroup>,
+    active_group_index: usize,
+}
+
+
 actions!(
     terminal_list_panel,
     [
@@ -37,6 +59,8 @@ struct TerminalGroup {
     name: SharedString,
     terminals: Vec<Entity<TerminalView>>,
     collapsed: bool,
+    #[allow(dead_code)]
+    pub has_unread: bool,
 }
 
 pub struct TerminalListPanel {
@@ -78,6 +102,9 @@ impl TerminalListPanel {
         })
         .detach();
 
+
+
+
         Self {
             workspace: workspace.downgrade(),
             project: project.downgrade(),
@@ -95,8 +122,90 @@ impl TerminalListPanel {
     }
 
     /// Creates the initial group (with one terminal) if none exists yet.
+
+    fn session_file_path() -> PathBuf {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("ink/sessions/default.json")
+    }
+
+    pub fn save_session(&self, cx: &App) {
+        let mut session = PersistedSession {
+            groups: Vec::new(),
+            active_group_index: 0,
+        };
+
+        for (i, group) in self.groups.iter().enumerate() {
+            if group.id == self.active_group_id {
+                session.active_group_index = i;
+            }
+
+            let mut p_group = PersistedGroup {
+                name: group.name.to_string(),
+                collapsed: group.collapsed,
+                terminals: Vec::new(),
+            };
+
+            for view_ent in &group.terminals {
+                let cwd = view_ent.read(cx).terminal().read(cx).working_directory();
+                p_group.terminals.push(PersistedTerminal { cwd });
+            }
+
+            session.groups.push(p_group);
+        }
+
+        let path = Self::session_file_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let json = serde_json::to_string(&session).unwrap_or_default();
+        std::fs::write(path, json).ok();
+    }
+
+    pub fn load_persisted_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let path = Self::session_file_path();
+        let Ok(data) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        let Ok(session): Result<PersistedSession, _> = serde_json::from_str(&data) else {
+            return false;
+        };
+
+        if session.groups.is_empty() {
+            return false;
+        }
+
+        for (i, p_group) in session.groups.into_iter().enumerate() {
+            let id = self.new_group_id();
+            let name = SharedString::from(p_group.name);
+            self.groups.push(TerminalGroup {
+                id,
+                name,
+                terminals: Vec::new(),
+                collapsed: p_group.collapsed,
+                has_unread: false,
+            });
+            
+            if i == session.active_group_index {
+                self.active_group_id = id;
+            }
+
+            for p_term in p_group.terminals {
+                self.spawn_terminal(id, p_term.cwd, window, cx);
+            }
+        }
+        
+        // After loading groups, switch to the active one
+        self.switch_group(self.active_group_id, window, cx);
+        true
+    }
+
     pub fn create_default_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.groups.is_empty() {
+            return;
+        }
+
+        if self.load_persisted_session(window, cx) {
             return;
         }
         let id = self.new_group_id();
@@ -105,9 +214,11 @@ impl TerminalListPanel {
             name: SharedString::from(i18n::t("terminals")),
             terminals: Vec::new(),
             collapsed: false,
+            has_unread: false,
         });
         self.active_group_id = id;
-        self.spawn_terminal(id, window, cx);
+        self.spawn_terminal(id, None, window, cx);
+        self.save_session(cx);
     }
 
     fn new_group_id(&mut self) -> GroupId {
@@ -130,7 +241,8 @@ impl TerminalListPanel {
 
     /// Adds a new terminal to the currently active group.
     fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.spawn_terminal(self.active_group_id, window, cx);
+        self.spawn_terminal(self.active_group_id, None, window, cx);
+        self.save_session(cx);
     }
 
     /// Creates a new group, switches to it and spawns its first terminal.
@@ -142,18 +254,20 @@ impl TerminalListPanel {
             name,
             terminals: Vec::new(),
             collapsed: false,
+            has_unread: false,
         });
         self.switch_group(id, window, cx);
-        self.spawn_terminal(id, window, cx);
+        self.spawn_terminal(id, None, window, cx);
+        self.save_session(cx);
     }
 
     /// Spawns a shell terminal and attaches it to the given group. The
     /// terminal is only displayed if that group is still active by the time
     /// the (async) terminal is ready.
-    fn spawn_terminal(&mut self, group_id: GroupId, window: &mut Window, cx: &mut Context<Self>) {
+    fn spawn_terminal(&mut self, group_id: GroupId, cwd: Option<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let project = self.project.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let working_directory = std::env::current_dir().ok();
+            let working_directory = cwd.or_else(|| std::env::current_dir().ok());
             let terminal = project
                 .update(cx, |project, cx| {
                     project.create_terminal_shell(working_directory, cx)

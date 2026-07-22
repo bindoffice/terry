@@ -23,3 +23,5 @@ gpui.workspace = true
 uuid.workspace = true
 util.workspace = true
 serde_json.workspace = true
+axum = "0.8.9"
+tokio = { workspace = true, features = ["full"] }

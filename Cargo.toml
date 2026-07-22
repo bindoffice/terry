@@ -68,6 +68,9 @@ watch.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
 zlog.workspace = true
+serde = { workspace = true, features = ["derive"] }
+dirs.workspace = true
+serde_json.workspace = true
 
 [workspace]
 resolver = "2"
@@ -257,7 +260,7 @@ members = [
     "crates/zeta_prompt",
     "crates/zlog",
     "crates/ztracing",
-    "crates/ztracing_macro",
+    "crates/ztracing_macro", "ink-mcp-server",
     "tooling/perf",
 ]
 
