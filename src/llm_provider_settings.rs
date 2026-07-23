@@ -106,7 +106,7 @@ impl LlmProviderSettingsWindow {
         }
         let editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("Paste your API key…", window, cx);
+            editor.set_placeholder_text(i18n::t("paste_api_key").as_str(), window, cx);
             editor
         });
         self.api_key_editors
@@ -243,20 +243,20 @@ impl LlmProviderSettingsWindow {
 
         if has_key {
             let configured_label = if is_from_env_var {
-                "API key set in environment variable"
+                i18n::t("api_key_set_in_env")
             } else {
-                "API key configured"
+                i18n::t("api_key_configured")
             };
             let card = ConfiguredApiCard::new(
                 SharedString::from(format!("reset-api-key-{}", provider_id.0)),
                 configured_label,
             )
-            .button_label("Reset Key")
+            .button_label(i18n::t("reset_key"))
             .disabled(is_from_env_var)
             .when(is_from_env_var, |this| {
-                this.tooltip_label(format!(
-                    "To reset your API key, unset the {env_var_name} environment variable."
-                ))
+                this.tooltip_label(
+                    i18n::t("reset_api_key_env_hint").replace("{env_var}", env_var_name.as_ref()),
+                )
             })
             .on_click({
                 let provider = provider.clone();
@@ -279,10 +279,13 @@ impl LlmProviderSettingsWindow {
                     .min_w_0()
                     .flex_wrap()
                     .gap_0p5()
-                    .child(Label::new("Visit the").size(LabelSize::Small).color(Color::Muted))
+                    .child(Label::new(i18n::t("visit_the")).size(LabelSize::Small).color(Color::Muted))
                     .child(
                         ButtonLink::new(
-                            SharedString::from(format!("{provider_name} dashboard")),
+                            SharedString::from(
+                                i18n::t("provider_dashboard")
+                                    .replace("{provider}", provider_name.as_ref()),
+                            ),
                             api_key_url.to_string(),
                         )
                         .no_icon(true)
@@ -290,15 +293,15 @@ impl LlmProviderSettingsWindow {
                         .label_color(Color::Muted),
                     )
                     .child(
-                        Label::new("to generate an API key.")
+                        Label::new(i18n::t("to_generate_api_key"))
                             .size(LabelSize::Small)
                             .color(Color::Muted),
                     ),
             )
             .child(
-                Label::new(format!(
-                    "Or set the {env_var_name} environment variable and restart for it to take effect."
-                ))
+                Label::new(
+                    i18n::t("or_set_env_var").replace("{env_var}", env_var_name.as_ref()),
+                )
                 .size(LabelSize::XSmall)
                 .color(Color::Muted),
             )
@@ -332,7 +335,7 @@ impl LlmProviderSettingsWindow {
                     .child(
                         Button::new(
                             SharedString::from(format!("save-api-key-{}", provider_id.0)),
-                            "Save",
+                            i18n::t("save"),
                         )
                         .style(ButtonStyle::Filled)
                         .size(ButtonSize::Medium)
@@ -401,12 +404,12 @@ fn render_inline_description(description: InlineDescription) -> AnyElement {
         InlineDescription::ApiKeyUrl(url) => h_flex()
             .gap_0p5()
             .child(
-                Label::new("To find an API key, visit the")
+                Label::new(i18n::t("to_find_api_key"))
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             )
             .child(
-                ButtonLink::new(SharedString::from("provider dashboard."), url.to_string())
+                ButtonLink::new(SharedString::from(i18n::t("provider_dashboard_dot")), url.to_string())
                     .label_size(LabelSize::Small),
             )
             .into_any_element(),

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Terry
+GenericName=Terminal
+Comment=Terry terminal workspace
+Exec=terry
+Icon=terry
+Terminal=false
+Categories=Development;System;TerminalEmulator;
+StartupWMClass=Terry
+Keywords=terminal;shell;console;

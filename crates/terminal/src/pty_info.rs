@@ -191,6 +191,13 @@ impl PtyProcessInfo {
         Some(info)
     }
 
+    /// Synchronously refreshes process info and returns a non-empty cwd, if known.
+    pub(crate) fn latest_cwd(&self) -> Option<PathBuf> {
+        self.load()
+            .map(|info| info.cwd)
+            .filter(|cwd| !cwd.as_os_str().is_empty())
+    }
+
     #[cfg(all(test, unix))]
     pub(crate) fn load_for_test(&self) -> Option<ProcessInfo> {
         self.load()

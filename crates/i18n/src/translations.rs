@@ -9,6 +9,16 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "Terminals");
             m.insert("new_terminal", "New Terminal");
+            m.insert("new_center_terminal", "New Center Terminal");
+            m.insert("new_ellipsis", "New…");
+            m.insert("new_file", "New File");
+            m.insert("open_file", "Open File");
+            m.insert("search_project", "Search Project");
+            m.insert("search_symbols", "Search Symbols");
+            m.insert("rename", "Rename");
+            m.insert("move_up", "Move Up");
+            m.insert("move_down", "Move Down");
+            m.insert("close", "Close");
             m.insert("terminal_list", "Terminal List");
             m.insert("group", "Group");
             m.insert("new_group", "New Group");
@@ -43,12 +53,96 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
                 "llm_providers_description",
                 "Configure API keys and settings for your AI providers.",
             );
+            m.insert("agent", "Agent");
+            m.insert("split_pane", "Split Pane");
+            m.insert("split_right", "Split Right");
+            m.insert("split_left", "Split Left");
+            m.insert("split_up", "Split Up");
+            m.insert("split_down", "Split Down");
+            m.insert("zoom_in", "Zoom In");
+            m.insert("zoom_out", "Zoom Out");
+            m.insert("about_terry", "About Terry");
+            m.insert("about_terry_description", "A terminal-focused workspace.");
+            m.insert("ok", "OK");
+            m.insert("services", "Services");
+            m.insert("hide_terry", "Hide Terry");
+            m.insert("hide_others", "Hide Others");
+            m.insert("show_all", "Show All");
+            m.insert("quit_terry", "Quit Terry");
+            m.insert("menu_edit", "Edit");
+            m.insert("menu_view", "View");
+            m.insert("menu_window", "Window");
+            m.insert("undo", "Undo");
+            m.insert("redo", "Redo");
+            m.insert("cut", "Cut");
+            m.insert("copy", "Copy");
+            m.insert("paste", "Paste");
+            m.insert("paste_text", "Paste Text");
+            m.insert("select_all", "Select All");
+            m.insert("clear", "Clear");
+            m.insert("inline_assist", "Inline Assist");
+            m.insert("add_to_agent_thread", "Add to Agent Thread");
+            m.insert("close_terminal_tab", "Close Terminal Tab");
+            m.insert("toggle_left_dock", "Toggle Left Dock");
+            m.insert("toggle_right_dock", "Toggle Right Dock");
+            m.insert("toggle_bottom_dock", "Toggle Bottom Dock");
+            m.insert("toggle_all_docks", "Toggle All Docks");
+            m.insert("terminal_panel", "Terminal Panel");
+            m.insert("command_palette", "Command Palette…");
+            m.insert("minimize", "Minimize");
+            m.insert("zoom", "Zoom");
+            m.insert("toggle_full_screen", "Toggle Full Screen");
+            m.insert("visit_the", "Visit the");
+            m.insert("provider_dashboard", "{provider} dashboard");
+            m.insert("to_generate_api_key", "to generate an API key.");
+            m.insert(
+                "or_set_env_var",
+                "Or set the {env_var} environment variable and restart for it to take effect.",
+            );
+            m.insert("save", "Save");
+            m.insert("reset_key", "Reset Key");
+            m.insert("api_key_set_in_env", "API key set in environment variable");
+            m.insert("api_key_configured", "API key configured");
+            m.insert(
+                "reset_api_key_env_hint",
+                "To reset your API key, unset the {env_var} environment variable.",
+            );
+            m.insert("paste_api_key", "Paste your API key…");
+            m.insert("to_find_api_key", "To find an API key, visit the");
+            m.insert("provider_dashboard_dot", "provider dashboard.");
+            m.insert("get_started", "Get Started");
+            m.insert("open_project", "Open Project");
+            m.insert("open_command_palette", "Open Command Palette");
+            m.insert("configure", "Configure");
+            m.insert("open_settings", "Open Settings");
+            m.insert("customize_keymaps", "Customize Keymaps");
+            m.insert("explore_extensions", "Explore Extensions");
+            m.insert("welcome_to_terry", "Welcome to Terry");
+            m.insert("welcome_back_to_terry", "Welcome back to Terry");
+            m.insert("terry_tagline", "The terminal workspace for what's next");
+            m.insert("return_to_onboarding", "Return to Onboarding");
+            m.insert("collaborate_with_agents", "Collaborate with Agents");
+            m.insert("open_agent_panel", "Open Agent Panel");
+            m.insert(
+                "agent_card_description",
+                "Run multiple threads at once, mix and match any ACP-compatible agent, and keep work conflict-free with worktrees.",
+            );
             m
         });
         locales.insert("zh-CN", {
             let mut m = HashMap::new();
             m.insert("terminals", "终端");
             m.insert("new_terminal", "新建终端");
+            m.insert("new_center_terminal", "新建中间终端");
+            m.insert("new_ellipsis", "新建…");
+            m.insert("new_file", "新建文件");
+            m.insert("open_file", "打开文件");
+            m.insert("search_project", "搜索项目");
+            m.insert("search_symbols", "搜索符号");
+            m.insert("rename", "重命名");
+            m.insert("move_up", "上移");
+            m.insert("move_down", "下移");
+            m.insert("close", "关闭");
             m.insert("terminal_list", "终端列表");
             m.insert("group", "分组");
             m.insert("new_group", "新建分组");
@@ -77,12 +171,104 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
                 "llm_providers_description",
                 "配置 AI 服务商的 API Key 和相关设置。",
             );
+            m.insert("agent", "Agent");
+            m.insert("split_pane", "分屏");
+            m.insert("split_right", "向右分屏");
+            m.insert("split_left", "向左分屏");
+            m.insert("split_up", "向上分屏");
+            m.insert("split_down", "向下分屏");
+            m.insert("zoom_in", "放大");
+            m.insert("zoom_out", "缩小");
+            m.insert("about_terry", "关于 Terry");
+            m.insert("about_terry_description", "以终端为中心的工作区。");
+            m.insert("ok", "好");
+            m.insert("services", "服务");
+            m.insert("hide_terry", "隐藏 Terry");
+            m.insert("hide_others", "隐藏其他");
+            m.insert("show_all", "全部显示");
+            m.insert("quit_terry", "退出 Terry");
+            m.insert("menu_edit", "编辑");
+            m.insert("menu_view", "显示");
+            m.insert("menu_window", "窗口");
+            m.insert("undo", "撤销");
+            m.insert("redo", "重做");
+            m.insert("cut", "剪切");
+            m.insert("copy", "拷贝");
+            m.insert("paste", "粘贴");
+            m.insert("paste_text", "粘贴纯文本");
+            m.insert("select_all", "全选");
+            m.insert("clear", "清屏");
+            m.insert("inline_assist", "行内助手");
+            m.insert("add_to_agent_thread", "添加到 Agent 会话");
+            m.insert("close_terminal_tab", "关闭终端标签");
+            m.insert("toggle_left_dock", "切换左侧停靠栏");
+            m.insert("toggle_right_dock", "切换右侧停靠栏");
+            m.insert("toggle_bottom_dock", "切换底部停靠栏");
+            m.insert("toggle_all_docks", "切换全部停靠栏");
+            m.insert("terminal_panel", "终端面板");
+            m.insert("command_palette", "命令面板…");
+            m.insert("minimize", "最小化");
+            m.insert("zoom", "缩放");
+            m.insert("toggle_full_screen", "切换全屏");
+            m.insert("visit_the", "请访问");
+            m.insert("provider_dashboard", "{provider} 控制台");
+            m.insert("to_generate_api_key", "以生成 API Key。");
+            m.insert(
+                "or_set_env_var",
+                "或设置环境变量 {env_var} 并重启后生效。",
+            );
+            m.insert("save", "保存");
+            m.insert("reset_key", "重置密钥");
+            m.insert("api_key_set_in_env", "API Key 已通过环境变量设置");
+            m.insert("api_key_configured", "已配置 API Key");
+            m.insert(
+                "reset_api_key_env_hint",
+                "要重置 API Key，请取消设置环境变量 {env_var}。",
+            );
+            m.insert("paste_api_key", "粘贴你的 API Key…");
+            m.insert("to_find_api_key", "查找 API Key，请访问");
+            m.insert("provider_dashboard_dot", "服务商控制台。");
+            m.insert("get_started", "开始使用");
+            m.insert("open_project", "打开项目");
+            m.insert("open_command_palette", "打开命令面板");
+            m.insert("configure", "配置");
+            m.insert("open_settings", "打开设置");
+            m.insert("customize_keymaps", "自定义快捷键");
+            m.insert("explore_extensions", "浏览扩展");
+            m.insert("welcome_to_terry", "欢迎使用 Terry");
+            m.insert("welcome_back_to_terry", "欢迎回到 Terry");
+            m.insert("terry_tagline", "面向下一步的终端工作区");
+            m.insert("return_to_onboarding", "返回引导");
+            m.insert("collaborate_with_agents", "与 Agent 协作");
+            m.insert("open_agent_panel", "打开 Agent 面板");
+            m.insert(
+                "agent_card_description",
+                "同时运行多个线程，自由组合 ACP 兼容 Agent，并用 worktree 避免冲突。",
+            );
             m
         });
         locales.insert("zh-TW", {
             let mut m = HashMap::new();
             m.insert("terminals", "終端機");
             m.insert("new_terminal", "新增終端機");
+            m.insert("new_center_terminal", "新增中間終端機");
+            m.insert("new_ellipsis", "新增…");
+            m.insert("new_file", "新增檔案");
+            m.insert("open_file", "開啟檔案");
+            m.insert("search_project", "搜尋專案");
+            m.insert("search_symbols", "搜尋符號");
+            m.insert("rename", "重新命名");
+            m.insert("move_up", "上移");
+            m.insert("move_down", "下移");
+            m.insert("close", "關閉");
+            m.insert("copy", "拷貝");
+            m.insert("paste", "貼上");
+            m.insert("paste_text", "貼上純文字");
+            m.insert("select_all", "全選");
+            m.insert("clear", "清除");
+            m.insert("inline_assist", "行內助手");
+            m.insert("add_to_agent_thread", "加入 Agent 工作階段");
+            m.insert("close_terminal_tab", "關閉終端機標籤");
             m.insert("terminal_list", "終端機列表");
             m.insert("group", "分組");
             m.insert("new_group", "新增分組");
@@ -97,12 +283,40 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("select_theme", "選擇主題…");
             m.insert("settings", "設定");
             m.insert("open_recent_project", "開啟最近專案");
+            m.insert("agent", "Agent");
+            m.insert("split_pane", "分割窗格");
+            m.insert("get_started", "開始使用");
+            m.insert("open_project", "開啟專案");
+            m.insert("configure", "設定");
+            m.insert("welcome_to_terry", "歡迎使用 Terry");
+            m.insert("welcome_back_to_terry", "歡迎回到 Terry");
+            m.insert("terry_tagline", "面向下一步的終端機工作區");
+            m.insert("recent_terminals", "最近終端機");
+            m.insert("recent_folders", "最近資料夾");
             m
         });
         locales.insert("ja", {
             let mut m = HashMap::new();
             m.insert("terminals", "ターミナル");
             m.insert("new_terminal", "新しいターミナル");
+            m.insert("new_center_terminal", "中央に新しいターミナル");
+            m.insert("new_ellipsis", "新規…");
+            m.insert("new_file", "新しいファイル");
+            m.insert("open_file", "ファイルを開く");
+            m.insert("search_project", "プロジェクトを検索");
+            m.insert("search_symbols", "シンボルを検索");
+            m.insert("rename", "名前を変更");
+            m.insert("move_up", "上へ移動");
+            m.insert("move_down", "下へ移動");
+            m.insert("close", "閉じる");
+            m.insert("copy", "コピー");
+            m.insert("paste", "貼り付け");
+            m.insert("paste_text", "テキストを貼り付け");
+            m.insert("select_all", "すべて選択");
+            m.insert("clear", "クリア");
+            m.insert("inline_assist", "インラインアシスト");
+            m.insert("add_to_agent_thread", "Agent スレッドに追加");
+            m.insert("close_terminal_tab", "ターミナルタブを閉じる");
             m.insert("terminal_list", "ターミナル一覧");
             m.insert("group", "グループ");
             m.insert("new_group", "新しいグループ");
@@ -120,12 +334,40 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("select_theme", "テーマを選択…");
             m.insert("settings", "設定");
             m.insert("open_recent_project", "最近のプロジェクトを開く");
+            m.insert("agent", "Agent");
+            m.insert("split_pane", "ペインを分割");
+            m.insert("get_started", "はじめに");
+            m.insert("open_project", "プロジェクトを開く");
+            m.insert("configure", "設定");
+            m.insert("welcome_to_terry", "Terry へようこそ");
+            m.insert("welcome_back_to_terry", "おかえりなさい");
+            m.insert("terry_tagline", "次へ進むためのターミナルワークスペース");
+            m.insert("recent_terminals", "最近のターミナル");
+            m.insert("recent_folders", "最近のフォルダ");
             m
         });
         locales.insert("ko", {
             let mut m = HashMap::new();
             m.insert("terminals", "터미널");
             m.insert("new_terminal", "새 터미널");
+            m.insert("new_center_terminal", "중앙에 새 터미널");
+            m.insert("new_ellipsis", "새로 만들기…");
+            m.insert("new_file", "새 파일");
+            m.insert("open_file", "파일 열기");
+            m.insert("search_project", "프로젝트 검색");
+            m.insert("search_symbols", "심볼 검색");
+            m.insert("rename", "이름 바꾸기");
+            m.insert("move_up", "위로 이동");
+            m.insert("move_down", "아래로 이동");
+            m.insert("close", "닫기");
+            m.insert("copy", "복사");
+            m.insert("paste", "붙여넣기");
+            m.insert("paste_text", "텍스트 붙여넣기");
+            m.insert("select_all", "모두 선택");
+            m.insert("clear", "지우기");
+            m.insert("inline_assist", "인라인 어시스트");
+            m.insert("add_to_agent_thread", "Agent 스레드에 추가");
+            m.insert("close_terminal_tab", "터미널 탭 닫기");
             m.insert("terminal_list", "터미널 목록");
             m.insert("group", "그룹");
             m.insert("new_group", "새 그룹");
@@ -143,6 +385,16 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("select_theme", "테마 선택…");
             m.insert("settings", "설정");
             m.insert("open_recent_project", "최근 프로젝트 열기");
+            m.insert("agent", "Agent");
+            m.insert("split_pane", "창 분할");
+            m.insert("get_started", "시작하기");
+            m.insert("open_project", "프로젝트 열기");
+            m.insert("configure", "구성");
+            m.insert("welcome_to_terry", "Terry에 오신 것을 환영합니다");
+            m.insert("welcome_back_to_terry", "다시 오신 것을 환영합니다");
+            m.insert("terry_tagline", "다음을 위한 터미널 워크스페이스");
+            m.insert("recent_terminals", "최근 터미널");
+            m.insert("recent_folders", "최근 폴더");
             m
         });
         locales.insert("es", {

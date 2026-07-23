@@ -217,6 +217,20 @@ const CONTENT: (Section<4>, Section<3>) = (
     },
 );
 
+fn localized_content() -> (Section<4>, Section<3>) {
+    let mut content = CONTENT;
+    content.0.title = i18n::t_str("get_started");
+    content.0.entries[0].title = i18n::t_str("new_file");
+    content.0.entries[1].title = i18n::t_str("open_project");
+    content.0.entries[2].title = i18n::t_str("new_terminal");
+    content.0.entries[3].title = i18n::t_str("open_command_palette");
+    content.1.title = i18n::t_str("configure");
+    content.1.entries[0].title = i18n::t_str("open_settings");
+    content.1.entries[1].title = i18n::t_str("customize_keymaps");
+    content.1.entries[2].title = i18n::t_str("explore_extensions");
+    content
+}
+
 struct Section<const COLS: usize> {
     title: &'static str,
     entries: [SectionEntry; COLS],
@@ -329,7 +343,7 @@ impl WelcomePage {
         let focus = self.focus_handle.clone();
         let color = cx.theme().colors();
 
-        let description = "Run multiple threads at once, mix and match any ACP-compatible agent, and keep work conflict-free with worktrees.";
+        let description = i18n::t("agent_card_description");
 
         v_flex()
             .w_full()
@@ -350,7 +364,7 @@ impl WelcomePage {
                             .color(Color::Muted)
                             .size(IconSize::Small),
                     )
-                    .child(Label::new("Collaborate with Agents")),
+                    .child(Label::new(i18n::t("collaborate_with_agents"))),
             )
             .child(
                 Label::new(description)
@@ -359,7 +373,7 @@ impl WelcomePage {
                     .mb_2(),
             )
             .child(
-                Button::new("open-agent", "Open Agent Panel")
+                Button::new("open-agent", i18n::t("open_agent_panel"))
                     .full_width()
                     .tab_index(tab_index as isize)
                     .style(ButtonStyle::Outlined)
@@ -376,7 +390,7 @@ impl WelcomePage {
 
     fn render_recent_section(
         &self,
-        title: &'static str,
+        title: impl Into<SharedString>,
         recent_projects: Vec<impl IntoElement>,
     ) -> impl IntoElement {
         v_flex()
@@ -413,7 +427,7 @@ impl WelcomePage {
 
 impl Render for WelcomePage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (first_section, second_section) = CONTENT;
+        let (first_section, second_section) = localized_content();
         let first_section_entries = first_section.entries.len();
         let mut next_tab_index = first_section_entries + second_section.entries.len();
 
@@ -455,10 +469,16 @@ impl Render for WelcomePage {
             v_flex()
                 .gap_6()
                 .when(!recent_terminals.is_empty(), |this| {
-                    this.child(self.render_recent_section("Recent Terminals", recent_terminals))
+                    this.child(self.render_recent_section(
+                        i18n::t("recent_terminals"),
+                        recent_terminals,
+                    ))
                 })
                 .when(!recent_folders.is_empty(), |this| {
-                    this.child(self.render_recent_section("Recent Folders", recent_folders))
+                    this.child(self.render_recent_section(
+                        i18n::t("recent_folders"),
+                        recent_folders,
+                    ))
                 })
                 .into_any_element()
         } else {
@@ -468,9 +488,9 @@ impl Render for WelcomePage {
         };
 
         let welcome_label = if self.fallback_to_recent_projects {
-            "Welcome back to Zed"
+            i18n::t("welcome_back_to_terry")
         } else {
-            "Welcome to Zed"
+            i18n::t("welcome_to_terry")
         };
 
         h_flex()
@@ -500,7 +520,7 @@ impl Render for WelcomePage {
                             .child(Vector::square(VectorName::ZedLogo, rems_from_px(45.)))
                             .child(
                                 v_flex().child(Headline::new(welcome_label)).child(
-                                    Label::new("The editor for what's next")
+                                    Label::new(i18n::t("terry_tagline"))
                                         .size(LabelSize::Small)
                                         .color(Color::Muted)
                                         .italic(),
@@ -517,7 +537,7 @@ impl Render for WelcomePage {
                     .when(!self.fallback_to_recent_projects, |this| {
                         this.child(
                             v_flex().gap_4().child(Divider::horizontal()).child(
-                                Button::new("welcome-exit", "Return to Onboarding")
+                                Button::new("welcome-exit", i18n::t("return_to_onboarding"))
                                     .tab_index(next_tab_index as isize)
                                     .full_width()
                                     .label_size(LabelSize::XSmall)

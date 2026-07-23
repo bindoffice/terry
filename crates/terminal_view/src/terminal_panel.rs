@@ -439,7 +439,7 @@ impl TerminalPanel {
                         .read(cx)
                         .terminal()
                         .read(cx)
-                        .working_directory()
+                        .latest_working_directory()
                 })
                 .or_else(|| default_working_directory(workspace, cx))
         } else {

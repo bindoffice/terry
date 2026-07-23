@@ -38,8 +38,8 @@ pub fn init(cx: &mut App) {
                 let _ = window.prompt(
                     gpui::PromptLevel::Info,
                     &message,
-                    Some("A terminal-focused editor."),
-                    &["OK"],
+                    Some(i18n::t_str("about_terry_description")),
+                    &[i18n::t_str("ok")],
                     cx,
                 );
             });
@@ -67,69 +67,75 @@ pub fn app_menus(_cx: &App) -> Vec<Menu> {
             name: "Terry".into(),
             disabled: false,
             items: vec![
-                MenuItem::action("About Terry", zed_actions::About),
+                MenuItem::action(i18n::t("about_terry"), zed_actions::About),
                 MenuItem::separator(),
-                MenuItem::action("Settings…", zed_actions::OpenSettings),
+                MenuItem::action(i18n::t("settings"), zed_actions::OpenSettings),
                 MenuItem::action(
-                    "Select Theme…",
+                    i18n::t("select_theme"),
                     zed_actions::theme_selector::Toggle::default(),
                 ),
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]
-                MenuItem::os_submenu("Services", gpui::SystemMenuType::Services),
+                MenuItem::os_submenu(i18n::t("services"), gpui::SystemMenuType::Services),
                 #[cfg(target_os = "macos")]
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]
-                MenuItem::action("Hide Terry", Hide),
+                MenuItem::action(i18n::t("hide_terry"), Hide),
                 #[cfg(target_os = "macos")]
-                MenuItem::action("Hide Others", HideOthers),
+                MenuItem::action(i18n::t("hide_others"), HideOthers),
                 #[cfg(target_os = "macos")]
-                MenuItem::action("Show All", ShowAll),
+                MenuItem::action(i18n::t("show_all"), ShowAll),
                 #[cfg(target_os = "macos")]
                 MenuItem::separator(),
-                MenuItem::action("Quit Terry", zed_actions::Quit),
+                MenuItem::action(i18n::t("quit_terry"), zed_actions::Quit),
             ],
         },
         Menu {
-            name: "Edit".into(),
+            name: i18n::t("menu_edit").into(),
             disabled: false,
             items: vec![
-                MenuItem::os_action("Undo", editor::actions::Undo, OsAction::Undo),
-                MenuItem::os_action("Redo", editor::actions::Redo, OsAction::Redo),
+                MenuItem::os_action(i18n::t("undo"), editor::actions::Undo, OsAction::Undo),
+                MenuItem::os_action(i18n::t("redo"), editor::actions::Redo, OsAction::Redo),
                 MenuItem::separator(),
-                MenuItem::os_action("Cut", editor::actions::Cut, OsAction::Cut),
-                MenuItem::os_action("Copy", editor::actions::Copy, OsAction::Copy),
-                MenuItem::os_action("Paste", editor::actions::Paste, OsAction::Paste),
+                MenuItem::os_action(i18n::t("cut"), editor::actions::Cut, OsAction::Cut),
+                MenuItem::os_action(i18n::t("copy"), editor::actions::Copy, OsAction::Copy),
+                MenuItem::os_action(i18n::t("paste"), editor::actions::Paste, OsAction::Paste),
                 MenuItem::separator(),
                 MenuItem::os_action(
-                    "Select All",
+                    i18n::t("select_all"),
                     editor::actions::SelectAll,
                     OsAction::SelectAll,
                 ),
             ],
         },
         Menu {
-            name: "View".into(),
+            name: i18n::t("menu_view").into(),
             disabled: false,
             items: vec![
-                MenuItem::action("Toggle Left Dock", workspace::ToggleLeftDock),
-                MenuItem::action("Toggle Right Dock", workspace::ToggleRightDock),
-                MenuItem::action("Toggle Bottom Dock", workspace::ToggleBottomDock),
-                MenuItem::action("Toggle All Docks", workspace::ToggleAllDocks),
+                MenuItem::action(i18n::t("toggle_left_dock"), workspace::ToggleLeftDock),
+                MenuItem::action(i18n::t("toggle_right_dock"), workspace::ToggleRightDock),
+                MenuItem::action(i18n::t("toggle_bottom_dock"), workspace::ToggleBottomDock),
+                MenuItem::action(i18n::t("toggle_all_docks"), workspace::ToggleAllDocks),
                 MenuItem::separator(),
-                MenuItem::action("Terminal Panel", terminal_view::terminal_panel::Toggle),
+                MenuItem::action(
+                    i18n::t("terminal_panel"),
+                    terminal_view::terminal_panel::Toggle,
+                ),
                 MenuItem::separator(),
-                MenuItem::action("Command Palette…", zed_actions::command_palette::Toggle),
+                MenuItem::action(
+                    i18n::t("command_palette"),
+                    zed_actions::command_palette::Toggle,
+                ),
             ],
         },
         Menu {
-            name: "Window".into(),
+            name: i18n::t("menu_window").into(),
             disabled: false,
             items: vec![
-                MenuItem::action("Minimize", Minimize),
-                MenuItem::action("Zoom", Zoom),
+                MenuItem::action(i18n::t("minimize"), Minimize),
+                MenuItem::action(i18n::t("zoom"), Zoom),
                 MenuItem::separator(),
-                MenuItem::action("Toggle Full Screen", ToggleFullScreen),
+                MenuItem::action(i18n::t("toggle_full_screen"), ToggleFullScreen),
             ],
         },
     ]

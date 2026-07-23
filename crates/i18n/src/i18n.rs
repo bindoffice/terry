@@ -151,7 +151,13 @@ pub fn active_locale() -> &'static str {
 
 /// Translate `key` for the active locale, falling back to English then the key.
 pub fn t(key: &str) -> String {
-    t_str(key).to_string()
+    let locale = active_locale();
+    TRANSLATIONS
+        .get(locale)
+        .and_then(|m| m.get(key).copied())
+        .or_else(|| TRANSLATIONS.get("en").and_then(|m| m.get(key).copied()))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| key.to_string())
 }
 
 /// Translate `key` returning a borrowed string when possible.

@@ -313,7 +313,7 @@ fn init_workspace(
                     .child(
                         IconButton::new("new-terminal-tab", IconName::Plus)
                             .icon_size(ui::IconSize::Small)
-                            .tooltip(Tooltip::text("New Terminal"))
+                            .tooltip(Tooltip::text(i18n::t("new_terminal")))
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(
                                     Box::new(zed_actions::terminal_list_panel::NewTerminal),
@@ -326,35 +326,38 @@ fn init_workspace(
                             .trigger_with_tooltip(
                                 IconButton::new("new-menu", IconName::ChevronDown)
                                     .icon_size(ui::IconSize::Small),
-                                Tooltip::text("New…"),
+                                Tooltip::text(i18n::t("new_ellipsis")),
                             )
                             .anchor(Anchor::TopRight)
                             .with_handle(new_item_menu_handle)
                             .menu(move |window, cx| {
                                 Some(ContextMenu::build(window, cx, |menu, _, _| {
-                                    menu.action("New File", workspace::NewFile.boxed_clone())
-                                        .action(
-                                            "Open File",
-                                            workspace::ToggleFileFinder::default().boxed_clone(),
-                                        )
-                                        .separator()
-                                        .action(
-                                            "Search Project",
-                                            workspace::DeploySearch::default().boxed_clone(),
-                                        )
-                                        .action(
-                                            "Search Symbols",
-                                            workspace::ToggleProjectSymbols.boxed_clone(),
-                                        )
-                                        .separator()
-                                        .action(
-                                            "New Terminal",
-                                            workspace::NewTerminal::default().boxed_clone(),
-                                        )
-                                        .action(
-                                            "New Center Terminal",
-                                            workspace::NewCenterTerminal::default().boxed_clone(),
-                                        )
+                                    menu.action(
+                                        i18n::t("new_file"),
+                                        workspace::NewFile.boxed_clone(),
+                                    )
+                                    .action(
+                                        i18n::t("open_file"),
+                                        workspace::ToggleFileFinder::default().boxed_clone(),
+                                    )
+                                    .separator()
+                                    .action(
+                                        i18n::t("search_project"),
+                                        workspace::DeploySearch::default().boxed_clone(),
+                                    )
+                                    .action(
+                                        i18n::t("search_symbols"),
+                                        workspace::ToggleProjectSymbols.boxed_clone(),
+                                    )
+                                    .separator()
+                                    .action(
+                                        i18n::t("new_terminal"),
+                                        workspace::NewTerminal::default().boxed_clone(),
+                                    )
+                                    .action(
+                                        i18n::t("new_center_terminal"),
+                                        workspace::NewCenterTerminal::default().boxed_clone(),
+                                    )
                                 }))
                             }),
                     )
@@ -364,7 +367,7 @@ fn init_workspace(
                                 IconButton::new("split", IconName::Split)
                                     .icon_size(ui::IconSize::Small)
                                     .disabled(!can_clone && !can_split_move),
-                                Tooltip::text("Split Pane"),
+                                Tooltip::text(i18n::t("split_pane")),
                             )
                             .anchor(Anchor::TopRight)
                             .with_handle(split_item_menu_handle)
@@ -373,24 +376,36 @@ fn init_workspace(
                                     let mode = SplitMode::MovePane;
                                     if can_split_move {
                                         menu.action(
-                                            "Split Right",
+                                            i18n::t("split_right"),
                                             SplitRight { mode }.boxed_clone(),
                                         )
-                                        .action("Split Left", SplitLeft { mode }.boxed_clone())
-                                        .action("Split Up", SplitUp { mode }.boxed_clone())
-                                        .action("Split Down", SplitDown { mode }.boxed_clone())
+                                        .action(
+                                            i18n::t("split_left"),
+                                            SplitLeft { mode }.boxed_clone(),
+                                        )
+                                        .action(
+                                            i18n::t("split_up"),
+                                            SplitUp { mode }.boxed_clone(),
+                                        )
+                                        .action(
+                                            i18n::t("split_down"),
+                                            SplitDown { mode }.boxed_clone(),
+                                        )
                                     } else {
                                         menu.action(
-                                            "Split Right",
+                                            i18n::t("split_right"),
                                             SplitRight::default().boxed_clone(),
                                         )
                                         .action(
-                                            "Split Left",
+                                            i18n::t("split_left"),
                                             SplitLeft::default().boxed_clone(),
                                         )
-                                        .action("Split Up", SplitUp::default().boxed_clone())
                                         .action(
-                                            "Split Down",
+                                            i18n::t("split_up"),
+                                            SplitUp::default().boxed_clone(),
+                                        )
+                                        .action(
+                                            i18n::t("split_down"),
                                             SplitDown::default().boxed_clone(),
                                         )
                                     }
@@ -409,7 +424,11 @@ fn init_workspace(
                             }))
                             .tooltip(move |_window, cx| {
                                 Tooltip::for_action(
-                                    if zoomed { "Zoom Out" } else { "Zoom In" },
+                                    if zoomed {
+                                        i18n::t("zoom_out")
+                                    } else {
+                                        i18n::t("zoom_in")
+                                    },
                                     &ToggleZoom,
                                     cx,
                                 )

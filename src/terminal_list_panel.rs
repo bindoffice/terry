@@ -198,7 +198,7 @@ impl TerminalListPanel {
             }
 
             for p_term in p_group.terminals {
-                self.spawn_terminal(id, p_term.cwd, window, cx);
+                self.spawn_terminal(id, p_term.cwd, None, window, cx);
             }
         }
 
@@ -227,7 +227,7 @@ impl TerminalListPanel {
             });
             self.active_group_id = id;
             for cwd in project_dirs {
-                self.spawn_terminal(id, Some(cwd), window, cx);
+                self.spawn_terminal(id, Some(cwd), None, window, cx);
             }
             self.save_session(cx);
             return;
@@ -245,7 +245,7 @@ impl TerminalListPanel {
             has_unread: false,
         });
         self.active_group_id = id;
-        self.spawn_terminal(id, None, window, cx);
+        self.spawn_terminal(id, None, None, window, cx);
         self.save_session(cx);
     }
 
@@ -291,6 +291,32 @@ impl TerminalListPanel {
         self.new_terminal_in_group(self.active_group_id, window, cx);
     }
 
+    /// Currently focused terminal view (pane active item, else last in the
+    /// active group).
+    fn active_terminal_view(&self, cx: &App) -> Option<Entity<TerminalView>> {
+        if let Some(tv) = self
+            .display_pane_entity(cx)
+            .and_then(|pane| pane.read(cx).active_item())
+            .and_then(|item| item.act_as::<TerminalView>(cx))
+        {
+            return Some(tv);
+        }
+        self.groups
+            .iter()
+            .find(|group| group.id == self.active_group_id)
+            .and_then(|group| group.terminals.last().cloned())
+    }
+
+    /// Live cwd of the currently focused terminal, force-refreshed from the PTY.
+    fn active_terminal_cwd(&self, cx: &App) -> Option<PathBuf> {
+        self.active_terminal_view(cx).and_then(|tv| {
+            tv.read(cx)
+                .terminal()
+                .read(cx)
+                .latest_working_directory()
+        })
+    }
+
     /// Adds a new terminal to the given group, switching to it if needed.
     fn new_terminal_in_group(
         &mut self,
@@ -301,13 +327,15 @@ impl TerminalListPanel {
         if !self.groups.iter().any(|group| group.id == group_id) {
             return;
         }
+        let source = self.active_terminal_view(cx);
+        let cwd = self.active_terminal_cwd(cx);
         if group_id != self.active_group_id {
             self.switch_group(group_id, window, cx);
         }
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
             group.collapsed = false;
         }
-        self.spawn_terminal(group_id, None, window, cx);
+        self.spawn_terminal(group_id, cwd, source, window, cx);
         self.save_session(cx);
     }
 
@@ -322,17 +350,17 @@ impl TerminalListPanel {
             let view2 = panel.clone();
             let view3 = panel.clone();
             let view4 = panel.clone();
-            menu.entry("Rename", None, move |window, cx| {
+            menu.entry(i18n::t("rename"), None, move |window, cx| {
                 view1.update(cx, |this, cx| {
                     this.start_renaming(group_id, window, cx);
                 });
             })
-            .entry("Move Up", None, move |_window, cx| {
+            .entry(i18n::t("move_up"), None, move |_window, cx| {
                 view2.update(cx, |this, cx| {
                     this.move_group_up(group_id, cx);
                 });
             })
-            .entry("Move Down", None, move |_window, cx| {
+            .entry(i18n::t("move_down"), None, move |_window, cx| {
                 view3.update(cx, |this, cx| {
                     this.move_group_down(group_id, cx);
                 });
@@ -348,6 +376,8 @@ impl TerminalListPanel {
 
     /// Creates a new group, switches to it and spawns its first terminal.
     fn create_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let source = self.active_terminal_view(cx);
+        let cwd = self.active_terminal_cwd(cx);
         let id = self.new_group_id();
         let name = SharedString::from(format!("{} {}", i18n::t("group"), id.0 + 1));
         self.groups.push(TerminalGroup {
@@ -358,17 +388,20 @@ impl TerminalListPanel {
             has_unread: false,
         });
         self.switch_group(id, window, cx);
-        self.spawn_terminal(id, None, window, cx);
+        self.spawn_terminal(id, cwd, source, window, cx);
         self.save_session(cx);
     }
 
     /// Spawns a shell terminal and attaches it to the given group. The
     /// terminal is only displayed if that group is still active by the time
     /// the (async) terminal is ready.
+    ///
+    /// When `source` is set, clones that terminal (shell + env) into `cwd`.
     fn spawn_terminal(
         &mut self,
         group_id: GroupId,
         cwd: Option<std::path::PathBuf>,
+        source: Option<Entity<TerminalView>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -385,8 +418,12 @@ impl TerminalListPanel {
                 })
             });
             let terminal = project
-                .update(cx, |project, cx| {
-                    project.create_terminal_shell(working_directory, cx)
+                .update(cx, |project, cx| match source.as_ref() {
+                    Some(view) => {
+                        let terminal = view.read(cx).terminal().clone();
+                        project.clone_terminal(&terminal, cx, working_directory.clone())
+                    }
+                    None => project.create_terminal_shell(working_directory, cx),
                 })?
                 .await?;
 
@@ -472,7 +509,7 @@ impl TerminalListPanel {
             self.active_group_id = id;
         }
         let group_id = self.active_group_id;
-        self.spawn_terminal(group_id, Some(cwd), window, cx);
+        self.spawn_terminal(group_id, Some(cwd), None, window, cx);
         self.save_session(cx);
     }
 
@@ -890,7 +927,7 @@ impl Render for TerminalListPanel {
                                 let terminal_view = terminal_view.clone();
                                 ContextMenu::build(window, cx, move |menu, _, _| {
                                     let display_pane = display_pane.clone();
-                                    menu.entry("Rename", None, move |window, cx| {
+                                    menu.entry(i18n::t("rename"), None, move |window, cx| {
                                         terminal_view.update(cx, |this, cx| {
                                             this.rename_terminal(
                                                 &terminal_view::RenameTerminal,
@@ -900,7 +937,7 @@ impl Render for TerminalListPanel {
                                         });
                                     })
                                     .entry(
-                                        "Close",
+                                        i18n::t("close"),
                                         None,
                                         move |window, cx| {
                                             if let Some(pane) = display_pane.upgrade() {
@@ -958,7 +995,7 @@ impl Render for TerminalListPanel {
                             .child(
                                 IconButton::new("show-agent", IconName::Sparkle)
                                     .icon_size(IconSize::Small)
-                                    .tooltip(Tooltip::text("Agent"))
+                                    .tooltip(Tooltip::text(i18n::t("agent")))
                                     .on_click(|_, window, cx| {
                                         window.dispatch_action(
                                             Box::new(zed_actions::assistant::ToggleFocus),

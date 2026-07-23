@@ -191,7 +191,7 @@ impl Render for FileListPanel {
                             .child(
                                 IconButton::new("show-agent", IconName::Sparkle)
                                     .icon_size(IconSize::Small)
-                                    .tooltip(Tooltip::text("Agent"))
+                                    .tooltip(Tooltip::text(i18n::t("agent")))
                                     .on_click(|_, window, cx| {
                                         window.dispatch_action(
                                             Box::new(zed_actions::assistant::ToggleFocus),

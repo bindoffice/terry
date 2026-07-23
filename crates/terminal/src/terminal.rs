@@ -2709,6 +2709,18 @@ impl Terminal {
         }
     }
 
+    /// Force-refreshes the foreground process cwd. Prefer this when spawning a
+    /// sibling terminal that should inherit the live shell directory.
+    pub fn latest_working_directory(&self) -> Option<PathBuf> {
+        if self.is_remote_terminal {
+            return None;
+        }
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => info.latest_cwd(),
+            TerminalType::DisplayOnly => None,
+        }
+    }
+
     /// Normalizes the command name of the foreground process, if one is known.
     pub fn foreground_process_command_name(&self) -> Option<String> {
         match &self.terminal_type {
@@ -2733,7 +2745,8 @@ impl Terminal {
                 .current
                 .read()
                 .as_ref()
-                .map(|process| process.cwd.clone()),
+                .map(|process| process.cwd.clone())
+                .filter(|cwd| !cwd.as_os_str().is_empty()),
             TerminalType::DisplayOnly => None,
         }
     }
@@ -2921,7 +2934,9 @@ impl Terminal {
     }
 
     pub fn clone_builder(&self, cx: &App, cwd: Option<PathBuf>) -> Task<Result<TerminalBuilder>> {
-        let working_directory = self.working_directory().or_else(|| cwd);
+        // Prefer an explicitly supplied cwd (often a freshly refreshed path)
+        // over the cached title-update value, which can be stale or empty.
+        let working_directory = cwd.or_else(|| self.working_directory());
         TerminalBuilder::new(
             working_directory,
             None,
