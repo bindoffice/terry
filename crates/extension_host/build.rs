@@ -10,8 +10,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Copy them to the OUT_DIR, so we can include them from there, which is supported.
 fn copy_extension_api_rust_files() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = env::var("OUT_DIR")?;
-    let input_dir = PathBuf::from("../extension_api/wit");
+    // Resolve via CARGO_MANIFEST_DIR so this works regardless of build-script cwd
+    // (notably more reliable on Windows CI than a bare relative path).
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
+    let input_dir = manifest_dir.join("../extension_api/wit");
     let output_dir = PathBuf::from(out_dir);
+
+    if !input_dir.is_dir() {
+        return Err(format!(
+            "extension_api wit dir not found at {} (resolved from {})",
+            input_dir.display(),
+            manifest_dir.display()
+        )
+        .into());
+    }
 
     println!("cargo:rerun-if-changed={}", input_dir.display());
 
