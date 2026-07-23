@@ -26,8 +26,11 @@ $TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target
 Write-Host "==> Building terry ($Target)..."
 $env:ZED_BUNDLE = "true"
 $env:RELEASE_VERSION = $Version
-cargo build --release --package terry --target $Target
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& cargo build --release --package terry --target $Target
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "cargo build failed with exit code $LASTEXITCODE"
+    exit $LASTEXITCODE
+}
 
 $Bin = Join-Path $TargetDir "$Target/release/terry.exe"
 if (-not (Test-Path $Bin)) {

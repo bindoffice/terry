@@ -143,6 +143,7 @@ members = [
     "crates/env_var",
     "crates/eval_utils",
     "crates/extension",
+    "crates/extension_api",
     "crates/extension_host",
     "crates/feature_flags",
     "crates/feature_flags_macros",
