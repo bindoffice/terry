@@ -2561,6 +2561,16 @@ fn model_id_to_selection(model_id: &AgentModelId, cx: &App) -> LanguageModelSele
 
 pub static ZED_AGENT_ID: LazyLock<AgentId> = LazyLock::new(|| AgentId::new("Zed Agent"));
 
+/// User-facing label for an agent id. Native agent keeps the stable id
+/// `"Zed Agent"` for persistence but displays as `"Agent"`.
+pub fn display_name_for_agent_id(id: &AgentId) -> SharedString {
+    if id.as_ref() == ZED_AGENT_ID.as_ref() {
+        "Agent".into()
+    } else {
+        id.0.clone()
+    }
+}
+
 impl acp_thread::AgentConnection for NativeAgentConnection {
     fn agent_id(&self) -> AgentId {
         ZED_AGENT_ID.clone()

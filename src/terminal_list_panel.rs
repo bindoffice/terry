@@ -1,7 +1,7 @@
 use editor::{Editor, MultiBufferOffset};
 use gpui::{
     Action, AnyElement, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    Render, SharedString, Subscription, TaskExt, WeakEntity, Window, actions, div, px,
+    Render, SharedString, Subscription, TaskExt, WeakEntity, Window, div, px,
 };
 use project::Project;
 use terminal_view::TerminalView;
@@ -12,6 +12,7 @@ use ui::{
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 use workspace::{ItemHandle, Pane};
+use zed_actions::terminal_list_panel::{NewTerminal, ToggleFocus};
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -33,16 +34,6 @@ struct PersistedSession {
     groups: Vec<PersistedGroup>,
     active_group_index: usize,
 }
-
-actions!(
-    terminal_list_panel,
-    [
-        /// Toggles focus on the terminal list panel.
-        ToggleFocus,
-        /// Creates a new terminal in the active group.
-        NewTerminal
-    ]
-);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -103,11 +94,14 @@ impl TerminalListPanel {
         let _workspace_subscription = cx.subscribe(&workspace, |this, _, event, cx| {
             this.on_workspace_event(event, cx);
         });
-        let _project_subscription = cx.subscribe(&project, |this, _project, event, cx| {
-            if let project::Event::WorktreeAdded(id) = event {
-                this.on_worktree_added(*id, cx);
-            }
-        });
+        // Use subscribe_in so WorktreeAdded always has the panel's window —
+        // cx.active_window() is often None during async project open.
+        let _project_subscription =
+            cx.subscribe_in(&project, window, |this, _project, event, window, cx| {
+                if let project::Event::WorktreeAdded(id) = event {
+                    this.on_worktree_added(*id, window, cx);
+                }
+            });
 
         let rename_editor = cx.new(|cx| Editor::single_line(window, cx));
         cx.subscribe(&rename_editor, |this, _editor, event, cx| {
@@ -218,6 +212,27 @@ impl TerminalListPanel {
             return;
         }
 
+        // When opening a folder, worktrees are already on the project before this
+        // panel is created — prefer those cwds over the global session file, which
+        // still holds the empty-welcome home directory.
+        let project_dirs = self.project_working_directories(cx);
+        if !project_dirs.is_empty() {
+            let id = self.new_group_id();
+            self.groups.push(TerminalGroup {
+                id,
+                name: SharedString::from(i18n::t("terminals")),
+                terminals: Vec::new(),
+                collapsed: false,
+                has_unread: false,
+            });
+            self.active_group_id = id;
+            for cwd in project_dirs {
+                self.spawn_terminal(id, Some(cwd), window, cx);
+            }
+            self.save_session(cx);
+            return;
+        }
+
         if self.load_persisted_session(window, cx) {
             return;
         }
@@ -232,6 +247,25 @@ impl TerminalListPanel {
         self.active_group_id = id;
         self.spawn_terminal(id, None, window, cx);
         self.save_session(cx);
+    }
+
+    fn project_working_directories(&self, cx: &App) -> Vec<PathBuf> {
+        let Some(project) = self.project.upgrade() else {
+            return Vec::new();
+        };
+        project
+            .read(cx)
+            .visible_worktrees(cx)
+            .filter_map(|worktree| Self::cwd_for_worktree(worktree.read(cx)))
+            .collect()
+    }
+
+    fn cwd_for_worktree(worktree: &project::Worktree) -> Option<PathBuf> {
+        if worktree.root_entry().is_some_and(|entry| entry.is_dir()) {
+            Some(worktree.abs_path().to_path_buf())
+        } else {
+            worktree.abs_path().parent().map(|path| path.to_path_buf())
+        }
     }
 
     fn new_group_id(&mut self) -> GroupId {
@@ -254,8 +288,62 @@ impl TerminalListPanel {
 
     /// Adds a new terminal to the currently active group.
     fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.spawn_terminal(self.active_group_id, None, window, cx);
+        self.new_terminal_in_group(self.active_group_id, window, cx);
+    }
+
+    /// Adds a new terminal to the given group, switching to it if needed.
+    fn new_terminal_in_group(
+        &mut self,
+        group_id: GroupId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.groups.iter().any(|group| group.id == group_id) {
+            return;
+        }
+        if group_id != self.active_group_id {
+            self.switch_group(group_id, window, cx);
+        }
+        if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
+            group.collapsed = false;
+        }
+        self.spawn_terminal(group_id, None, window, cx);
         self.save_session(cx);
+    }
+
+    fn build_group_context_menu(
+        panel: Entity<Self>,
+        group_id: GroupId,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<ContextMenu> {
+        ContextMenu::build(window, cx, move |menu, _, _| {
+            let view1 = panel.clone();
+            let view2 = panel.clone();
+            let view3 = panel.clone();
+            let view4 = panel.clone();
+            menu.entry("Rename", None, move |window, cx| {
+                view1.update(cx, |this, cx| {
+                    this.start_renaming(group_id, window, cx);
+                });
+            })
+            .entry("Move Up", None, move |_window, cx| {
+                view2.update(cx, |this, cx| {
+                    this.move_group_up(group_id, cx);
+                });
+            })
+            .entry("Move Down", None, move |_window, cx| {
+                view3.update(cx, |this, cx| {
+                    this.move_group_down(group_id, cx);
+                });
+            })
+            .separator()
+            .entry(i18n::t("new_terminal"), None, move |window, cx| {
+                view4.update(cx, |this, cx| {
+                    this.new_terminal_in_group(group_id, window, cx);
+                });
+            })
+        })
     }
 
     /// Creates a new group, switches to it and spawns its first terminal.
@@ -339,7 +427,12 @@ impl TerminalListPanel {
         .detach_and_log_err(cx);
     }
 
-    fn on_worktree_added(&mut self, worktree_id: project::WorktreeId, cx: &mut Context<Self>) {
+    fn on_worktree_added(
+        &mut self,
+        worktree_id: project::WorktreeId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(project) = self.project.upgrade() else {
             return;
         };
@@ -350,12 +443,7 @@ impl TerminalListPanel {
         if !worktree.is_visible() {
             return;
         }
-        let cwd = if worktree.root_entry().is_some_and(|entry| entry.is_dir()) {
-            Some(worktree.abs_path().to_path_buf())
-        } else {
-            worktree.abs_path().parent().map(|path| path.to_path_buf())
-        };
-        let Some(cwd) = cwd else {
+        let Some(cwd) = Self::cwd_for_worktree(worktree) else {
             return;
         };
 
@@ -372,33 +460,20 @@ impl TerminalListPanel {
             return;
         }
 
-        let Some(window) = cx.active_window() else {
-            return;
-        };
-        let panel = cx.entity();
-        let group_id = self.active_group_id;
-        let _ = window.update(cx, |_, window, cx| {
-            panel.update(cx, |this, cx| {
-                if this.groups.is_empty() {
-                    let id = this.new_group_id();
-                    this.groups.push(TerminalGroup {
-                        id,
-                        name: SharedString::from(i18n::t("terminals")),
-                        terminals: Vec::new(),
-                        collapsed: false,
-                        has_unread: false,
-                    });
-                    this.active_group_id = id;
-                }
-                let group_id = if this.groups.iter().any(|group| group.id == group_id) {
-                    group_id
-                } else {
-                    this.active_group_id
-                };
-                this.spawn_terminal(group_id, Some(cwd), window, cx);
-                this.save_session(cx);
+        if self.groups.is_empty() {
+            let id = self.new_group_id();
+            self.groups.push(TerminalGroup {
+                id,
+                name: SharedString::from(i18n::t("terminals")),
+                terminals: Vec::new(),
+                collapsed: false,
+                has_unread: false,
             });
-        });
+            self.active_group_id = id;
+        }
+        let group_id = self.active_group_id;
+        self.spawn_terminal(group_id, Some(cwd), window, cx);
+        self.save_session(cx);
     }
 
     fn add_terminal_to_group(
@@ -624,133 +699,134 @@ impl Render for TerminalListPanel {
         for (group_id, name, count, is_active, collapsed, terminals) in groups_snapshot {
             let _colors = theme.colors().clone();
             let is_expanded = !collapsed;
+            let panel = cx.entity().clone();
+            let is_renaming = Some(group_id) == self.renaming_group_id;
+            let rename_editor = self.rename_editor.clone();
+
+            let on_group_click = cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                if event.click_count() == 2 {
+                    this.start_renaming(group_id, window, cx);
+                } else {
+                    this.switch_group(group_id, window, cx);
+                }
+            });
+            let on_chevron_click = cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.toggle_group_collapse(group_id, cx);
+            });
+            let on_rename_confirm = cx.listener(|this, _: &menu::Confirm, _window, cx| {
+                this.commit_rename(cx)
+            });
+            let on_rename_cancel = cx.listener(|this, _: &menu::Cancel, _window, cx| {
+                this.commit_rename(cx)
+            });
+
             rows.push(
-                div()
-                    .id(SharedString::from(format!("group-{}", group_id.0)))
-                    .px_2()
-                    .py_1()
-                    .mx_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .items_center()
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("group-chevron-{}", group_id.0)))
-                                    .child(
-                                        ui::Icon::new(if is_expanded {
-                                            IconName::ChevronDown
-                                        } else {
-                                            IconName::ChevronRight
-                                        })
-                                        .size(IconSize::Small)
-                                        .color(Color::Muted),
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.toggle_group_collapse(group_id, cx);
-                                    })),
-                            )
-                            .child(
-                                ui::Icon::new(if is_active {
-                                    IconName::FolderOpen
-                                } else {
-                                    IconName::Folder
-                                })
-                                .size(IconSize::Small)
-                                .color(if is_active {
-                                    Color::Accent
-                                } else {
-                                    Color::Muted
-                                }),
-                            )
-                            .map(|this| {
-                                if Some(group_id) == self.renaming_group_id {
-                                    this.child(
-                                        div()
-                                            .w_full()
-                                            .h_5()
-                                            .bg(cx.theme().colors().editor_background)
-                                            .on_action(cx.listener(
-                                                |this, _: &menu::Confirm, _window, cx| {
-                                                    this.commit_rename(cx)
-                                                },
-                                            ))
-                                            .on_action(cx.listener(
-                                                |this, _: &menu::Cancel, _window, cx| {
-                                                    this.commit_rename(cx)
-                                                },
-                                            ))
-                                            .child(self.rename_editor.clone()),
-                                    )
-                                } else {
-                                    this.child(Label::new(name).size(LabelSize::Small).truncate())
+                right_click_menu(format!("group-rc-{}", group_id.0))
+                    .trigger({
+                        let panel = panel.clone();
+                        move |_is_open, _window, cx| {
+                            div()
+                                .id(SharedString::from(format!("group-{}", group_id.0)))
+                                .px_2()
+                                .py_1()
+                                .mx_1()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .items_center()
                                         .child(
-                                            Label::new(format!("{count}"))
-                                                .size(LabelSize::Small)
-                                                .color(Color::Muted),
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "group-chevron-{}",
+                                                    group_id.0
+                                                )))
+                                                .child(
+                                                    ui::Icon::new(if is_expanded {
+                                                        IconName::ChevronDown
+                                                    } else {
+                                                        IconName::ChevronRight
+                                                    })
+                                                    .size(IconSize::Small)
+                                                    .color(Color::Muted),
+                                                )
+                                                .on_click(on_chevron_click),
                                         )
-                                }
-                            })
-                            .child({
-                                let view = cx.entity().clone();
-                                h_flex().flex_grow(1.).justify_end().child(
-                                    PopoverMenu::new(SharedString::from(format!(
-                                        "menu-{}",
-                                        group_id.0
-                                    )))
-                                    .trigger(
-                                        IconButton::new(
-                                            SharedString::from(format!("menu-btn-{}", group_id.0)),
-                                            IconName::Ellipsis,
+                                        .child(
+                                            ui::Icon::new(if is_active {
+                                                IconName::FolderOpen
+                                            } else {
+                                                IconName::Folder
+                                            })
+                                            .size(IconSize::Small)
+                                            .color(if is_active {
+                                                Color::Accent
+                                            } else {
+                                                Color::Muted
+                                            }),
                                         )
-                                        .icon_size(IconSize::Small),
-                                    )
-                                    .menu(
-                                        move |window, cx| {
-                                            let view = view.clone();
-                                            Some(ContextMenu::build(
-                                                window,
-                                                cx,
-                                                move |menu, _, _| {
-                                                    let view1 = view.clone();
-                                                    let view2 = view.clone();
-                                                    let view3 = view.clone();
-                                                    menu.entry("Rename", None, move |window, cx| {
-                                                        view1.update(cx, |this, cx| {
-                                                            this.start_renaming(
-                                                                group_id, window, cx,
-                                                            )
-                                                        });
-                                                    })
-                                                    .entry("Move Up", None, move |_window, cx| {
-                                                        view2.update(cx, |this, cx| {
-                                                            this.move_group_up(group_id, cx)
-                                                        });
-                                                    })
-                                                    .entry("Move Down", None, move |_window, cx| {
-                                                        view3.update(cx, |this, cx| {
-                                                            this.move_group_down(group_id, cx)
-                                                        });
-                                                    })
-                                                },
-                                            ))
-                                        },
-                                    ),
+                                        .map(|this| {
+                                            if is_renaming {
+                                                this.child(
+                                                    div()
+                                                        .w_full()
+                                                        .h_5()
+                                                        .bg(cx.theme().colors().editor_background)
+                                                        .on_action(on_rename_confirm)
+                                                        .on_action(on_rename_cancel)
+                                                        .child(rename_editor),
+                                                )
+                                            } else {
+                                                this.child(
+                                                    Label::new(name)
+                                                        .size(LabelSize::Small)
+                                                        .truncate(),
+                                                )
+                                                .child(
+                                                    Label::new(format!("{count}"))
+                                                        .size(LabelSize::Small)
+                                                        .color(Color::Muted),
+                                                )
+                                            }
+                                        })
+                                        .child(
+                                            h_flex().flex_grow(1.).justify_end().child(
+                                                PopoverMenu::new(SharedString::from(format!(
+                                                    "menu-{}",
+                                                    group_id.0
+                                                )))
+                                                .trigger(
+                                                    IconButton::new(
+                                                        SharedString::from(format!(
+                                                            "menu-btn-{}",
+                                                            group_id.0
+                                                        )),
+                                                        IconName::Ellipsis,
+                                                    )
+                                                    .icon_size(IconSize::Small),
+                                                )
+                                                .menu({
+                                                    let panel = panel.clone();
+                                                    move |window, cx| {
+                                                        Some(Self::build_group_context_menu(
+                                                            panel.clone(),
+                                                            group_id,
+                                                            window,
+                                                            cx,
+                                                        ))
+                                                    }
+                                                }),
+                                            ),
+                                        ),
                                 )
-                            }),
-                    )
-                    .on_click(
-                        cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                            if event.click_count() == 2 {
-                                this.start_renaming(group_id, window, cx);
-                            } else {
-                                this.switch_group(group_id, window, cx);
-                            }
-                        }),
-                    )
+                                .on_click(on_group_click)
+                        }
+                    })
+                    .menu(move |window, cx| {
+                        Self::build_group_context_menu(panel.clone(), group_id, window, cx)
+                    })
                     .into_any_element(),
             );
 
@@ -874,7 +950,18 @@ impl Render for TerminalListPanel {
                                     .tooltip(Tooltip::text(i18n::t("file_list")))
                                     .on_click(|_, window, cx| {
                                         window.dispatch_action(
-                                            Box::new(crate::file_list_panel::ToggleFocus),
+                                            Box::new(zed_actions::file_list_panel::ToggleFocus),
+                                            cx,
+                                        );
+                                    }),
+                            )
+                            .child(
+                                IconButton::new("show-agent", IconName::Sparkle)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Agent"))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(zed_actions::assistant::ToggleFocus),
                                             cx,
                                         );
                                     }),

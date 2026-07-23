@@ -1778,6 +1778,10 @@ impl Item for TerminalView {
         }
     }
 
+    fn directory_for_new_file(&self, cx: &App) -> Option<PathBuf> {
+        self.terminal.read(cx).working_directory()
+    }
+
     fn has_conflict(&self, _cx: &App) -> bool {
         false
     }

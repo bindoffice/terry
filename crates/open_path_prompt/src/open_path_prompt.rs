@@ -230,11 +230,26 @@ impl OpenPathPrompt {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
+        let initial_query = if creating_path {
+            workspace
+                .directory_for_new_path_prompt(cx)
+                .map(|dir| {
+                    let path_style = workspace.project().read(cx).path_style(cx);
+                    let mut s = dir.to_string_lossy().into_owned();
+                    if !s.ends_with('/') && !s.ends_with('\\') {
+                        s.push_str(path_style.primary_separator());
+                    }
+                    s
+                })
+                .unwrap_or_else(|| lister.default_query(cx))
+        } else {
+            lister.default_query(cx)
+        };
         workspace.toggle_modal(window, cx, |window, cx| {
             let delegate =
                 OpenPathDelegate::new(tx, lister.clone(), creating_path, cx).show_hidden();
             let picker = Picker::uniform_list(delegate, window, cx);
-            let mut query = lister.default_query(cx);
+            let mut query = initial_query;
             if let Some(suggested_name) = suggested_name {
                 query.push_str(&suggested_name);
             }

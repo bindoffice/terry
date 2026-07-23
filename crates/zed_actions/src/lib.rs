@@ -963,3 +963,29 @@ pub mod git_panel {
         ]
     );
 }
+
+pub mod terminal_list_panel {
+    use gpui::actions;
+
+    actions!(
+        terminal_list_panel,
+        [
+            /// Toggles focus on the terminal list panel.
+            ToggleFocus,
+            /// Creates a new terminal in the active group.
+            NewTerminal,
+        ]
+    );
+}
+
+pub mod file_list_panel {
+    use gpui::actions;
+
+    actions!(
+        file_list_panel,
+        [
+            /// Toggles focus on the file list panel.
+            ToggleFocus,
+        ]
+    );
+}

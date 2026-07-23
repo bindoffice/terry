@@ -2,20 +2,13 @@ use std::path::PathBuf;
 
 use gpui::{
     Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString,
-    Subscription, TaskExt, WeakEntity, Window, actions, div, px,
+    Subscription, TaskExt, WeakEntity, Window, div, px,
 };
 use ui::{IconButton, IconName, Label, LabelSize, Tooltip, prelude::*};
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 use workspace::OpenOptions;
-
-actions!(
-    file_list_panel,
-    [
-        /// Toggles focus on the file list panel.
-        ToggleFocus
-    ]
-);
+use zed_actions::file_list_panel::ToggleFocus;
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -183,7 +176,10 @@ impl Render for FileListPanel {
                                     .icon_size(IconSize::Small)
                                     .tooltip(Tooltip::text(i18n::t("terminal_list")))
                                     .on_click(|_, window, cx| {
-                                        window.dispatch_action(Box::new(crate::terminal_list_panel::ToggleFocus), cx);
+                                        window.dispatch_action(
+                                            Box::new(zed_actions::terminal_list_panel::ToggleFocus),
+                                            cx,
+                                        );
                                     }),
                             )
                             .child(
@@ -191,6 +187,17 @@ impl Render for FileListPanel {
                                     .icon_size(IconSize::Small)
                                     .toggle_state(true)
                                     .tooltip(Tooltip::text(i18n::t("file_list"))),
+                            )
+                            .child(
+                                IconButton::new("show-agent", IconName::Sparkle)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Agent"))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(zed_actions::assistant::ToggleFocus),
+                                            cx,
+                                        );
+                                    }),
                             )
                             .child(
                                 IconButton::new("navigate-up", IconName::ArrowUp)

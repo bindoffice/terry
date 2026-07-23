@@ -31,11 +31,17 @@ use settings::{
 };
 use terminal_list_panel::TerminalListPanel;
 use theme::{ActiveTheme, LoadThemes};
-use ui::{ButtonCommon, Clickable, ContextMenu, PopoverMenu, Tooltip};
+use ui::{
+    ButtonCommon, Clickable, ContextMenu, Disableable, IconButton, IconName, PopoverMenu,
+    Toggleable, Tooltip,
+};
 use util::ResultExt;
 use uuid::Uuid;
 use vim_mode_setting::VimModeSetting;
-use workspace::{AppState, OpenOptions, Workspace, WorkspaceStore};
+use workspace::{
+    AppState, ItemHandle, OpenOptions, SplitDown, SplitLeft, SplitMode, SplitRight, SplitUp,
+    ToggleZoom, Workspace, WorkspaceStore,
+};
 
 fn main() {
     // load_login_shell_environment / project env capture invoke
@@ -294,22 +300,31 @@ fn init_workspace(
         // Tab bar: quick "+" creates a terminal in the active group; the following
         // button restores the original pane "New…" popover menu unchanged.
         display_pane.update(cx, |pane, cx| {
-            pane.set_render_tab_bar_buttons(cx, |pane, _window, _cx| {
+            pane.set_render_tab_bar_buttons(cx, |pane, _window, cx| {
                 let new_item_menu_handle = pane.new_item_context_menu_handle.clone();
+                let split_item_menu_handle = pane.split_item_context_menu_handle.clone();
+                let (can_clone, can_split_move) = match pane.active_item() {
+                    Some(active_item) if active_item.can_split(cx) => (true, false),
+                    Some(_) => (false, pane.items_len() > 1),
+                    None => (false, false),
+                };
                 let right_children = ui::h_flex()
                     .gap_1()
                     .child(
-                        ui::IconButton::new("new-terminal-tab", ui::IconName::Plus)
+                        IconButton::new("new-terminal-tab", IconName::Plus)
                             .icon_size(ui::IconSize::Small)
                             .tooltip(Tooltip::text("New Terminal"))
                             .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(terminal_list_panel::NewTerminal), cx);
+                                window.dispatch_action(
+                                    Box::new(zed_actions::terminal_list_panel::NewTerminal),
+                                    cx,
+                                );
                             }),
                     )
                     .child(
                         PopoverMenu::new("pane-tab-bar-popover-menu")
                             .trigger_with_tooltip(
-                                ui::IconButton::new("new-menu", ui::IconName::ChevronDown)
+                                IconButton::new("new-menu", IconName::ChevronDown)
                                     .icon_size(ui::IconSize::Small),
                                 Tooltip::text("New…"),
                             )
@@ -343,6 +358,63 @@ fn init_workspace(
                                 }))
                             }),
                     )
+                    .child(
+                        PopoverMenu::new("pane-tab-bar-split")
+                            .trigger_with_tooltip(
+                                IconButton::new("split", IconName::Split)
+                                    .icon_size(ui::IconSize::Small)
+                                    .disabled(!can_clone && !can_split_move),
+                                Tooltip::text("Split Pane"),
+                            )
+                            .anchor(Anchor::TopRight)
+                            .with_handle(split_item_menu_handle)
+                            .menu(move |window, cx| {
+                                ContextMenu::build(window, cx, |menu, _, _| {
+                                    let mode = SplitMode::MovePane;
+                                    if can_split_move {
+                                        menu.action(
+                                            "Split Right",
+                                            SplitRight { mode }.boxed_clone(),
+                                        )
+                                        .action("Split Left", SplitLeft { mode }.boxed_clone())
+                                        .action("Split Up", SplitUp { mode }.boxed_clone())
+                                        .action("Split Down", SplitDown { mode }.boxed_clone())
+                                    } else {
+                                        menu.action(
+                                            "Split Right",
+                                            SplitRight::default().boxed_clone(),
+                                        )
+                                        .action(
+                                            "Split Left",
+                                            SplitLeft::default().boxed_clone(),
+                                        )
+                                        .action("Split Up", SplitUp::default().boxed_clone())
+                                        .action(
+                                            "Split Down",
+                                            SplitDown::default().boxed_clone(),
+                                        )
+                                    }
+                                })
+                                .into()
+                            }),
+                    )
+                    .child({
+                        let zoomed = pane.is_zoomed();
+                        IconButton::new("toggle_zoom", IconName::Maximize)
+                            .icon_size(ui::IconSize::Small)
+                            .toggle_state(zoomed)
+                            .selected_icon(IconName::Minimize)
+                            .on_click(cx.listener(|pane, _, window, cx| {
+                                pane.toggle_zoom(&ToggleZoom, window, cx);
+                            }))
+                            .tooltip(move |_window, cx| {
+                                Tooltip::for_action(
+                                    if zoomed { "Zoom Out" } else { "Zoom In" },
+                                    &ToggleZoom,
+                                    cx,
+                                )
+                            })
+                    })
                     .into_any_element()
                     .into();
                 (None, right_children)

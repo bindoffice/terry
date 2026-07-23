@@ -122,7 +122,10 @@ impl Render for SettingsWindow {
             .text_color(cx.theme().colors().text)
             .child(
                 div()
+                    .id("terry-settings-scroll")
                     .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
                     .p_4()
                     .gap_4()
                     .flex()
@@ -374,10 +377,10 @@ fn open_settings_window(cx: &mut App) {
                 is_movable: true,
                 kind: gpui::WindowKind::Normal,
                 window_background: cx.theme().window_background_appearance(),
-                window_bounds: Some(WindowBounds::centered(gpui::size(px(480.), px(360.)), cx)),
+                window_bounds: Some(WindowBounds::centered(gpui::size(px(520.), px(560.)), cx)),
                 window_min_size: Some(gpui::Size {
-                    width: px(360.),
-                    height: px(240.),
+                    width: px(400.),
+                    height: px(420.),
                 }),
                 ..Default::default()
             },

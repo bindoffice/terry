@@ -68,7 +68,7 @@ impl Component for AgentSetupButton {
             "Default",
             AgentSetupButton::new("preview")
                 .icon(Icon::new(IconName::ZedAgent))
-                .name("Zed Agent")
+                .name("Agent")
                 .into_any_element(),
         )
         .into_any_element()

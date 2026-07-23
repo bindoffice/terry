@@ -1393,6 +1393,32 @@ impl Render for PanelButtons {
 
         h_flex()
             .gap_1()
+            .when(dock.position == DockPosition::Left, |this| {
+                // Always-visible toggle so the left sidebar can be reopened
+                // even after it was closed (panel buttons alone are not enough
+                // when the dock itself is shut).
+                let icon = if is_open {
+                    IconName::ThreadsSidebarLeftOpen
+                } else {
+                    IconName::ThreadsSidebarLeftClosed
+                };
+                let tooltip: SharedString = if is_open {
+                    "Close Sidebar".into()
+                } else {
+                    "Open Sidebar".into()
+                };
+                this.child(
+                    IconButton::new("toggle-left-dock", icon)
+                        .icon_size(IconSize::Small)
+                        .toggle_state(is_open)
+                        .tooltip(move |_window, cx| {
+                            Tooltip::for_action(tooltip.clone(), &crate::ToggleLeftDock, cx)
+                        })
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(crate::ToggleLeftDock), cx);
+                        }),
+                )
+            })
             .when(
                 has_buttons
                     && (dock.position == DockPosition::Bottom

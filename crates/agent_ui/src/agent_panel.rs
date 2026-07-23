@@ -90,7 +90,7 @@ use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use text::OffsetRangeExt;
 use theme_settings::ThemeSettings;
 use ui::{
-    ContextMenu, ContextMenuEntry, GradientFade, IconButton, KeyBinding, PopoverMenu,
+    ContextMenu, ContextMenuEntry, GradientFade, IconButton, PopoverMenu,
     PopoverMenuHandle, Tab, Tooltip, prelude::*, utils::WithRemSize,
 };
 use util::ResultExt as _;
@@ -1163,6 +1163,8 @@ pub struct AgentPanel {
     _extension_subscription: Option<Subscription>,
     _project_subscription: Subscription,
     zoomed: bool,
+    /// Width to restore when leaving the expanded (fullscreen) agent sidebar.
+    width_before_zoom: Option<Pixels>,
     pending_serialization: Option<Task<Result<()>>>,
     new_user_onboarding: Entity<AgentPanelOnboarding>,
     new_user_onboarding_upsell_dismissed: AtomicBool,
@@ -1566,6 +1568,7 @@ impl AgentPanel {
             _extension_subscription: extension_subscription,
             _project_subscription,
             zoomed: false,
+            width_before_zoom: None,
             pending_serialization: None,
             new_user_onboarding: onboarding,
             thread_store,
@@ -1611,9 +1614,14 @@ impl AgentPanel {
             workspace.toggle_panel_focus::<Self>(window, cx);
         } else {
             workspace.reveal_panel::<Self>(window, cx);
-            if let Some(panel) = workspace.focus_panel::<Self>(window, cx) {
+            workspace.focus_panel::<Self>(window, cx);
+            // Defer chat init: we are inside a Workspace update and must not
+            // read the workspace entity while creating the conversation.
+            if let Some(panel) = workspace.panel::<Self>(cx) {
                 panel.update(cx, |panel, cx| {
-                    panel.ensure_chat_on_activate(window, cx);
+                    cx.defer_in(window, |panel, window, cx| {
+                        panel.ensure_chat_on_activate(window, cx);
+                    });
                 });
             }
         }
@@ -2908,6 +2916,10 @@ impl AgentPanel {
         // Reuse the workspace-based helper so behavior matches the regular
         // terminal panel (e.g. `WorkingDirectory::FirstProjectDirectory` falling
         // back to a file's parent directory when the worktree root is a file).
+        //
+        // Callers must not invoke this while `Workspace` is leased for update
+        // (use `cx.defer_in` first). Prefer `terminal_view::default_working_directory`
+        // with an existing `&Workspace` when already inside a workspace update.
         self.workspace
             .upgrade()
             .and_then(|workspace| terminal_view::default_working_directory(workspace.read(cx), cx))
@@ -2918,6 +2930,7 @@ impl AgentPanel {
     }
 
     /// Cwd of the focused center-pane terminal, if any.
+    /// Must not be called while `Workspace` is leased for update.
     fn active_terminal_cwd(&self, cx: &App) -> Option<PathBuf> {
         self.workspace.upgrade().and_then(|workspace| {
             workspace
@@ -3659,14 +3672,47 @@ impl AgentPanel {
     }
 
     pub fn toggle_zoom(&mut self, _: &ToggleZoom, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+
+        // Terry keeps the agent on the left dock. Workspace PanelEvent::ZoomIn
+        // unmounts that dock and re-parents the panel into a full-window overlay,
+        // which deadlocks / freezes with our chat initialization. Expand the
+        // left dock width instead — same user intent, no overlay.
         if self.zoomed {
-            cx.emit(PanelEvent::ZoomOut);
+            let restore_width = self
+                .width_before_zoom
+                .take()
+                .unwrap_or_else(|| AgentSettings::get_global(cx).default_width);
+            // Keep `zoomed` true while resizing so `has_flexible_size` stays
+            // false and the pixel width is applied.
+            let left_dock = workspace.read(cx).left_dock().clone();
+            left_dock.update(cx, |dock, cx| {
+                dock.resize_active_panel(Some(restore_width), None, window, cx);
+            });
+            self.zoomed = false;
         } else {
             if !self.focus_handle(cx).contains_focused(window, cx) {
                 cx.focus_self(window);
             }
-            cx.emit(PanelEvent::ZoomIn);
+
+            let current_width = workspace
+                .read(cx)
+                .left_dock()
+                .read(cx)
+                .stored_active_panel_size(window, cx)
+                .unwrap_or_else(|| AgentSettings::get_global(cx).default_width);
+            self.width_before_zoom = Some(current_width);
+
+            let expanded_width = (window.viewport_size().width * 0.85).max(current_width);
+            self.zoomed = true;
+            let left_dock = workspace.read(cx).left_dock().clone();
+            left_dock.update(cx, |dock, cx| {
+                dock.resize_active_panel(Some(expanded_width), None, window, cx);
+            });
         }
+        cx.notify();
     }
 
     pub(crate) fn open_configuration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4912,7 +4958,7 @@ impl agent::SiblingThreadHost for AgentPanelSiblingHost {
         for agent_id in store.external_agents() {
             let display = store
                 .agent_display_name(agent_id)
-                .unwrap_or_else(|| agent_id.0.clone());
+                .unwrap_or_else(|| agent::display_name_for_agent_id(agent_id));
             agents.push(agent::AvailableAgent {
                 id: agent_id.0.to_string(),
                 name: display,
@@ -5000,7 +5046,8 @@ impl Panel for AgentPanel {
     }
 
     fn has_flexible_size(&self, _window: &Window, cx: &App) -> bool {
-        AgentSettings::get_global(cx).flexible
+        // While expanded, force fixed pixel width so resize_active_panel applies.
+        !self.zoomed && AgentSettings::get_global(cx).flexible
     }
 
     fn set_flexible_size(&mut self, flexible: bool, _window: &mut Window, cx: &mut Context<Self>) {
@@ -5015,7 +5062,10 @@ impl Panel for AgentPanel {
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.is_active = active;
         if active {
-            self.ensure_chat_on_activate(window, cx);
+            // Defer: set_active runs while Dock/Workspace is still leased.
+            cx.defer_in(window, |this, window, cx| {
+                this.ensure_chat_on_activate(window, cx);
+            });
         }
     }
 
@@ -5865,7 +5915,9 @@ impl AgentPanel {
                                                 .and_then(|store| store.agent(agent_id))
                                                 .map(|a| a.name().clone())
                                         })
-                                        .unwrap_or_else(|| agent_id.0.clone());
+                                        .unwrap_or_else(|| {
+                                            agent::display_name_for_agent_id(agent_id)
+                                        });
                                     AgentMenuItem {
                                         id: agent_id.clone(),
                                         display_name,
@@ -6102,6 +6154,34 @@ impl AgentPanel {
                         .h_full()
                         .flex_none()
                         .gap_1()
+                        .child(
+                            IconButton::new("show-terminal-list", IconName::Terminal)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text("Terminal List"))
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(
+                                        Box::new(zed_actions::terminal_list_panel::ToggleFocus),
+                                        cx,
+                                    );
+                                }),
+                        )
+                        .child(
+                            IconButton::new("show-file-list", IconName::File)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text("File List"))
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(
+                                        Box::new(zed_actions::file_list_panel::ToggleFocus),
+                                        cx,
+                                    );
+                                }),
+                        )
+                        .child(
+                            IconButton::new("show-agent", IconName::Sparkle)
+                                .icon_size(IconSize::Small)
+                                .toggle_state(true)
+                                .tooltip(Tooltip::text("Agent")),
+                        )
                         .children(sandbox_status)
                         .when(can_create_entries, |this| this.child(new_thread_menu))
                         .child(full_screen_button)

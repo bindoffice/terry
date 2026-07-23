@@ -3087,8 +3087,7 @@ impl Workspace {
         cx.spawn_in(window, async move |workspace, cx| {
             let abs_path = workspace.update(cx, |workspace, cx| {
                 let relative_to = workspace
-                    .most_recent_active_path(cx)
-                    .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                    .directory_for_new_path_prompt(cx)
                     .or_else(|| {
                         let project = workspace.project.read(cx);
                         project.visible_worktrees(cx).find_map(|worktree| {
@@ -3999,6 +3998,35 @@ impl Workspace {
                 abs_path
             })
             .next()
+    }
+
+    /// Directory to start "Save As" / "New Path" prompts in.
+    /// Prefers the active terminal's cwd (or any terminal in the active pane)
+    /// so new files save next to where you're working.
+    pub fn directory_for_new_path_prompt(&self, cx: &App) -> Option<PathBuf> {
+        if let Some(dir) = self.active_item(cx).and_then(|item| item.directory_for_new_file(cx)) {
+            return Some(dir);
+        }
+        if let Some(dir) = self
+            .active_pane()
+            .read(cx)
+            .items()
+            .find_map(|item| item.directory_for_new_file(cx))
+        {
+            return Some(dir);
+        }
+        if let Some(dir) = &self.last_active_directory {
+            return Some(dir.clone());
+        }
+        self.recent_navigation_history_iter(cx)
+            .filter_map(|(_, abs_path)| abs_path)
+            .find_map(|path| {
+                if path.is_dir() {
+                    Some(path)
+                } else {
+                    path.parent().map(Path::to_path_buf)
+                }
+            })
     }
 
     pub fn save_active_item(
@@ -6165,6 +6193,10 @@ impl Workspace {
         self.project.update(cx, |project, cx| {
             project.set_active_path(active_entry.clone(), cx)
         });
+
+        if let Some(dir) = self.active_item(cx).and_then(|item| item.directory_for_new_file(cx)) {
+            self.last_active_directory = Some(dir);
+        }
 
         if focus_changed && let Some(project_path) = &active_entry {
             let git_store_entity = self.project.read(cx).git_store().clone();

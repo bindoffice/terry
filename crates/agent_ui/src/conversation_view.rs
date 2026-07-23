@@ -1382,7 +1382,7 @@ impl ConversationView {
             .agent_server_store
             .read(cx)
             .agent_display_name(&agent_id.clone())
-            .unwrap_or_else(|| agent_id.0.clone());
+            .unwrap_or_else(|| agent::display_name_for_agent_id(&agent_id));
 
         let agent_icon = self.agent.logo();
         let agent_icon_from_external_svg = self
@@ -1828,7 +1828,9 @@ impl ConversationView {
                         .agent_server_store
                         .read(cx)
                         .agent_display_name(&self.agent.agent_id())
-                        .unwrap_or_else(|| self.agent.agent_id().0.to_string().into());
+                        .unwrap_or_else(|| {
+                            agent::display_name_for_agent_id(&self.agent.agent_id())
+                        });
 
                     let new_placeholder =
                         placeholder_text(agent_display_name.as_ref(), has_slash_completions);
@@ -2243,7 +2245,7 @@ impl ConversationView {
             .agent_server_store
             .read(cx)
             .agent_display_name(&self.agent.agent_id())
-            .unwrap_or_else(|| self.agent.agent_id().0);
+            .unwrap_or_else(|| agent::display_name_for_agent_id(&self.agent.agent_id()));
 
         let show_fallback_description =
             auth_methods.len() > 1 && description.is_none() && pending_auth_method.is_none();
@@ -2856,7 +2858,7 @@ impl ConversationView {
 
         let title = root_title
             .clone()
-            .unwrap_or_else(|| self.agent.agent_id().0);
+            .unwrap_or_else(|| agent::display_name_for_agent_id(&self.agent.agent_id()));
 
         match settings.notify_when_agent_waiting {
             NotifyWhenAgentWaiting::PrimaryScreen => {
@@ -3251,18 +3253,24 @@ fn native_available_skills(
 }
 
 fn placeholder_text(agent_name: &str, has_commands: bool) -> String {
-    if agent_name == agent::ZED_AGENT_ID.as_ref() {
+    let is_native = agent_name == agent::ZED_AGENT_ID.as_ref() || agent_name == "Agent";
+    let display_name = if agent_name == agent::ZED_AGENT_ID.as_ref() {
+        "Agent"
+    } else {
+        agent_name
+    };
+    if is_native {
         format!(
             "Message the {}, @ to include context, / for commands",
-            agent_name
+            display_name
         )
     } else if has_commands {
         format!(
             "Message {} — @ to include context, / for commands",
-            agent_name
+            display_name
         )
     } else {
-        format!("Message {} — @ to include context", agent_name)
+        format!("Message {} — @ to include context", display_name)
     }
 }
 
