@@ -129,18 +129,18 @@ jobs:
         shell: bash
         run: |
           chmod +x script/package-macos.sh
-          script/package-macos.sh "${{ matrix.target }}"
+          ZIP="$(script/package-macos.sh "${{ matrix.target }}" | tee /dev/stderr | tail -n 1)"
           mkdir -p dist
-          cp -f target/release/Terry-*-macos-*.zip dist/
+          cp -f "$ZIP" dist/
 
       - name: Package Linux
         if: matrix.package == 'linux'
         shell: bash
         run: |
           chmod +x script/package-linux.sh
-          script/package-linux.sh "${{ matrix.target }}"
+          ARCHIVE="$(script/package-linux.sh "${{ matrix.target }}" | tee /dev/stderr | tail -n 1)"
           mkdir -p dist
-          cp -f target/release/Terry-*-linux-*.tar.gz dist/
+          cp -f "$ARCHIVE" dist/
 
       - name: Package Windows
         if: matrix.package == 'windows'

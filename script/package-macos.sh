@@ -72,6 +72,9 @@ fi
 
 OUT_DIR="${TARGET_DIR}/release"
 mkdir -p "$OUT_DIR"
+# Resolve to an absolute path before the subshell `cd`s into the .app parent,
+# otherwise a relative ZIP_PATH lands under bundle/osx/... instead of target/release/.
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 ZIP_NAME="Terry-${VERSION}-macos-${ARCH_LABEL}.zip"
 ZIP_PATH="${OUT_DIR}/${ZIP_NAME}"
 rm -f "$ZIP_PATH"
@@ -79,6 +82,11 @@ rm -f "$ZIP_PATH"
   cd "$(dirname "$APP_PATH")"
   ditto -c -k --sequesterRsrc --keepParent "$(basename "$APP_PATH")" "$ZIP_PATH"
 )
+
+if [[ ! -f "$ZIP_PATH" ]]; then
+  echo "error: zip was not created at $ZIP_PATH" >&2
+  exit 1
+fi
 
 echo "==> Wrote $ZIP_PATH"
 echo "$ZIP_PATH"
