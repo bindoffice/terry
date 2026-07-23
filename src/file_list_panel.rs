@@ -316,6 +316,6 @@ impl Panel for FileListPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        2
+        3
     }
 }

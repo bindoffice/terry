@@ -1041,6 +1041,6 @@ impl Panel for TerminalListPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        3
+        2
     }
 }

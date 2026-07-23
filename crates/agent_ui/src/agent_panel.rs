@@ -5091,7 +5091,8 @@ impl Panel for AgentPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        // After TerminalList (3) / FileList (2) so bottom buttons order as list → files → agent.
+        // After TerminalList (2) / FileList (3) so bottom buttons order as
+        // terminals → files → agent.
         4
     }
 
