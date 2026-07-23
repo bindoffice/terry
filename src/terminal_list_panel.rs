@@ -1,11 +1,14 @@
+use editor::{Editor, MultiBufferOffset};
 use gpui::{
     Action, AnyElement, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
     Render, SharedString, Subscription, TaskExt, WeakEntity, Window, actions, div, px,
 };
-use editor::{Editor, MultiBufferOffset};
 use project::Project;
 use terminal_view::TerminalView;
-use ui::{IconButton, IconName, Label, LabelSize, Tooltip, PopoverMenu, ContextMenu, right_click_menu, prelude::*};
+use ui::{
+    ContextMenu, IconButton, IconName, Label, LabelSize, PopoverMenu, Tooltip, prelude::*,
+    right_click_menu,
+};
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 use workspace::{ItemHandle, Pane};
@@ -31,12 +34,13 @@ struct PersistedSession {
     active_group_index: usize,
 }
 
-
 actions!(
     terminal_list_panel,
     [
         /// Toggles focus on the terminal list panel.
-        ToggleFocus
+        ToggleFocus,
+        /// Creates a new terminal in the active group.
+        NewTerminal
     ]
 );
 
@@ -44,6 +48,11 @@ pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
             workspace.toggle_panel_focus::<TerminalListPanel>(window, cx);
+        });
+        workspace.register_action(|workspace, _: &NewTerminal, window, cx| {
+            if let Some(panel) = workspace.panel::<TerminalListPanel>(cx) {
+                panel.update(cx, |panel, cx| panel.new_terminal(window, cx));
+            }
         });
     })
     .detach();
@@ -93,7 +102,7 @@ impl TerminalListPanel {
         let _workspace_subscription = cx.subscribe(&workspace, |this, _, event, cx| {
             this.on_workspace_event(event, cx);
         });
-        
+
         let rename_editor = cx.new(|cx| Editor::single_line(window, cx));
         cx.subscribe(&rename_editor, |this, _editor, event, cx| {
             if let editor::EditorEvent::Blurred = event {
@@ -101,9 +110,6 @@ impl TerminalListPanel {
             }
         })
         .detach();
-
-
-
 
         Self {
             workspace: workspace.downgrade(),
@@ -185,7 +191,7 @@ impl TerminalListPanel {
                 collapsed: p_group.collapsed,
                 has_unread: false,
             });
-            
+
             if i == session.active_group_index {
                 self.active_group_id = id;
             }
@@ -194,7 +200,7 @@ impl TerminalListPanel {
                 self.spawn_terminal(id, p_term.cwd, window, cx);
             }
         }
-        
+
         // After loading groups, switch to the active one
         self.switch_group(self.active_group_id, window, cx);
         true
@@ -264,7 +270,13 @@ impl TerminalListPanel {
     /// Spawns a shell terminal and attaches it to the given group. The
     /// terminal is only displayed if that group is still active by the time
     /// the (async) terminal is ready.
-    fn spawn_terminal(&mut self, group_id: GroupId, cwd: Option<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    fn spawn_terminal(
+        &mut self,
+        group_id: GroupId,
+        cwd: Option<std::path::PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let project = self.project.clone();
         cx.spawn_in(window, async move |this, cx| {
             let working_directory = cwd.or_else(|| std::env::current_dir().ok());
@@ -281,8 +293,8 @@ impl TerminalListPanel {
                 let weak_workspace = workspace.read(cx).weak_handle();
                 let workspace_id = workspace.read(cx).database_id();
                 let weak_project = workspace.read(cx).project().downgrade();
-                let focus_item = !workspace
-                    .update(cx, |workspace, cx| workspace.has_active_modal(window, cx));
+                let focus_item =
+                    !workspace.update(cx, |workspace, cx| workspace.has_active_modal(window, cx));
 
                 let terminal_view = cx.new(|cx| {
                     TerminalView::new(
@@ -374,9 +386,7 @@ impl TerminalListPanel {
         };
         let target_id = terminal_view.entity_id();
         pane.update(cx, |pane, cx| {
-            let index = pane
-                .items()
-                .position(|item| item.item_id() == target_id);
+            let index = pane.items().position(|item| item.item_id() == target_id);
             if let Some(index) = index {
                 pane.activate_item(index, true, true, window, cx);
             }
@@ -452,7 +462,13 @@ impl TerminalListPanel {
 
     fn on_workspace_event(&mut self, event: &workspace::Event, cx: &mut Context<Self>) {
         // A tab closed directly in the center pane must be dropped from the
-        // model too. During a group switch the removals are intentional.
+        // model too. During a group switch the removals are intentional, so we
+        // must not treat them as user closes or the outgoing group's terminals
+        // would be dropped from the model and vanish on switch.
+        if self.switching {
+            cx.notify();
+            return;
+        }
         if let workspace::Event::ItemRemoved { item_id } = event {
             let mut belongs_to_active_group = false;
             for group in &self.groups {
@@ -566,7 +582,11 @@ impl Render for TerminalListPanel {
                                     IconName::Folder
                                 })
                                 .size(IconSize::Small)
-                                .color(if is_active { Color::Accent } else { Color::Muted }),
+                                .color(if is_active {
+                                    Color::Accent
+                                } else {
+                                    Color::Muted
+                                }),
                             )
                             .map(|this| {
                                 if Some(group_id) == self.renaming_group_id {
@@ -575,8 +595,16 @@ impl Render for TerminalListPanel {
                                             .w_full()
                                             .h_5()
                                             .bg(cx.theme().colors().editor_background)
-                                            .on_action(cx.listener(|this, _: &menu::Confirm, _window, cx| this.commit_rename(cx)))
-                                            .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| this.commit_rename(cx)))
+                                            .on_action(cx.listener(
+                                                |this, _: &menu::Confirm, _window, cx| {
+                                                    this.commit_rename(cx)
+                                                },
+                                            ))
+                                            .on_action(cx.listener(
+                                                |this, _: &menu::Cancel, _window, cx| {
+                                                    this.commit_rename(cx)
+                                                },
+                                            ))
                                             .child(self.rename_editor.clone()),
                                     )
                                 } else {
@@ -590,42 +618,61 @@ impl Render for TerminalListPanel {
                             })
                             .child({
                                 let view = cx.entity().clone();
-                                h_flex()
-                                    .flex_grow(1.)
-                                    .justify_end()
-                                    .child(
-                                        PopoverMenu::new(SharedString::from(format!("menu-{}", group_id.0)))
-                                            .trigger(
-                                                IconButton::new(SharedString::from(format!("menu-btn-{}", group_id.0)), IconName::Ellipsis)
-                                                    .icon_size(IconSize::Small),
-                                            )
-                                            .menu(move |window, cx| {
-                                                let view = view.clone();
-                                                Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                                h_flex().flex_grow(1.).justify_end().child(
+                                    PopoverMenu::new(SharedString::from(format!(
+                                        "menu-{}",
+                                        group_id.0
+                                    )))
+                                    .trigger(
+                                        IconButton::new(
+                                            SharedString::from(format!("menu-btn-{}", group_id.0)),
+                                            IconName::Ellipsis,
+                                        )
+                                        .icon_size(IconSize::Small),
+                                    )
+                                    .menu(
+                                        move |window, cx| {
+                                            let view = view.clone();
+                                            Some(ContextMenu::build(
+                                                window,
+                                                cx,
+                                                move |menu, _, _| {
                                                     let view1 = view.clone();
                                                     let view2 = view.clone();
                                                     let view3 = view.clone();
                                                     menu.entry("Rename", None, move |window, cx| {
-                                                        view1.update(cx, |this, cx| this.start_renaming(group_id, window, cx));
+                                                        view1.update(cx, |this, cx| {
+                                                            this.start_renaming(
+                                                                group_id, window, cx,
+                                                            )
+                                                        });
                                                     })
                                                     .entry("Move Up", None, move |_window, cx| {
-                                                        view2.update(cx, |this, cx| this.move_group_up(group_id, cx));
+                                                        view2.update(cx, |this, cx| {
+                                                            this.move_group_up(group_id, cx)
+                                                        });
                                                     })
                                                     .entry("Move Down", None, move |_window, cx| {
-                                                        view3.update(cx, |this, cx| this.move_group_down(group_id, cx));
+                                                        view3.update(cx, |this, cx| {
+                                                            this.move_group_down(group_id, cx)
+                                                        });
                                                     })
-                                                }))
-                                            }),
-                                    )
+                                                },
+                                            ))
+                                        },
+                                    ),
+                                )
                             }),
                     )
-                    .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                        if event.click_count() == 2 {
-                            this.start_renaming(group_id, window, cx);
-                        } else {
-                            this.switch_group(group_id, window, cx);
-                        }
-                    }))
+                    .on_click(
+                        cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                            if event.click_count() == 2 {
+                                this.start_renaming(group_id, window, cx);
+                            } else {
+                                this.switch_group(group_id, window, cx);
+                            }
+                        }),
+                    )
                     .into_any_element(),
             );
 
@@ -634,11 +681,16 @@ impl Render for TerminalListPanel {
                     let is_terminal_active = Some(terminal_view.entity_id()) == active_terminal_id;
                     let display_pane = self.display_pane.clone();
                     let terminal_id = terminal_view.entity_id();
-                    
+
                     let on_click = cx.listener({
                         let terminal_view = terminal_view.clone();
                         move |this, _, window, cx| {
-                            this.focus_terminal_in_group(group_id, terminal_view.clone(), window, cx);
+                            this.focus_terminal_in_group(
+                                group_id,
+                                terminal_view.clone(),
+                                window,
+                                cx,
+                            );
                         }
                     });
 
@@ -653,7 +705,11 @@ impl Render for TerminalListPanel {
                                     .mx_1()
                                     .rounded_md()
                                     .cursor_pointer()
-                                    .when(!is_terminal_active, |el| el.hover(|style| style.bg(_cx.theme().colors().element_hover)))
+                                    .when(!is_terminal_active, |el| {
+                                        el.hover(|style| {
+                                            style.bg(_cx.theme().colors().element_hover)
+                                        })
+                                    })
                                     .child(
                                         h_flex()
                                             .gap_1()
@@ -661,9 +717,17 @@ impl Render for TerminalListPanel {
                                             .child(
                                                 ui::Icon::new(IconName::Terminal)
                                                     .size(IconSize::Small)
-                                                    .color(if is_terminal_active { Color::Accent } else { Color::Muted }),
+                                                    .color(if is_terminal_active {
+                                                        Color::Accent
+                                                    } else {
+                                                        Color::Muted
+                                                    }),
                                             )
-                                            .child(Label::new(title.clone()).size(LabelSize::Small).truncate()),
+                                            .child(
+                                                Label::new(title.clone())
+                                                    .size(LabelSize::Small)
+                                                    .truncate(),
+                                            ),
                                     )
                                     .on_click(on_click)
                             })
@@ -673,15 +737,31 @@ impl Render for TerminalListPanel {
                                 ContextMenu::build(window, cx, move |menu, _, _| {
                                     let display_pane = display_pane.clone();
                                     menu.entry("Rename", None, move |window, cx| {
-                                        terminal_view.update(cx, |this, cx| this.rename_terminal(&terminal_view::RenameTerminal, window, cx));
+                                        terminal_view.update(cx, |this, cx| {
+                                            this.rename_terminal(
+                                                &terminal_view::RenameTerminal,
+                                                window,
+                                                cx,
+                                            )
+                                        });
                                     })
-                                    .entry("Close", None, move |window, cx| {
-                                        if let Some(pane) = display_pane.upgrade() {
-                                            pane.update(cx, |pane, cx| {
-                                                pane.close_item_by_id(terminal_id, workspace::SaveIntent::Close, window, cx).detach_and_log_err(cx);
-                                            });
-                                        }
-                                    })
+                                    .entry(
+                                        "Close",
+                                        None,
+                                        move |window, cx| {
+                                            if let Some(pane) = display_pane.upgrade() {
+                                                pane.update(cx, |pane, cx| {
+                                                    pane.close_item_by_id(
+                                                        terminal_id,
+                                                        workspace::SaveIntent::Close,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                    .detach_and_log_err(cx);
+                                                });
+                                            }
+                                        },
+                                    )
                                 })
                             })
                             .into_any_element(),
@@ -715,7 +795,10 @@ impl Render for TerminalListPanel {
                                     .icon_size(IconSize::Small)
                                     .tooltip(Tooltip::text(i18n::t("file_list")))
                                     .on_click(|_, window, cx| {
-                                        window.dispatch_action(Box::new(crate::file_list_panel::ToggleFocus), cx);
+                                        window.dispatch_action(
+                                            Box::new(crate::file_list_panel::ToggleFocus),
+                                            cx,
+                                        );
                                     }),
                             )
                             .child(
@@ -763,7 +846,12 @@ impl Panel for TerminalListPanel {
         matches!(position, DockPosition::Left)
     }
 
-    fn set_position(&mut self, position: DockPosition, _window: &mut Window, _cx: &mut Context<Self>) {
+    fn set_position(
+        &mut self,
+        position: DockPosition,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
         self.position = position;
     }
 

@@ -17,7 +17,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "Refresh");
             m.insert("file_list", "File List");
             m.insert("ui_language", "Language");
-            m.insert("ui_language_description", "Interface language. Defaults to the system language.");
+            m.insert(
+                "ui_language_description",
+                "Interface language. Defaults to the system language.",
+            );
             m.insert("language_system", "System");
             m.insert("appearance", "Appearance");
             m.insert("select_theme", "Select Theme…");
@@ -26,6 +29,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("recent_terminals", "Recent Terminals");
             m.insert("recent_folders", "Recent Folders");
             m.insert("open_recent_project", "Open Recent Project");
+            m.insert("llm_providers", "LLM Providers");
+            m.insert(
+                "llm_providers_description",
+                "Configure API keys and settings for your AI providers.",
+            );
             m
         });
         locales.insert("zh-CN", {
@@ -49,6 +57,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("recent_terminals", "最近终端");
             m.insert("recent_folders", "最近文件夹");
             m.insert("open_recent_project", "打开最近项目");
+            m.insert("llm_providers", "大模型服务商");
+            m.insert(
+                "llm_providers_description",
+                "配置 AI 服务商的 API Key 和相关设置。",
+            );
             m
         });
         locales.insert("zh-TW", {
@@ -83,7 +96,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "更新");
             m.insert("file_list", "ファイル一覧");
             m.insert("ui_language", "言語");
-            m.insert("ui_language_description", "インターフェースの言語。デフォルトはシステム言語です。");
+            m.insert(
+                "ui_language_description",
+                "インターフェースの言語。デフォルトはシステム言語です。",
+            );
             m.insert("language_system", "システムに従う");
             m.insert("appearance", "外観");
             m.insert("select_theme", "テーマを選択…");
@@ -103,7 +119,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "새로고침");
             m.insert("file_list", "파일 목록");
             m.insert("ui_language", "언어");
-            m.insert("ui_language_description", "인터페이스 언어입니다. 기본값은 시스템 언어입니다.");
+            m.insert(
+                "ui_language_description",
+                "인터페이스 언어입니다. 기본값은 시스템 언어입니다.",
+            );
             m.insert("language_system", "시스템");
             m.insert("appearance", "모양");
             m.insert("select_theme", "테마 선택…");
@@ -123,7 +142,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "Actualizar");
             m.insert("file_list", "Lista de archivos");
             m.insert("ui_language", "Idioma");
-            m.insert("ui_language_description", "Idioma de la interfaz. Por defecto usa el idioma del sistema.");
+            m.insert(
+                "ui_language_description",
+                "Idioma de la interfaz. Por defecto usa el idioma del sistema.",
+            );
             m.insert("language_system", "Sistema");
             m.insert("appearance", "Apariencia");
             m.insert("select_theme", "Seleccionar tema…");
@@ -143,7 +165,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "Actualiser");
             m.insert("file_list", "Liste des fichiers");
             m.insert("ui_language", "Langue");
-            m.insert("ui_language_description", "Langue de l'interface. Suit la langue du système par défaut.");
+            m.insert(
+                "ui_language_description",
+                "Langue de l'interface. Suit la langue du système par défaut.",
+            );
             m.insert("language_system", "Système");
             m.insert("appearance", "Apparence");
             m.insert("select_theme", "Choisir un thème…");
@@ -163,7 +188,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "Aktualisieren");
             m.insert("file_list", "Dateiliste");
             m.insert("ui_language", "Sprache");
-            m.insert("ui_language_description", "Oberflächensprache. Standardmäßig Systemsprache.");
+            m.insert(
+                "ui_language_description",
+                "Oberflächensprache. Standardmäßig Systemsprache.",
+            );
             m.insert("language_system", "System");
             m.insert("appearance", "Erscheinungsbild");
             m.insert("select_theme", "Design auswählen…");
@@ -183,7 +211,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "Atualizar");
             m.insert("file_list", "Lista de arquivos");
             m.insert("ui_language", "Idioma");
-            m.insert("ui_language_description", "Idioma da interface. Por padrão, segue o idioma do sistema.");
+            m.insert(
+                "ui_language_description",
+                "Idioma da interface. Por padrão, segue o idioma do sistema.",
+            );
             m.insert("language_system", "Sistema");
             m.insert("appearance", "Aparência");
             m.insert("select_theme", "Selecionar tema…");
@@ -203,7 +234,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "Обновить");
             m.insert("file_list", "Список файлов");
             m.insert("ui_language", "Язык");
-            m.insert("ui_language_description", "Язык интерфейса. По умолчанию — язык системы.");
+            m.insert(
+                "ui_language_description",
+                "Язык интерфейса. По умолчанию — язык системы.",
+            );
             m.insert("language_system", "Системный");
             m.insert("appearance", "Оформление");
             m.insert("select_theme", "Выбрать тему…");
@@ -223,7 +257,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "تحديث");
             m.insert("file_list", "قائمة الملفات");
             m.insert("ui_language", "اللغة");
-            m.insert("ui_language_description", "لغة الواجهة. الافتراضي هو لغة النظام.");
+            m.insert(
+                "ui_language_description",
+                "لغة الواجهة. الافتراضي هو لغة النظام.",
+            );
             m.insert("language_system", "النظام");
             m.insert("appearance", "المظهر");
             m.insert("select_theme", "اختر السمة…");
@@ -243,7 +280,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "रीफ़्रेश");
             m.insert("file_list", "फ़ाइल सूची");
             m.insert("ui_language", "भाषा");
-            m.insert("ui_language_description", "इंटरफ़ेस भाषा। डिफ़ॉल्ट रूप से सिस्टम भाषा।");
+            m.insert(
+                "ui_language_description",
+                "इंटरफ़ेस भाषा। डिफ़ॉल्ट रूप से सिस्टम भाषा।",
+            );
             m.insert("language_system", "सिस्टम");
             m.insert("appearance", "दिखावट");
             m.insert("select_theme", "थीम चुनें…");
@@ -263,7 +303,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "Aggiorna");
             m.insert("file_list", "Elenco file");
             m.insert("ui_language", "Lingua");
-            m.insert("ui_language_description", "Lingua dell'interfaccia. Predefinita: lingua di sistema.");
+            m.insert(
+                "ui_language_description",
+                "Lingua dell'interfaccia. Predefinita: lingua di sistema.",
+            );
             m.insert("language_system", "Sistema");
             m.insert("appearance", "Aspetto");
             m.insert("select_theme", "Seleziona tema…");
@@ -283,7 +326,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "Vernieuwen");
             m.insert("file_list", "Bestandenlijst");
             m.insert("ui_language", "Taal");
-            m.insert("ui_language_description", "Interfacetaal. Standaard volgt de systeemtaal.");
+            m.insert(
+                "ui_language_description",
+                "Interfacetaal. Standaard volgt de systeemtaal.",
+            );
             m.insert("language_system", "Systeem");
             m.insert("appearance", "Uiterlijk");
             m.insert("select_theme", "Thema kiezen…");
@@ -303,7 +349,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "Yenile");
             m.insert("file_list", "Dosya listesi");
             m.insert("ui_language", "Dil");
-            m.insert("ui_language_description", "Arayüz dili. Varsayılan olarak sistem dilini kullanır.");
+            m.insert(
+                "ui_language_description",
+                "Arayüz dili. Varsayılan olarak sistem dilini kullanır.",
+            );
             m.insert("language_system", "Sistem");
             m.insert("appearance", "Görünüm");
             m.insert("select_theme", "Tema seç…");
@@ -323,7 +372,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "Odśwież");
             m.insert("file_list", "Lista plików");
             m.insert("ui_language", "Język");
-            m.insert("ui_language_description", "Język interfejsu. Domyślnie język systemu.");
+            m.insert(
+                "ui_language_description",
+                "Język interfejsu. Domyślnie język systemu.",
+            );
             m.insert("language_system", "Systemowy");
             m.insert("appearance", "Wygląd");
             m.insert("select_theme", "Wybierz motyw…");
@@ -343,7 +395,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "Làm mới");
             m.insert("file_list", "Danh sách tệp");
             m.insert("ui_language", "Ngôn ngữ");
-            m.insert("ui_language_description", "Ngôn ngữ giao diện. Mặc định theo ngôn ngữ hệ thống.");
+            m.insert(
+                "ui_language_description",
+                "Ngôn ngữ giao diện. Mặc định theo ngôn ngữ hệ thống.",
+            );
             m.insert("language_system", "Hệ thống");
             m.insert("appearance", "Giao diện");
             m.insert("select_theme", "Chọn chủ đề…");
@@ -363,7 +418,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "รีเฟรช");
             m.insert("file_list", "รายการไฟล์");
             m.insert("ui_language", "ภาษา");
-            m.insert("ui_language_description", "ภาษาของอินเทอร์เฟซ ค่าเริ่มต้นตามภาษาของระบบ");
+            m.insert(
+                "ui_language_description",
+                "ภาษาของอินเทอร์เฟซ ค่าเริ่มต้นตามภาษาของระบบ",
+            );
             m.insert("language_system", "ระบบ");
             m.insert("appearance", "ลักษณะ");
             m.insert("select_theme", "เลือกธีม…");
@@ -383,7 +441,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "Muat ulang");
             m.insert("file_list", "Daftar file");
             m.insert("ui_language", "Bahasa");
-            m.insert("ui_language_description", "Bahasa antarmuka. Default mengikuti bahasa sistem.");
+            m.insert(
+                "ui_language_description",
+                "Bahasa antarmuka. Default mengikuti bahasa sistem.",
+            );
             m.insert("language_system", "Sistem");
             m.insert("appearance", "Tampilan");
             m.insert("select_theme", "Pilih tema…");
@@ -403,7 +464,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "Оновити");
             m.insert("file_list", "Список файлів");
             m.insert("ui_language", "Мова");
-            m.insert("ui_language_description", "Мова інтерфейсу. За замовчуванням — мова системи.");
+            m.insert(
+                "ui_language_description",
+                "Мова інтерфейсу. За замовчуванням — мова системи.",
+            );
             m.insert("language_system", "Системна");
             m.insert("appearance", "Вигляд");
             m.insert("select_theme", "Вибрати тему…");

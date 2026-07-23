@@ -1,18 +1,20 @@
+mod agent_panel;
 mod app_menus;
 mod app_title_bar;
 mod file_list_panel;
+mod llm_provider_settings;
 mod settings_window;
 mod terminal_list_panel;
-mod agent_panel;
 use std::sync::Arc;
 
 use assets::Assets;
 use client::{Client, ProxySettings, UserStore};
 use db::kvp::KeyValueStore;
+use file_list_panel::FileListPanel;
 use fs::{Fs, RealFs};
 use futures::channel::oneshot;
 use git::GitHostingProviderRegistry;
-use gpui::{AppContext as _, Application, TaskExt, point, px};
+use gpui::{AppContext as _, Application, IntoElement, ParentElement, Styled, TaskExt, point, px};
 use gpui_tokio::Tokio;
 use language::LanguageRegistry;
 use node_runtime::{NodeBinaryOptions, NodeRuntime};
@@ -20,10 +22,13 @@ use project::Project;
 use release_channel::AppVersion;
 use reqwest_client::ReqwestClient;
 use session::{AppSession, Session};
-use settings::{KeybindSource, KeymapFile, Settings, SettingsStore, DEFAULT_KEYMAP_PATH, VIM_KEYMAP_PATH};
+use settings::{
+    DEFAULT_KEYMAP_PATH, KeybindSource, KeymapFile, Settings, SettingsStore, VIM_KEYMAP_PATH,
+};
 use terminal_list_panel::TerminalListPanel;
-use file_list_panel::FileListPanel;
 use theme::{ActiveTheme, LoadThemes};
+use ui::ButtonCommon;
+use ui::Clickable;
 use util::ResultExt;
 use uuid::Uuid;
 use vim_mode_setting::VimModeSetting;
@@ -43,8 +48,8 @@ fn main() {
 
     let app_version = AppVersion::load(env!("CARGO_PKG_VERSION"), None, None);
 
-
-    let app = Application::with_platform(gpui_platform::current_platform(false)).with_assets(Assets);
+    let app =
+        Application::with_platform(gpui_platform::current_platform(false)).with_assets(Assets);
 
     // Start IPC Server
     let (ipc_port, ipc_token) = session::ipc_server::start_ipc_server().unwrap();
@@ -52,13 +57,14 @@ fn main() {
         "port": ipc_port,
         "token": ipc_token
     });
-    
-    let ipc_path = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join("ink/ipc.json");
+
+    let ipc_path = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("ink/ipc.json");
     if let Some(parent) = ipc_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
     std::fs::write(&ipc_path, serde_json::to_string(&ipc_info).unwrap()).ok();
-
 
     let app_db = db::AppDatabase::new();
     let session_id = Uuid::new_v4().to_string();
@@ -97,6 +103,7 @@ fn main() {
         settings::init(cx);
         i18n::init(cx);
         settings_window::init(cx);
+        llm_provider_settings::init(cx);
 
         let user_agent = format!(
             "Ink/{} ({}; {})",
@@ -135,7 +142,11 @@ fn main() {
                 use_paths: None,
             }))
             .log_err();
-        let node_runtime = NodeRuntime::new(client.http_client(), Some(shell_env_loaded_rx), node_options_rx);
+        let node_runtime = NodeRuntime::new(
+            client.http_client(),
+            Some(shell_env_loaded_rx),
+            node_options_rx,
+        );
 
         Project::init(&client, cx);
         client::init(&client, cx);
@@ -162,10 +173,15 @@ fn main() {
         editor::init(cx);
         workspace::init(app_state.clone(), cx);
         language_model::init(cx);
-        client::llm_token::RefreshLlmTokenListener::register(client.clone(), app_state.user_store.clone(), cx);
+        client::llm_token::RefreshLlmTokenListener::register(
+            client.clone(),
+            app_state.user_store.clone(),
+            cx,
+        );
         language_models::init(app_state.user_store.clone(), client.clone(), cx);
         terminal_list_panel::init(cx);
-        agent_panel::init(cx);        file_list_panel::init(cx);
+        agent_panel::init(cx);
+        file_list_panel::init(cx);
         app_title_bar::init(cx);
         command_palette_hooks::init(cx);
         search::init(cx);
@@ -212,12 +228,44 @@ fn main() {
     });
 }
 
-fn init_workspace(workspace: &mut Workspace, window: &mut gpui::Window, cx: &mut gpui::Context<Workspace>) {
+fn init_workspace(
+    workspace: &mut Workspace,
+    window: &mut gpui::Window,
+    cx: &mut gpui::Context<Workspace>,
+) {
     let workspace_handle = cx.entity();
     let display_pane = workspace.active_pane().clone();
     let project = workspace.project().clone();
-    let panel = cx.new(|cx| TerminalListPanel::new(workspace_handle.clone(), display_pane, project, window, cx));
+    let panel = cx.new(|cx| {
+        TerminalListPanel::new(
+            workspace_handle.clone(),
+            display_pane.clone(),
+            project,
+            window,
+            cx,
+        )
+    });
     workspace.add_panel(panel.clone(), window, cx);
+
+    // Replace the pane tab bar's "+" popover menu with a single button that
+    // creates a new terminal in the active group.
+    display_pane.update(cx, |pane, cx| {
+        pane.set_render_tab_bar_buttons(cx, |_pane, _window, _cx| {
+            let right_children = ui::h_flex()
+                .gap_1()
+                .child(
+                    ui::IconButton::new("new-terminal-tab", ui::IconName::Plus)
+                        .icon_size(ui::IconSize::Small)
+                        .tooltip(ui::Tooltip::text("New Terminal"))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(terminal_list_panel::NewTerminal), cx);
+                        }),
+                )
+                .into_any_element()
+                .into();
+            (None, right_children)
+        });
+    });
 
     let file_panel = cx.new(|cx| FileListPanel::new(workspace_handle.clone(), cx));
     workspace.add_panel(file_panel, window, cx);
@@ -233,8 +281,10 @@ fn init_workspace(workspace: &mut Workspace, window: &mut gpui::Window, cx: &mut
     let cursor_position = cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
 
     workspace.status_bar().update(cx, |status_bar, cx| {
-        let agent_button = cx.new(|cx| agent_panel::AgentPanelButton::new(workspace_handle.clone().downgrade(), cx));
-        status_bar.add_right_item(agent_button, window, cx);        status_bar.add_left_item(active_file_name, window, cx);
+        let agent_button = cx
+            .new(|cx| agent_panel::AgentPanelButton::new(workspace_handle.clone().downgrade(), cx));
+        status_bar.add_right_item(agent_button, window, cx);
+        status_bar.add_left_item(active_file_name, window, cx);
         status_bar.add_right_item(active_buffer_encoding, window, cx);
         status_bar.add_right_item(active_buffer_language, window, cx);
         status_bar.add_right_item(line_ending_indicator, window, cx);
@@ -296,9 +346,8 @@ fn reload_keymaps(cx: &mut gpui::App, mut user_key_bindings: Vec<gpui::KeyBindin
 }
 
 fn load_default_keymap(cx: &mut gpui::App) {
-    let mut key_bindings =
-        KeymapFile::load_asset_allow_partial_failure(DEFAULT_KEYMAP_PATH, cx)
-            .expect("failed to load default keymap");
+    let mut key_bindings = KeymapFile::load_asset_allow_partial_failure(DEFAULT_KEYMAP_PATH, cx)
+        .expect("failed to load default keymap");
     for key_binding in &mut key_bindings {
         key_binding.set_meta(KeybindSource::Default.meta());
     }

@@ -106,7 +106,10 @@ impl Render for SettingsWindow {
 
         let language_label = Self::current_language_label(cx);
         let current_font_size = theme_settings::ThemeSettings::get_global(cx).buffer_font_size(cx);
-        let current_font_family = theme_settings::ThemeSettings::get_global(cx).buffer_font.family.clone();
+        let current_font_family = theme_settings::ThemeSettings::get_global(cx)
+            .buffer_font
+            .family
+            .clone();
 
         div()
             .id("ink-settings")
@@ -203,6 +206,31 @@ impl Render for SettingsWindow {
                                         );
                                     }),
                             ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(Label::new(i18n::t("llm_providers")))
+                            .child(
+                                Label::new(i18n::t("llm_providers_description"))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                Button::new("open-llm-providers", i18n::t("llm_providers"))
+                                    .style(ButtonStyle::Outlined)
+                                    .size(ButtonSize::Medium)
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(
+                                                crate::llm_provider_settings::OpenLlmProviderSettings,
+                                            ),
+                                            cx,
+                                        );
+                                    }),
+                            ),
                     ),
             )
     }
@@ -217,7 +245,11 @@ fn build_language_menu(
     debug_assert_eq!(variants.len(), LANGUAGE_LABELS.len());
 
     ContextMenu::build(window, cx, move |mut menu, _, _| {
-        for (variant, label) in variants.iter().copied().zip(LANGUAGE_LABELS.iter().copied()) {
+        for (variant, label) in variants
+            .iter()
+            .copied()
+            .zip(LANGUAGE_LABELS.iter().copied())
+        {
             let display = if variant == UiLanguage::System {
                 i18n::t("language_system")
             } else {
@@ -248,18 +280,15 @@ fn build_font_size_menu(window: &mut Window, cx: &mut App) -> Entity<ContextMenu
     ContextMenu::build(window, cx, |mut menu, _, _| {
         for size in [11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 24.0] {
             let label = format!("{}", size);
-            menu = menu.entry(
-                label,
-                None,
-                move |_window, cx| {
-                    let fs = <dyn Fs>::global(cx);
-                    update_settings_file(fs, cx, move |content, _| {
-                        content.theme.buffer_font_size = Some(settings::FontSize(size));
-                        content.theme.ui_font_size = Some(settings::FontSize(size));
-                        content.terminal.get_or_insert_default().font_size = Some(settings::FontSize(size));
-                    });
-                },
-            );
+            menu = menu.entry(label, None, move |_window, cx| {
+                let fs = <dyn Fs>::global(cx);
+                update_settings_file(fs, cx, move |content, _| {
+                    content.theme.buffer_font_size = Some(settings::FontSize(size));
+                    content.theme.ui_font_size = Some(settings::FontSize(size));
+                    content.terminal.get_or_insert_default().font_size =
+                        Some(settings::FontSize(size));
+                });
+            });
         }
         menu
     })
@@ -275,24 +304,24 @@ fn build_font_family_menu(window: &mut Window, cx: &mut App) -> Entity<ContextMe
             "Courier New",
             "Fira Code",
             "JetBrains Mono",
-            "Hack"
+            "Hack",
         ] {
             let family_str = family.to_string();
-            let label = if family == ".SystemUIFont" { "System" } else { family };
-            menu = menu.entry(
-                label.to_string(),
-                None,
-                move |_window, cx| {
-                    let fs = <dyn Fs>::global(cx);
-                    let font_family = family_str.clone();
-                    update_settings_file(fs, cx, move |content, _| {
-                        let name = settings::FontFamilyName(std::sync::Arc::from(font_family.as_str()));
-                        content.theme.buffer_font_family = Some(name.clone());
-                        content.theme.ui_font_family = Some(name.clone());
-                        content.terminal.get_or_insert_default().font_family = Some(name);
-                    });
-                },
-            );
+            let label = if family == ".SystemUIFont" {
+                "System"
+            } else {
+                family
+            };
+            menu = menu.entry(label.to_string(), None, move |_window, cx| {
+                let fs = <dyn Fs>::global(cx);
+                let font_family = family_str.clone();
+                update_settings_file(fs, cx, move |content, _| {
+                    let name = settings::FontFamilyName(std::sync::Arc::from(font_family.as_str()));
+                    content.theme.buffer_font_family = Some(name.clone());
+                    content.theme.ui_font_family = Some(name.clone());
+                    content.terminal.get_or_insert_default().font_family = Some(name);
+                });
+            });
         }
         menu
     })

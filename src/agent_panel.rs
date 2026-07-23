@@ -1,13 +1,13 @@
-use language_model::LanguageModelRegistry;
 use gpui::{
-    actions, App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, WeakEntity, Window, div, ParentElement, Styled,
+    App, Context, Entity, FocusHandle, Focusable, IntoElement, ParentElement, Render, Styled,
+    WeakEntity, Window, actions, div,
 };
-use ui::{prelude::*, IconName, Label, LabelSize};
+use language_model::{IconOrSvg, LanguageModelRegistry};
+use ui::{Icon, IconName, Label, LabelSize, prelude::*};
 use workspace::{
-    dock::{DockPosition, Panel, PanelEvent},
     Workspace,
+    dock::{DockPosition, Panel, PanelEvent},
 };
-
 
 actions!(agent_panel, [ToggleFocus]);
 
@@ -49,44 +49,104 @@ impl Render for AgentPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let registry = LanguageModelRegistry::read_global(cx);
         let providers = registry.visible_providers();
+        let authenticated_count = providers.iter().filter(|p| p.is_authenticated(cx)).count();
 
-        let mut provider_list = div().flex_col().gap_2();
+        let mut provider_list = div().flex_col().gap_1();
         for provider in providers {
             let is_auth = provider.is_authenticated(cx);
+            let icon = match provider.icon() {
+                IconOrSvg::Svg(path) => Icon::from_external_svg(path),
+                IconOrSvg::Icon(name) => Icon::new(name),
+            }
+            .size(IconSize::Small)
+            .color(if is_auth {
+                Color::Default
+            } else {
+                Color::Muted
+            });
+
             provider_list = provider_list.child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(Label::new(provider.name().0.clone()).size(LabelSize::Default))
-                    .child(Label::new(if is_auth { " (Ready)" } else { " (Needs Config)" }).size(LabelSize::Small).color(if is_auth { Color::Success } else { Color::Muted }))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(cx.theme().colors().surface_background)
+                    .child(icon)
+                    .child(
+                        Label::new(provider.name().0.clone())
+                            .size(LabelSize::Small)
+                            .color(if is_auth {
+                                Color::Default
+                            } else {
+                                Color::Muted
+                            }),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Label::new(if is_auth { "Ready" } else { "Needs Config" })
+                            .size(LabelSize::XSmall)
+                            .color(if is_auth {
+                                Color::Success
+                            } else {
+                                Color::Warning
+                            }),
+                    ),
             );
         }
 
         div()
             .size_full()
             .track_focus(&self.focus_handle)
-            .p_4()
-            .child(Label::new("Agent Panel").size(LabelSize::Large))
+            .flex()
+            .flex_col()
             .child(
                 div()
-                    .mt_4()
-                    .child(Label::new("LLM Providers").size(LabelSize::Default))
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .child(Label::new("Agent").size(LabelSize::Default)),
+            )
+            .child(
+                div()
+                    .id("agent-panel-scroll")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .p_3()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
                     .child(
                         div()
-                            .mt_2()
-                            .p_2()
-                            .bg(cx.theme().colors().surface_background)
-                            .rounded_md()
-                            .child(provider_list)
+                            .flex()
+                            .flex_col()
+                            .gap_1()
                             .child(
-                                div().mt_4().child(
-                                    ui::Button::new("open-settings", "Configure Providers").on_click(|_, window, cx| {
-                                            window.dispatch_action(Box::new(zed_actions::OpenSettingsPage { page: "AI".to_string(), target: None }), cx);
-                                        })
-                                )
+                                h_flex()
+                                    .justify_between()
+                                    .child(Label::new("LLM Providers").size(LabelSize::Small))
+                                    .child(
+                                        Label::new(format!("{authenticated_count} ready"))
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    ),
                             )
+                            .child(provider_list),
                     )
+                    .child(
+                        ui::Button::new("open-llm-settings", "Configure Providers…")
+                            .style(ui::ButtonStyle::Outlined)
+                            .size(ui::ButtonSize::Medium)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(
+                                    Box::new(crate::llm_provider_settings::OpenLlmProviderSettings),
+                                    cx,
+                                );
+                            }),
+                    ),
             )
     }
 }
@@ -104,7 +164,12 @@ impl Panel for AgentPanel {
     fn position_is_valid(&self, position: DockPosition) -> bool {
         matches!(position, DockPosition::Right | DockPosition::Left)
     }
-    fn set_position(&mut self, position: DockPosition, _window: &mut Window, _cx: &mut Context<Self>) {
+    fn set_position(
+        &mut self,
+        position: DockPosition,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
         self.position = position;
     }
     fn default_size(&self, _window: &Window, _cx: &App) -> gpui::Pixels {
@@ -153,6 +218,14 @@ impl Render for AgentPanelButton {
 }
 
 impl workspace::StatusItemView for AgentPanelButton {
-    fn set_active_pane_item(&mut self, _: Option<&dyn workspace::ItemHandle>, _: &mut Window, _: &mut Context<Self>) {}
-    fn hide_setting(&self, _: &App) -> Option<workspace::HideStatusItem> { None }
+    fn set_active_pane_item(
+        &mut self,
+        _: Option<&dyn workspace::ItemHandle>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+    }
+    fn hide_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
+        None
+    }
 }
