@@ -1,4 +1,3 @@
-mod agent_panel;
 mod app_icon;
 mod app_menus;
 mod app_title_bar;
@@ -158,6 +157,7 @@ fn main() {
         );
 
         Project::init(&client, cx);
+        project::DisableAiSettings::register(cx);
         client::init(&client, cx);
         feature_flags::FeatureFlagStore::init(cx);
 
@@ -190,7 +190,13 @@ fn main() {
         language_models::init(app_state.user_store.clone(), client.clone(), cx);
         agent_settings::AgentSettings::register(cx);
         terminal_list_panel::init(cx);
-        agent_panel::init(cx);
+        agent_ui::init(
+            app_state.fs.clone(),
+            app_state.languages.clone(),
+            true,
+            false,
+            cx,
+        );
         file_list_panel::init(cx);
         app_title_bar::init(cx);
         command_palette_hooks::init(cx);
@@ -229,6 +235,18 @@ fn main() {
         cx.set_menus(app_menus::app_menus(cx));
         cx.activate(true);
 
+        // Ensure every workspace (including those created by Open Project)
+        // gets Terry's terminal/file/agent panels — not just the first empty window.
+        cx.observe_new(|_workspace: &mut Workspace, window, cx| {
+            let Some(window) = window else {
+                return;
+            };
+            cx.defer_in(window, |workspace, window, cx| {
+                init_workspace(workspace, window, cx);
+            });
+        })
+        .detach();
+
         workspace::open_new(OpenOptions::default(), app_state.clone(), cx, {
             move |workspace, window, cx| {
                 init_workspace(workspace, window, cx);
@@ -243,92 +261,114 @@ fn init_workspace(
     window: &mut gpui::Window,
     cx: &mut gpui::Context<Workspace>,
 ) {
+    // Idempotent: project-open paths may create workspaces without the
+    // open_new init callback, and observe_new + open_new can both fire.
+    let has_terminal = workspace.panel::<TerminalListPanel>(cx).is_some();
+    let has_files = workspace.panel::<FileListPanel>(cx).is_some();
+    let has_agent = workspace.panel::<agent_ui::AgentPanel>(cx).is_some();
+    if has_terminal && has_files && has_agent {
+        return;
+    }
+
     let workspace_handle = cx.entity();
     let display_pane = workspace.active_pane().clone();
     let project = workspace.project().clone();
-    let panel = cx.new(|cx| {
-        TerminalListPanel::new(
-            workspace_handle.clone(),
-            display_pane.clone(),
-            project,
-            window,
-            cx,
-        )
-    });
-    workspace.add_panel(panel.clone(), window, cx);
 
-    // Tab bar: quick "+" creates a terminal in the active group; the following
-    // button restores the original pane "New…" popover menu unchanged.
-    display_pane.update(cx, |pane, cx| {
-        pane.set_render_tab_bar_buttons(cx, |pane, _window, _cx| {
-            let new_item_menu_handle = pane.new_item_context_menu_handle.clone();
-            let right_children = ui::h_flex()
-                .gap_1()
-                .child(
-                    ui::IconButton::new("new-terminal-tab", ui::IconName::Plus)
-                        .icon_size(ui::IconSize::Small)
-                        .tooltip(Tooltip::text("New Terminal"))
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(terminal_list_panel::NewTerminal), cx);
-                        }),
-                )
-                .child(
-                    PopoverMenu::new("pane-tab-bar-popover-menu")
-                        .trigger_with_tooltip(
-                            ui::IconButton::new("new-menu", ui::IconName::ChevronDown)
-                                .icon_size(ui::IconSize::Small),
-                            Tooltip::text("New…"),
-                        )
-                        .anchor(Anchor::TopRight)
-                        .with_handle(new_item_menu_handle)
-                        .menu(move |window, cx| {
-                            Some(ContextMenu::build(window, cx, |menu, _, _| {
-                                menu.action("New File", workspace::NewFile.boxed_clone())
-                                    .action(
-                                        "Open File",
-                                        workspace::ToggleFileFinder::default().boxed_clone(),
-                                    )
-                                    .separator()
-                                    .action(
-                                        "Search Project",
-                                        workspace::DeploySearch::default().boxed_clone(),
-                                    )
-                                    .action(
-                                        "Search Symbols",
-                                        workspace::ToggleProjectSymbols.boxed_clone(),
-                                    )
-                                    .separator()
-                                    .action(
-                                        "New Terminal",
-                                        workspace::NewTerminal::default().boxed_clone(),
-                                    )
-                                    .action(
-                                        "New Center Terminal",
-                                        workspace::NewCenterTerminal::default().boxed_clone(),
-                                    )
-                            }))
-                        }),
-                )
-                .into_any_element()
-                .into();
-            (None, right_children)
+    let terminal_panel = if has_terminal {
+        workspace.panel::<TerminalListPanel>(cx).unwrap()
+    } else {
+        let panel = cx.new(|cx| {
+            TerminalListPanel::new(
+                workspace_handle.clone(),
+                display_pane.clone(),
+                project.clone(),
+                window,
+                cx,
+            )
         });
-    });
+        workspace.add_panel(panel.clone(), window, cx);
+        panel
+    };
 
-    let file_panel = cx.new(|cx| FileListPanel::new(workspace_handle.clone(), cx));
-    workspace.add_panel(file_panel, window, cx);
-    let agent_fs = workspace.app_state().fs.clone();
-    let agent_project = workspace.project().clone();
-    let agent_panel = cx.new(|cx| {
-        agent_panel::AgentPanel::new(
-            workspace_handle.clone(),
-            agent_project,
-            agent_fs,
-            window,
-            cx,
-        )
-    });
-    workspace.add_panel(agent_panel, window, cx);
+    if !has_terminal {
+        // Tab bar: quick "+" creates a terminal in the active group; the following
+        // button restores the original pane "New…" popover menu unchanged.
+        display_pane.update(cx, |pane, cx| {
+            pane.set_render_tab_bar_buttons(cx, |pane, _window, _cx| {
+                let new_item_menu_handle = pane.new_item_context_menu_handle.clone();
+                let right_children = ui::h_flex()
+                    .gap_1()
+                    .child(
+                        ui::IconButton::new("new-terminal-tab", ui::IconName::Plus)
+                            .icon_size(ui::IconSize::Small)
+                            .tooltip(Tooltip::text("New Terminal"))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(terminal_list_panel::NewTerminal), cx);
+                            }),
+                    )
+                    .child(
+                        PopoverMenu::new("pane-tab-bar-popover-menu")
+                            .trigger_with_tooltip(
+                                ui::IconButton::new("new-menu", ui::IconName::ChevronDown)
+                                    .icon_size(ui::IconSize::Small),
+                                Tooltip::text("New…"),
+                            )
+                            .anchor(Anchor::TopRight)
+                            .with_handle(new_item_menu_handle)
+                            .menu(move |window, cx| {
+                                Some(ContextMenu::build(window, cx, |menu, _, _| {
+                                    menu.action("New File", workspace::NewFile.boxed_clone())
+                                        .action(
+                                            "Open File",
+                                            workspace::ToggleFileFinder::default().boxed_clone(),
+                                        )
+                                        .separator()
+                                        .action(
+                                            "Search Project",
+                                            workspace::DeploySearch::default().boxed_clone(),
+                                        )
+                                        .action(
+                                            "Search Symbols",
+                                            workspace::ToggleProjectSymbols.boxed_clone(),
+                                        )
+                                        .separator()
+                                        .action(
+                                            "New Terminal",
+                                            workspace::NewTerminal::default().boxed_clone(),
+                                        )
+                                        .action(
+                                            "New Center Terminal",
+                                            workspace::NewCenterTerminal::default().boxed_clone(),
+                                        )
+                                }))
+                            }),
+                    )
+                    .into_any_element()
+                    .into();
+                (None, right_children)
+            });
+        });
+
+        // Seed the terminal list panel with a default group holding one terminal.
+        terminal_panel.update(cx, |panel, cx| {
+            panel.create_default_group(window, cx);
+        });
+    }
+
+    if !has_files {
+        let file_panel = cx.new(|cx| FileListPanel::new(workspace_handle.clone(), cx));
+        workspace.add_panel(file_panel, window, cx);
+    }
+
+    if !has_agent {
+        let agent_panel = cx.new(|cx| agent_ui::AgentPanel::new(workspace, window, cx));
+        workspace.add_panel(agent_panel, window, cx);
+    }
+
+    if has_terminal {
+        return;
+    }
+
     let active_file_name = cx.new(|_| workspace::active_file_name::ActiveFileName::new());
     let active_buffer_encoding =
         cx.new(|_| encoding_selector::ActiveBufferEncoding::new(workspace));
@@ -339,20 +379,12 @@ fn init_workspace(
     let cursor_position = cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
 
     workspace.status_bar().update(cx, |status_bar, cx| {
-        let agent_button = cx
-            .new(|cx| agent_panel::AgentPanelButton::new(workspace_handle.clone().downgrade(), cx));
-        status_bar.add_right_item(agent_button, window, cx);
         status_bar.add_left_item(active_file_name, window, cx);
         status_bar.add_right_item(active_buffer_encoding, window, cx);
         status_bar.add_right_item(active_buffer_language, window, cx);
         status_bar.add_right_item(line_ending_indicator, window, cx);
         status_bar.add_right_item(vim_mode_indicator, window, cx);
         status_bar.add_right_item(cursor_position, window, cx);
-    });
-
-    // Seed the terminal list panel with a default group holding one terminal.
-    panel.update(cx, |panel, cx| {
-        panel.create_default_group(window, cx);
     });
 }
 

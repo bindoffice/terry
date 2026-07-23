@@ -1,11 +1,10 @@
 use crate::{
-    NewFile, Open, OpenMode, PathList, RecentWorkspace, SerializedWorkspaceLocation,
+    NewFile, NewTerminal, Open, OpenMode, PathList, RecentWorkspace, SerializedWorkspaceLocation,
     ToggleWorkspaceSidebar, Workspace, WorkspaceSettings,
     item::{Item, ItemEvent},
     persistence::WorkspaceDb,
 };
 use agent_settings::AgentSettings;
-use git::Clone as GitClone;
 use gpui::{
     Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
     ParentElement, Render, Styled, Task, TaskExt, Window, actions,
@@ -177,9 +176,9 @@ const CONTENT: (Section<4>, Section<3>) = (
                 visibility_guard: SectionVisibility::Always,
             },
             SectionEntry {
-                icon: IconName::CloudDownload,
-                title: "Clone Repository",
-                action: &GitClone,
+                icon: IconName::Terminal,
+                title: "New Terminal",
+                action: &NewTerminal::DEFAULT,
                 visibility_guard: SectionVisibility::Always,
             },
             SectionEntry {

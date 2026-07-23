@@ -78,6 +78,7 @@ pub struct TerminalListPanel {
     focus_handle: FocusHandle,
     position: DockPosition,
     _workspace_subscription: Subscription,
+    _project_subscription: Subscription,
     /// The center pane that displays the active group's terminals as tabs.
     display_pane: WeakEntity<Pane>,
     groups: Vec<TerminalGroup>,
@@ -102,6 +103,11 @@ impl TerminalListPanel {
         let _workspace_subscription = cx.subscribe(&workspace, |this, _, event, cx| {
             this.on_workspace_event(event, cx);
         });
+        let _project_subscription = cx.subscribe(&project, |this, _project, event, cx| {
+            if let project::Event::WorktreeAdded(id) = event {
+                this.on_worktree_added(*id, cx);
+            }
+        });
 
         let rename_editor = cx.new(|cx| Editor::single_line(window, cx));
         cx.subscribe(&rename_editor, |this, _editor, event, cx| {
@@ -117,6 +123,7 @@ impl TerminalListPanel {
             focus_handle,
             position: DockPosition::Left,
             _workspace_subscription,
+            _project_subscription,
             display_pane: display_pane.downgrade(),
             groups: Vec::new(),
             active_group_id: GroupId(0),
@@ -278,8 +285,17 @@ impl TerminalListPanel {
         cx: &mut Context<Self>,
     ) {
         let project = self.project.clone();
+        let workspace = self.workspace.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let working_directory = cwd.or_else(|| std::env::current_dir().ok());
+            let working_directory = cwd.or_else(|| {
+                workspace.upgrade().and_then(|workspace| {
+                    cx.update(|_window, cx| {
+                        terminal_view::default_working_directory(workspace.read(cx), cx)
+                    })
+                    .ok()
+                    .flatten()
+                })
+            });
             let terminal = project
                 .update(cx, |project, cx| {
                     project.create_terminal_shell(working_directory, cx)
@@ -321,6 +337,68 @@ impl TerminalListPanel {
             anyhow::Ok(())
         })
         .detach_and_log_err(cx);
+    }
+
+    fn on_worktree_added(&mut self, worktree_id: project::WorktreeId, cx: &mut Context<Self>) {
+        let Some(project) = self.project.upgrade() else {
+            return;
+        };
+        let Some(worktree) = project.read(cx).worktree_for_id(worktree_id, cx) else {
+            return;
+        };
+        let worktree = worktree.read(cx);
+        if !worktree.is_visible() {
+            return;
+        }
+        let cwd = if worktree.root_entry().is_some_and(|entry| entry.is_dir()) {
+            Some(worktree.abs_path().to_path_buf())
+        } else {
+            worktree.abs_path().parent().map(|path| path.to_path_buf())
+        };
+        let Some(cwd) = cwd else {
+            return;
+        };
+
+        if self.groups.iter().any(|group| {
+            group.terminals.iter().any(|tv| {
+                tv.read(cx)
+                    .terminal()
+                    .read(cx)
+                    .working_directory()
+                    .as_ref()
+                    == Some(&cwd)
+            })
+        }) {
+            return;
+        }
+
+        let Some(window) = cx.active_window() else {
+            return;
+        };
+        let panel = cx.entity();
+        let group_id = self.active_group_id;
+        let _ = window.update(cx, |_, window, cx| {
+            panel.update(cx, |this, cx| {
+                if this.groups.is_empty() {
+                    let id = this.new_group_id();
+                    this.groups.push(TerminalGroup {
+                        id,
+                        name: SharedString::from(i18n::t("terminals")),
+                        terminals: Vec::new(),
+                        collapsed: false,
+                        has_unread: false,
+                    });
+                    this.active_group_id = id;
+                }
+                let group_id = if this.groups.iter().any(|group| group.id == group_id) {
+                    group_id
+                } else {
+                    this.active_group_id
+                };
+                this.spawn_terminal(group_id, Some(cwd), window, cx);
+                this.save_session(cx);
+            });
+        });
     }
 
     fn add_terminal_to_group(

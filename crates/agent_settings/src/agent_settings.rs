@@ -403,7 +403,7 @@ impl std::fmt::Display for AgentProfileId {
 
 impl Default for AgentProfileId {
     fn default() -> Self {
-        Self("write".into())
+        Self("terminal".into())
     }
 }
 

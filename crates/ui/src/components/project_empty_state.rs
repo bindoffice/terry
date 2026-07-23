@@ -75,20 +75,22 @@ impl RenderOnce for ProjectEmptyState {
                                 button.on_click(handler)
                             }),
                     )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(Divider::horizontal().color(DividerColor::Border))
-                            .child(Label::new("or").size(LabelSize::XSmall).color(Color::Muted))
-                            .child(Divider::horizontal().color(DividerColor::Border)),
-                    )
-                    .child(
-                        Button::new("clone_repo", "Clone Repository")
-                            .full_width()
-                            .when_some(self.on_clone_repo, |button, handler| {
-                                button.on_click(handler)
-                            }),
-                    ),
+                    .when_some(self.on_clone_repo, |this, handler| {
+                        this.child(
+                            h_flex()
+                                .gap_2()
+                                .child(Divider::horizontal().color(DividerColor::Border))
+                                .child(
+                                    Label::new("or").size(LabelSize::XSmall).color(Color::Muted),
+                                )
+                                .child(Divider::horizontal().color(DividerColor::Border)),
+                        )
+                        .child(
+                            Button::new("clone_repo", "Clone Repository")
+                                .full_width()
+                                .on_click(handler),
+                        )
+                    }),
             )
     }
 }

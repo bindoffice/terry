@@ -505,6 +505,10 @@ pub struct NewTerminal {
     pub local: bool,
 }
 
+impl NewTerminal {
+    pub const DEFAULT: Self = Self { local: false };
+}
+
 /// Increases size of a currently focused dock by a given amount of pixels.
 #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = workspace)]
