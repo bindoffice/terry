@@ -1,45 +1,45 @@
 # Terry
 
-[中文](./README.zh-CN.md)
+[English](./README.en.md)
 
-**Terry** is a terminal-first desktop workspace with a built-in AI agent.  
-It is built on [Zed](https://zed.dev)’s GPUI stack, but focused on terminals, files, and agent workflows — not as a full IDE.
+**Terry** 是一款以终端为中心的桌面工作区，内置 AI Agent。  
+基于 [Zed](https://zed.dev) 的 GPUI 技术栈，但聚焦于**终端、文件与 Agent 工作流**，而不是完整的 IDE。
 
-## Features
+## 功能特性
 
-- **Terminal workspace** — Group and manage multiple terminals; open new sessions with the right working directory
-- **AI Agent** — Chat with LLMs in a side panel; run commands and tools with configurable profiles
-- **MCP** — Connect Model Context Protocol servers to extend agent capabilities
-- **Files panel** — Browse the project tree alongside your terminals
-- **Settings & themes** — Customize shell, appearance, agent models, and more
-- **i18n** — UI strings available in multiple locales (including English and Chinese)
+- **终端工作区** — 分组管理多个终端，按正确工作目录新建会话
+- **AI Agent** — 侧边栏与大模型对话，通过可配置的 Profile 调用命令与工具
+- **MCP** — 接入 Model Context Protocol 服务器，扩展 Agent 能力
+- **文件面板** — 在终端旁浏览项目目录树
+- **设置与主题** — 自定义 Shell、外观、Agent 模型等
+- **国际化** — 界面支持多语言（含中英文）
 
-## Platforms
+## 支持平台
 
-| Platform | Status |
-|----------|--------|
-| macOS (Apple Silicon / Intel) | Supported |
-| Linux (x86_64) | Supported |
-| Windows (x86_64) | Supported |
+| 平台 | 状态 |
+|------|------|
+| macOS（Apple Silicon / Intel） | 支持 |
+| Linux（x86_64） | 支持 |
+| Windows（x86_64） | 支持 |
 
-Release packages are built via GitHub Actions (`.github/workflows/release.yml`).
+发布包由 GitHub Actions 构建（`.github/workflows/release.yml`）。
 
-## Getting started
+## 快速开始
 
-### Prerequisites
+### 环境要求
 
-- Rust **1.95.0** (see `rust-toolchain.toml`)
-- Platform build deps (same family as Zed): CMake, a C/C++ toolchain, and on Linux the usual X11/Wayland/fontconfig libraries
+- Rust **1.95.0**（见 `rust-toolchain.toml`）
+- 平台构建依赖（与 Zed 同类）：CMake、C/C++ 工具链；Linux 还需常见的 X11/Wayland/fontconfig 等库
 
-### Build & run
+### 编译与运行
 
 ```bash
 cargo run --release
 ```
 
-Config and data live under the app name **Terry** (for example `~/.config/terry/` on Linux, `~/Library/Application Support/Terry` on macOS).
+配置与数据目录使用应用名 **Terry**（例如 Linux 上为 `~/.config/terry/`，macOS 上为 `~/Library/Application Support/Terry`）。
 
-### Package locally
+### 本地打包
 
 ```bash
 # macOS
@@ -48,33 +48,33 @@ script/package-macos.sh
 # Linux
 script/package-linux.sh
 
-# Windows (PowerShell)
+# Windows（PowerShell）
 .\script\package-windows.ps1
 ```
 
-Artifacts are written under `target/release/`.
+产物输出在 `target/release/`。
 
-## Project layout
+## 目录结构
 
 ```
-src/                 # App entry, terminal/file panels, menus
-crates/              # Shared libraries (GPUI, terminal, agent, settings, …)
+src/                 # 应用入口、终端/文件面板、菜单
+crates/              # 共享库（GPUI、终端、Agent、设置等）
 agent_ui / crates/agent_ui
-assets/              # Icons, default settings, themes
-script/              # Packaging scripts
-resources/           # App icons and desktop metadata
+assets/              # 图标、默认设置、主题
+script/              # 打包脚本
+resources/           # 应用图标与桌面元数据
 ```
 
-## Relationship to Zed
+## 与 Zed 的关系
 
-Terry reuses substantial code from the [Zed](https://github.com/zed-industries/zed) editor (GPUI, workspace, terminal, agent infrastructure).  
-The product goal is different: a **lightweight terminal + agent workspace**, not a general-purpose code editor.
+Terry 大量复用了 [Zed](https://github.com/zed-industries/zed) 编辑器的代码（GPUI、工作区、终端、Agent 基础设施等）。  
+产品定位不同：面向 **轻量级终端 + Agent 工作区**，而非通用代码编辑器。
 
-## License
+## 许可证
 
-- Application package: **GPL-3.0-or-later** (see `LICENSE-GPL`)
-- Many crates retain their upstream licenses (including Apache-2.0; see `LICENSE-APACHE` and per-crate metadata)
+- 应用包：**GPL-3.0-or-later**（见 `LICENSE-GPL`）
+- 许多 crate 保留上游许可证（含 Apache-2.0；见 `LICENSE-APACHE` 及各 crate 元数据）
 
-## Contributing
+## 参与贡献
 
-Issues and pull requests are welcome. Please keep changes focused; match existing code style, and test on the platform you touch.
+欢迎提 Issue 与 Pull Request。请保持改动聚焦，遵循现有代码风格，并在你改动的目标平台上验证。
