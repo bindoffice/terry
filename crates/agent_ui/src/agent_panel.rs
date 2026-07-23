@@ -6067,27 +6067,6 @@ impl AgentPanel {
             ToolbarMode::EmptyThread
         };
 
-        let is_full_screen = self.is_zoomed(window, cx);
-        let (icon_id, icon_name, tooltip_text) = if is_full_screen {
-            (
-                "disable-full-screen",
-                IconName::Minimize,
-                "Disable Full Screen",
-            )
-        } else {
-            (
-                "enable-full-screen",
-                IconName::Maximize,
-                "Enable Full Screen",
-            )
-        };
-        let full_screen_button = IconButton::new(icon_id, icon_name)
-            .icon_size(IconSize::Small)
-            .tooltip(move |_, cx| Tooltip::for_action(tooltip_text, &ToggleZoom, cx))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.toggle_zoom(&ToggleZoom, window, cx);
-            }));
-
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
 
         let base_container = h_flex()
@@ -6185,7 +6164,6 @@ impl AgentPanel {
                         )
                         .children(sandbox_status)
                         .when(can_create_entries, |this| this.child(new_thread_menu))
-                        .child(full_screen_button)
                         .child(self.render_panel_options_menu(window, cx)),
                 )
                 .into_any_element()

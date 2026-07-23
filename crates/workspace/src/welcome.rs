@@ -7,7 +7,7 @@ use crate::{
 use agent_settings::AgentSettings;
 use gpui::{
     Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    ParentElement, Render, Styled, Task, TaskExt, Window, actions,
+    ParentElement, Render, Styled, Task, TaskExt, Window, actions, img,
 };
 use gpui::{WeakEntity, linear_color_stop, linear_gradient};
 use menu::{SelectNext, SelectPrevious};
@@ -15,11 +15,9 @@ use menu::{SelectNext, SelectPrevious};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{DefaultOpenBehavior, Settings};
-use ui::{ButtonLike, Divider, DividerColor, KeyBinding, Vector, VectorName, prelude::*};
+use ui::{ButtonLike, Divider, DividerColor, KeyBinding, prelude::*};
 use util::ResultExt;
-use zed_actions::{
-    Extensions, OpenKeymap, OpenOnboarding, OpenSettings, assistant::ToggleFocus, command_palette,
-};
+use zed_actions::{OpenOnboarding, OpenSettings, assistant::ToggleFocus, command_palette};
 
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
 #[action(namespace = welcome)]
@@ -159,7 +157,7 @@ impl SectionEntry {
     }
 }
 
-const CONTENT: (Section<4>, Section<3>) = (
+const CONTENT: (Section<4>, Section<1>) = (
     Section {
         title: "Get Started",
         entries: [
@@ -191,33 +189,16 @@ const CONTENT: (Section<4>, Section<3>) = (
     },
     Section {
         title: "Configure",
-        entries: [
-            SectionEntry {
-                icon: IconName::Settings,
-                title: "Open Settings",
-                action: &OpenSettings,
-                visibility_guard: SectionVisibility::Always,
-            },
-            SectionEntry {
-                icon: IconName::Keyboard,
-                title: "Customize Keymaps",
-                action: &OpenKeymap,
-                visibility_guard: SectionVisibility::Always,
-            },
-            SectionEntry {
-                icon: IconName::Blocks,
-                title: "Explore Extensions",
-                action: &Extensions {
-                    category_filter: None,
-                    id: None,
-                },
-                visibility_guard: SectionVisibility::Always,
-            },
-        ],
+        entries: [SectionEntry {
+            icon: IconName::Settings,
+            title: "Open Settings",
+            action: &OpenSettings,
+            visibility_guard: SectionVisibility::Always,
+        }],
     },
 );
 
-fn localized_content() -> (Section<4>, Section<3>) {
+fn localized_content() -> (Section<4>, Section<1>) {
     let mut content = CONTENT;
     content.0.title = i18n::t_str("get_started");
     content.0.entries[0].title = i18n::t_str("new_file");
@@ -226,8 +207,6 @@ fn localized_content() -> (Section<4>, Section<3>) {
     content.0.entries[3].title = i18n::t_str("open_command_palette");
     content.1.title = i18n::t_str("configure");
     content.1.entries[0].title = i18n::t_str("open_settings");
-    content.1.entries[1].title = i18n::t_str("customize_keymaps");
-    content.1.entries[2].title = i18n::t_str("explore_extensions");
     content
 }
 
@@ -517,7 +496,12 @@ impl Render for WelcomePage {
                             .justify_center()
                             .mb_4()
                             .gap_4()
-                            .child(Vector::square(VectorName::ZedLogo, rems_from_px(45.)))
+                            .child(
+                                img("images/terry_logo.png")
+                                    .size(rems_from_px(45.))
+                                    .rounded_md()
+                                    .overflow_hidden(),
+                            )
                             .child(
                                 v_flex().child(Headline::new(welcome_label)).child(
                                     Label::new(i18n::t("terry_tagline"))
