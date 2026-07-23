@@ -13,6 +13,9 @@ if (-not $Version -or $Version -eq "") {
     if ($line -match '"([^"]+)"') { $Version = $Matches[1] } else { $Version = "0.0.0" }
 }
 
+# Avoid '+' and other path-unfriendly chars in zip names.
+$Version = ($Version -replace '[+\\/:*?"<>|]', '-')
+
 if (-not $Target -or $Target -eq "") {
     $Target = (rustc -vV | Select-String "^host: ").ToString().Substring(6).Trim()
 }
@@ -20,7 +23,7 @@ if (-not $Target -or $Target -eq "") {
 $Arch = $Target.Split("-")[0]
 $TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target" }
 
-Write-Host "==> Building terry ($Target)…"
+Write-Host "==> Building terry ($Target)..."
 $env:ZED_BUNDLE = "true"
 $env:RELEASE_VERSION = $Version
 cargo build --release --package terry --target $Target
@@ -31,7 +34,7 @@ if (-not (Test-Path $Bin)) {
     $Bin = Join-Path $TargetDir "release/terry.exe"
 }
 if (-not (Test-Path $Bin)) {
-    throw "terry.exe not found"
+    throw "terry.exe not found under $TargetDir"
 }
 
 $Stage = Join-Path ([System.IO.Path]::GetTempPath()) ("terry-win-" + [guid]::NewGuid().ToString("n"))

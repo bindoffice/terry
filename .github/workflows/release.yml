@@ -51,7 +51,25 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+
+      - name: Prepare Windows build environment
+        if: matrix.package == 'windows'
+        shell: pwsh
+        run: |
+          # Required for pet/python-environment-tools git checkouts (MAX_PATH).
+          git config --system core.longpaths true
+          git config --global core.longpaths true
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force | Out-Null
+
+          # wasmtime / native deps expect cmake on PATH.
+          if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+            choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+              [System.Environment]::GetEnvironmentVariable("Path","User")
+          }
+          cmake --version
 
       - name: Install Linux dependencies
         if: matrix.package == 'linux'
@@ -99,8 +117,12 @@ jobs:
             VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
             VERSION="${VERSION:-0.0.0}+${GITHUB_SHA::7}"
           fi
+          # Zip/path-safe form (avoid '+' in Windows filenames).
+          VERSION_SAFE="${VERSION//+/-}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_safe=$VERSION_SAFE" >> "$GITHUB_OUTPUT"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "VERSION_SAFE=$VERSION_SAFE" >> "$GITHUB_ENV"
 
       - name: Package macOS
         if: matrix.package == 'macos'
@@ -124,7 +146,13 @@ jobs:
         if: matrix.package == 'windows'
         shell: pwsh
         run: |
-          $zip = & script/package-windows.ps1 -Target "${{ matrix.target }}" -Version $env:VERSION
+          $ErrorActionPreference = "Stop"
+          $version = if ($env:VERSION_SAFE) { $env:VERSION_SAFE } else { $env:VERSION }
+          $zip = & ".\script\package-windows.ps1" -Target "${{ matrix.target }}" -Version $version
+          if (-not $zip) { throw "package-windows.ps1 produced no zip path" }
+          if ($zip -is [array]) { $zip = ($zip | Where-Object { $_ })[-1] }
+          Write-Host "Artifact: $zip"
+          if (-not (Test-Path $zip)) { throw "Zip not found: $zip" }
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item -Force $zip dist/
 
