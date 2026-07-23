@@ -71,6 +71,8 @@ zlog.workspace = true
 serde = { workspace = true, features = ["derive"] }
 dirs.workspace = true
 serde_json.workspace = true
+language_model = { version = "0.1.0", path = "crates/language_model" }
+language_models = { version = "0.1.0", path = "crates/language_models" }
 
 [workspace]
 resolver = "2"
@@ -668,8 +670,6 @@ jupyter-websocket-client = "1.1.0"
 libc = "0.2"
 libsqlite3-sys = { version = "0.30.1", features = ["bundled"] }
 linkify = "0.10.0"
-libwebrtc = "0.3.26"
-livekit = { version = "0.7.32", features = ["tokio", "rustls-tls-native-roots"] }
 log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
 lru = "0.16"
 lsp-types = { git = "https://github.com/zed-industries/lsp-types", rev = "f4dfa89a21ca35cd929b70354b1583fabae325f8" }
@@ -889,7 +889,6 @@ wax = "0.7"
 which = "6.0.0"
 wasm-bindgen = "0.2.120"
 web-time = "1.1.0"
-webrtc-sys = "0.3.23"
 wgpu = "29.0.4"
 windows-core = "0.61"
 yaml-rust2 = "0.8"
@@ -964,11 +963,8 @@ async-process = { git = "https://github.com/zed-industries/async-process.git", r
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
 windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
 calloop = { git = "https://github.com/zed-industries/calloop" }
-livekit = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "d0e27be0cdad89eadab3e36207cda0a2b6e359ee" }
-libwebrtc = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "d0e27be0cdad89eadab3e36207cda0a2b6e359ee" }
 notify = { git = "https://github.com/zed-industries/notify", rev = "faecbc33db4f59313e5225ef766bfd9e54a54cfd" }
 notify-types = { git = "https://github.com/zed-industries/notify", rev = "faecbc33db4f59313e5225ef766bfd9e54a54cfd" }
-webrtc-sys = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "d0e27be0cdad89eadab3e36207cda0a2b6e359ee" }
 
 [profile.dev]
 split-debuginfo = "unpacked"

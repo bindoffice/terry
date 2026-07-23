@@ -1,7 +1,7 @@
 #[cfg(any(test, feature = "test-support"))]
 pub mod test;
 
-mod llm_token;
+pub mod llm_token;
 mod proxy;
 pub mod telemetry;
 pub mod user;

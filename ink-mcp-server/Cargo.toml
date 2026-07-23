@@ -1,0 +1,16 @@
+[package]
+name = "ink-mcp-server"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", features = ["json"] }
+dirs = "5.0"
+anyhow.workspace = true
+
+[lints]
+workspace = true

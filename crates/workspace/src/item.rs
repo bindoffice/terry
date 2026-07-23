@@ -23,6 +23,7 @@ pub use settings::{
     ShowDiagnostics,
 };
 use smallvec::SmallVec;
+use std::path::PathBuf;
 use std::{
     any::{Any, TypeId},
     cell::RefCell,
@@ -284,6 +285,10 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
 
     fn toggle_read_only(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
 
+    fn directory_for_new_file(&self, cx: &App) -> Option<PathBuf> {
+        None
+    }
+
     fn has_deleted_file(&self, _: &App) -> bool {
         false
     }
@@ -532,6 +537,7 @@ pub trait ItemHandle: 'static + Send {
     fn has_deleted_file(&self, cx: &App) -> bool;
     fn has_conflict(&self, cx: &App) -> bool;
     fn can_save(&self, cx: &App) -> bool;
+    fn directory_for_new_file(&self, cx: &App) -> Option<PathBuf>;
     fn can_save_as(&self, cx: &App) -> bool;
     fn save(
         &self,
@@ -1048,6 +1054,10 @@ impl<T: Item> ItemHandle for Entity<T> {
         self.update(cx, |this, cx| {
             this.toggle_read_only(window, cx);
         })
+    }
+
+    fn directory_for_new_file(&self, cx: &App) -> Option<PathBuf> {
+        self.read(cx).directory_for_new_file(cx)
     }
 
     fn has_deleted_file(&self, cx: &App) -> bool {
@@ -1760,6 +1770,7 @@ pub mod test {
             self.has_conflict
         }
 
+        fn directory_for_new_file(&self, _: &App) -> Option<PathBuf> { None }
         fn has_deleted_file(&self, _: &App) -> bool {
             self.has_deleted_file
         }

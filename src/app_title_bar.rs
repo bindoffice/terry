@@ -2,7 +2,7 @@ use gpui::{
     Action, AppContext as _, Context, IntoElement, ParentElement, Render, Window, div,
 };
 use platform_title_bar::PlatformTitleBar;
-use ui::{Color, IconButton, IconName, IconSize, Label, LabelSize, Tooltip, prelude::*};
+use ui::{IconButton, IconName, IconSize, Tooltip, prelude::*};
 use workspace::Workspace;
 
 pub struct AppTitleBar {
@@ -24,15 +24,9 @@ impl Render for AppTitleBar {
                 .flex()
                 .items_center()
                 .h_full()
-                .justify_between()
+                .justify_end()
                 .w_full()
                 .pr_2()
-                .child(
-                    Label::new("Ink")
-                        .size(LabelSize::Small)
-                        .weight(gpui::FontWeight::BOLD)
-                        .color(Color::Muted),
-                )
                 .child(
                     IconButton::new("open-settings", IconName::Settings)
                         .icon_size(IconSize::Small)

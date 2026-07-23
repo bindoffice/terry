@@ -1387,6 +1387,7 @@ pub struct Workspace {
     last_active_view_id: Option<proto::ViewId>,
     status_bar: Entity<StatusBar>,
     pub(crate) modal_layer: Entity<ModalLayer>,
+    last_active_directory: Option<PathBuf>,
     toast_layer: Entity<ToastLayer>,
     titlebar_item: Option<AnyView>,
     titlebar_focus_handle: FocusHandle,
@@ -1838,6 +1839,7 @@ impl Workspace {
             active_pane: center_pane.clone(),
             last_active_center_pane: Some(center_pane.downgrade()),
             last_active_view_id: None,
+            last_active_directory: None,
             status_bar,
             modal_layer,
             toast_layer,
@@ -3967,6 +3969,12 @@ impl Workspace {
     }
 
     pub fn most_recent_active_path(&self, cx: &App) -> Option<PathBuf> {
+        if let Some(dir) = self.active_item(cx).and_then(|item| item.directory_for_new_file(cx)) {
+            return Some(dir);
+        }
+        if let Some(dir) = &self.last_active_directory {
+            return Some(dir.clone());
+        }
         self.recent_navigation_history_iter(cx)
             .filter_map(|(path, abs_path)| {
                 let worktree = self
@@ -5679,6 +5687,9 @@ impl Workspace {
             }
             pane::Event::RemovedItem { item } => {
                 cx.emit(Event::ActiveItemChanged);
+        if let Some(dir) = self.active_item(cx).and_then(|item| item.directory_for_new_file(cx)) {
+            self.last_active_directory = Some(dir);
+        }
                 self.update_window_edited(window, cx);
                 if let hash_map::Entry::Occupied(entry) = self.panes_by_item.entry(item.item_id())
                     && entry.get().entity_id() == pane.entity_id()

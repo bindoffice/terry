@@ -3,7 +3,7 @@ mod app_title_bar;
 mod file_list_panel;
 mod settings_window;
 mod terminal_list_panel;
-
+mod agent_panel;
 use std::sync::Arc;
 
 use assets::Assets;
@@ -161,8 +161,11 @@ fn main() {
 
         editor::init(cx);
         workspace::init(app_state.clone(), cx);
+        language_model::init(cx);
+        client::llm_token::RefreshLlmTokenListener::register(client.clone(), app_state.user_store.clone(), cx);
+        language_models::init(app_state.user_store.clone(), client.clone(), cx);
         terminal_list_panel::init(cx);
-        file_list_panel::init(cx);
+        agent_panel::init(cx);        file_list_panel::init(cx);
         app_title_bar::init(cx);
         command_palette_hooks::init(cx);
         search::init(cx);
@@ -216,9 +219,10 @@ fn init_workspace(workspace: &mut Workspace, window: &mut gpui::Window, cx: &mut
     let panel = cx.new(|cx| TerminalListPanel::new(workspace_handle.clone(), display_pane, project, window, cx));
     workspace.add_panel(panel.clone(), window, cx);
 
-    let file_panel = cx.new(|cx| FileListPanel::new(workspace_handle, cx));
+    let file_panel = cx.new(|cx| FileListPanel::new(workspace_handle.clone(), cx));
     workspace.add_panel(file_panel, window, cx);
-
+    let agent_panel = cx.new(|cx| agent_panel::AgentPanel::new(workspace_handle.clone(), cx));
+    workspace.add_panel(agent_panel, window, cx);
     let active_file_name = cx.new(|_| workspace::active_file_name::ActiveFileName::new());
     let active_buffer_encoding =
         cx.new(|_| encoding_selector::ActiveBufferEncoding::new(workspace));
@@ -229,7 +233,8 @@ fn init_workspace(workspace: &mut Workspace, window: &mut gpui::Window, cx: &mut
     let cursor_position = cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
 
     workspace.status_bar().update(cx, |status_bar, cx| {
-        status_bar.add_left_item(active_file_name, window, cx);
+        let agent_button = cx.new(|cx| agent_panel::AgentPanelButton::new(workspace_handle.clone().downgrade(), cx));
+        status_bar.add_right_item(agent_button, window, cx);        status_bar.add_left_item(active_file_name, window, cx);
         status_bar.add_right_item(active_buffer_encoding, window, cx);
         status_bar.add_right_item(active_buffer_language, window, cx);
         status_bar.add_right_item(line_ending_indicator, window, cx);

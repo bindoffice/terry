@@ -43,13 +43,8 @@ smallvec.workspace = true
 ui.workspace = true
 util.workspace = true
 
-[target.'cfg(not(any(all(target_os = "windows", target_env = "gnu"), target_os = "freebsd")))'.dependencies]
-libwebrtc.workspace = true
-livekit.workspace = true
-
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio = { workspace = true, features = ["time"] }
-webrtc-sys.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))'.dependencies]
 scap.workspace = true
