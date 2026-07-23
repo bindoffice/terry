@@ -112,7 +112,7 @@ impl Render for SettingsWindow {
             .clone();
 
         div()
-            .id("ink-settings")
+            .id("terry-settings")
             .key_context("SettingsWindow")
             .track_focus(&self.focus_handle)
             .size_full()
@@ -196,12 +196,19 @@ impl Render for SettingsWindow {
                             .gap_1()
                             .child(Label::new(i18n::t("custom_shortcuts")))
                             .child(
-                                Button::new("open-keymaps", i18n::t("custom_shortcuts"))
+                                Label::new(i18n::t("keymap_settings_description"))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                Button::new("open-keymaps", i18n::t("keymap_settings"))
                                     .style(ButtonStyle::Outlined)
                                     .size(ButtonSize::Medium)
                                     .on_click(|_, window, cx| {
                                         window.dispatch_action(
-                                            zed_actions::OpenKeymapFile.boxed_clone(),
+                                            Box::new(
+                                                crate::keymap_settings::OpenKeymapSettings,
+                                            ),
                                             cx,
                                         );
                                     }),
@@ -358,7 +365,7 @@ fn open_settings_window(cx: &mut App) {
         cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some(format!("Ink — {}", i18n::t("settings")).into()),
+                    title: Some(format!("Terry — {}", i18n::t("settings")).into()),
                     appears_transparent: false,
                     traffic_light_position: None,
                 }),

@@ -1,7 +1,9 @@
 mod agent_panel;
+mod app_icon;
 mod app_menus;
 mod app_title_bar;
 mod file_list_panel;
+mod keymap_settings;
 mod llm_provider_settings;
 mod settings_window;
 mod terminal_list_panel;
@@ -14,7 +16,10 @@ use file_list_panel::FileListPanel;
 use fs::{Fs, RealFs};
 use futures::channel::oneshot;
 use git::GitHostingProviderRegistry;
-use gpui::{AppContext as _, Application, IntoElement, ParentElement, Styled, TaskExt, point, px};
+use gpui::{
+    Action, Anchor, AppContext as _, Application, IntoElement, ParentElement, Styled, TaskExt,
+    point, px,
+};
 use gpui_tokio::Tokio;
 use language::LanguageRegistry;
 use node_runtime::{NodeBinaryOptions, NodeRuntime};
@@ -27,8 +32,7 @@ use settings::{
 };
 use terminal_list_panel::TerminalListPanel;
 use theme::{ActiveTheme, LoadThemes};
-use ui::ButtonCommon;
-use ui::Clickable;
+use ui::{ButtonCommon, Clickable, ContextMenu, PopoverMenu, Tooltip};
 use util::ResultExt;
 use uuid::Uuid;
 use vim_mode_setting::VimModeSetting;
@@ -60,7 +64,7 @@ fn main() {
 
     let ipc_path = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("ink/ipc.json");
+        .join("terry/ipc.json");
     if let Some(parent) = ipc_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -94,6 +98,10 @@ fn main() {
 
     app.run(move |cx| {
         cx.set_global(app_db);
+        // Identity + dock icon before any windows open.
+        cx.set_app_identity("dev.terry.Terry", "Terry");
+        app_icon::apply_dock_icon();
+
         menu::init();
         zed_actions::init();
         app_menus::init(cx);
@@ -103,10 +111,11 @@ fn main() {
         settings::init(cx);
         i18n::init(cx);
         settings_window::init(cx);
+        keymap_settings::init(cx);
         llm_provider_settings::init(cx);
 
         let user_agent = format!(
-            "Ink/{} ({}; {})",
+            "Terry/{} ({}; {})",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH
@@ -179,6 +188,7 @@ fn main() {
             cx,
         );
         language_models::init(app_state.user_store.clone(), client.clone(), cx);
+        agent_settings::AgentSettings::register(cx);
         terminal_list_panel::init(cx);
         agent_panel::init(cx);
         file_list_panel::init(cx);
@@ -247,18 +257,56 @@ fn init_workspace(
     });
     workspace.add_panel(panel.clone(), window, cx);
 
-    // Replace the pane tab bar's "+" popover menu with a single button that
-    // creates a new terminal in the active group.
+    // Tab bar: quick "+" creates a terminal in the active group; the following
+    // button restores the original pane "New…" popover menu unchanged.
     display_pane.update(cx, |pane, cx| {
-        pane.set_render_tab_bar_buttons(cx, |_pane, _window, _cx| {
+        pane.set_render_tab_bar_buttons(cx, |pane, _window, _cx| {
+            let new_item_menu_handle = pane.new_item_context_menu_handle.clone();
             let right_children = ui::h_flex()
                 .gap_1()
                 .child(
                     ui::IconButton::new("new-terminal-tab", ui::IconName::Plus)
                         .icon_size(ui::IconSize::Small)
-                        .tooltip(ui::Tooltip::text("New Terminal"))
+                        .tooltip(Tooltip::text("New Terminal"))
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(terminal_list_panel::NewTerminal), cx);
+                        }),
+                )
+                .child(
+                    PopoverMenu::new("pane-tab-bar-popover-menu")
+                        .trigger_with_tooltip(
+                            ui::IconButton::new("new-menu", ui::IconName::ChevronDown)
+                                .icon_size(ui::IconSize::Small),
+                            Tooltip::text("New…"),
+                        )
+                        .anchor(Anchor::TopRight)
+                        .with_handle(new_item_menu_handle)
+                        .menu(move |window, cx| {
+                            Some(ContextMenu::build(window, cx, |menu, _, _| {
+                                menu.action("New File", workspace::NewFile.boxed_clone())
+                                    .action(
+                                        "Open File",
+                                        workspace::ToggleFileFinder::default().boxed_clone(),
+                                    )
+                                    .separator()
+                                    .action(
+                                        "Search Project",
+                                        workspace::DeploySearch::default().boxed_clone(),
+                                    )
+                                    .action(
+                                        "Search Symbols",
+                                        workspace::ToggleProjectSymbols.boxed_clone(),
+                                    )
+                                    .separator()
+                                    .action(
+                                        "New Terminal",
+                                        workspace::NewTerminal::default().boxed_clone(),
+                                    )
+                                    .action(
+                                        "New Center Terminal",
+                                        workspace::NewCenterTerminal::default().boxed_clone(),
+                                    )
+                            }))
                         }),
                 )
                 .into_any_element()
@@ -269,7 +317,17 @@ fn init_workspace(
 
     let file_panel = cx.new(|cx| FileListPanel::new(workspace_handle.clone(), cx));
     workspace.add_panel(file_panel, window, cx);
-    let agent_panel = cx.new(|cx| agent_panel::AgentPanel::new(workspace_handle.clone(), cx));
+    let agent_fs = workspace.app_state().fs.clone();
+    let agent_project = workspace.project().clone();
+    let agent_panel = cx.new(|cx| {
+        agent_panel::AgentPanel::new(
+            workspace_handle.clone(),
+            agent_project,
+            agent_fs,
+            window,
+            cx,
+        )
+    });
     workspace.add_panel(agent_panel, window, cx);
     let active_file_name = cx.new(|_| workspace::active_file_name::ActiveFileName::new());
     let active_buffer_encoding =
@@ -301,7 +359,7 @@ fn init_workspace(
 fn build_window_options(_display_uuid: Option<Uuid>, cx: &mut gpui::App) -> gpui::WindowOptions {
     gpui::WindowOptions {
         titlebar: Some(gpui::TitlebarOptions {
-            title: Some("Ink".into()),
+            title: Some("Terry".into()),
             appears_transparent: true,
             // Keep traffic lights clear of the custom title text.
             traffic_light_position: Some(point(px(12.), px(11.))),
@@ -309,6 +367,9 @@ fn build_window_options(_display_uuid: Option<Uuid>, cx: &mut gpui::App) -> gpui
         focus: true,
         show: true,
         window_background: cx.theme().window_background_appearance(),
+        app_id: Some("dev.terry.Terry".into()),
+        // Used on X11; harmless elsewhere.
+        icon: app_icon::app_icon_image(),
         ..Default::default()
     }
 }

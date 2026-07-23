@@ -49,7 +49,7 @@ fn open_llm_provider_settings(cx: &mut App) {
         cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some(format!("Ink — {}", i18n::t("llm_providers")).into()),
+                    title: Some(format!("Terry — {}", i18n::t("llm_providers")).into()),
                     appears_transparent: false,
                     traffic_light_position: None,
                 }),
@@ -147,7 +147,7 @@ impl Render for LlmProviderSettingsWindow {
         }
 
         div()
-            .id("ink-llm-provider-settings")
+            .id("terry-llm-provider-settings")
             .key_context("LlmProviderSettings")
             .track_focus(&self.focus_handle)
             .size_full()

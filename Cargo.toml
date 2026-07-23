@@ -1,16 +1,24 @@
 [package]
-name = "ink"
+name = "terry"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 license = "GPL-3.0-or-later"
+description = "Terry terminal workspace"
 
 [lints]
 workspace = true
 
 [[bin]]
-name = "ink"
+name = "terry"
 path = "src/main.rs"
+
+[package.metadata.bundle]
+name = "Terry"
+identifier = "dev.terry.Terry"
+icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
+osx_minimum_system_version = "11.0"
+category = "public.app-category.developer-tools"
 
 [dependencies]
 anyhow.workspace = true
@@ -73,6 +81,16 @@ dirs.workspace = true
 serde_json.workspace = true
 language_model = { version = "0.1.0", path = "crates/language_model" }
 language_models = { version = "0.1.0", path = "crates/language_models" }
+agent.workspace = true
+acp_thread.workspace = true
+agent_settings.workspace = true
+prompt_store.workspace = true
+agent-client-protocol.workspace = true
+image.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa.workspace = true
+objc.workspace = true
 
 [workspace]
 resolver = "2"
@@ -262,7 +280,7 @@ members = [
     "crates/zeta_prompt",
     "crates/zlog",
     "crates/ztracing",
-    "crates/ztracing_macro", "ink-mcp-server",
+    "crates/ztracing_macro", "terry-mcp-server",
     "tooling/perf",
 ]
 

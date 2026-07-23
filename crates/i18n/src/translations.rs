@@ -25,6 +25,15 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("appearance", "Appearance");
             m.insert("select_theme", "Select Theme…");
             m.insert("custom_shortcuts", "Custom Shortcuts");
+            m.insert("keymap_settings", "Keyboard Shortcuts");
+            m.insert(
+                "keymap_settings_description",
+                "View and customize keyboard shortcuts.",
+            );
+            m.insert("keymap_search_placeholder", "Search shortcuts…");
+            m.insert("keymap_bindings_count", "shortcuts");
+            m.insert("open_keymap_file", "Open Keymap File");
+            m.insert("vim_mode", "Vim Mode");
             m.insert("settings", "Settings");
             m.insert("recent_terminals", "Recent Terminals");
             m.insert("recent_folders", "Recent Folders");
@@ -53,6 +62,12 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("appearance", "外观");
             m.insert("select_theme", "选择主题…");
             m.insert("custom_shortcuts", "自定义快捷键");
+            m.insert("keymap_settings", "键盘快捷键");
+            m.insert("keymap_settings_description", "查看和自定义键盘快捷键。");
+            m.insert("keymap_search_placeholder", "搜索快捷键…");
+            m.insert("keymap_bindings_count", "个快捷键");
+            m.insert("open_keymap_file", "打开快捷键配置文件");
+            m.insert("vim_mode", "Vim 模式");
             m.insert("settings", "设置");
             m.insert("recent_terminals", "最近终端");
             m.insert("recent_folders", "最近文件夹");

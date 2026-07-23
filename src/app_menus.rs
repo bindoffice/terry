@@ -32,7 +32,7 @@ pub fn init(cx: &mut App) {
 
     cx.on_action(|_: &zed_actions::About, cx| {
         let version = env!("CARGO_PKG_VERSION");
-        let message = format!("Ink {version}");
+        let message = format!("Terry {version}");
         if let Some(handle) = cx.active_window() {
             let _ = handle.update(cx, |_root, window, cx| {
                 let _ = window.prompt(
@@ -64,10 +64,10 @@ pub fn init(cx: &mut App) {
 pub fn app_menus(_cx: &App) -> Vec<Menu> {
     vec![
         Menu {
-            name: "Ink".into(),
+            name: "Terry".into(),
             disabled: false,
             items: vec![
-                MenuItem::action("About Ink", zed_actions::About),
+                MenuItem::action("About Terry", zed_actions::About),
                 MenuItem::separator(),
                 MenuItem::action("Settings…", zed_actions::OpenSettings),
                 MenuItem::action(
@@ -80,14 +80,14 @@ pub fn app_menus(_cx: &App) -> Vec<Menu> {
                 #[cfg(target_os = "macos")]
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]
-                MenuItem::action("Hide Ink", Hide),
+                MenuItem::action("Hide Terry", Hide),
                 #[cfg(target_os = "macos")]
                 MenuItem::action("Hide Others", HideOthers),
                 #[cfg(target_os = "macos")]
                 MenuItem::action("Show All", ShowAll),
                 #[cfg(target_os = "macos")]
                 MenuItem::separator(),
-                MenuItem::action("Quit Ink", zed_actions::Quit),
+                MenuItem::action("Quit Terry", zed_actions::Quit),
             ],
         },
         Menu {

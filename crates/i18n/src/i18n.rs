@@ -1,4 +1,4 @@
-//! Lightweight UI internationalization for Ink.
+//! Lightweight UI internationalization for Terry.
 //!
 //! - [`UiLanguage`] setting (system or an explicit locale)
 //! - [`t`] / [`t_str`] lookup helpers

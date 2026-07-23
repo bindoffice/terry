@@ -1,5 +1,5 @@
 [package]
-name = "ink-mcp-server"
+name = "terry-mcp-server"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true

@@ -7166,84 +7166,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f4c7245a08504955605670dbf141fceab975f15ca21570696aebe9d2e71576bd"
 
 [[package]]
-name = "ink"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assets",
- "client",
- "collections",
- "command_palette",
- "command_palette_hooks",
- "db",
- "dirs 6.0.0",
- "editor",
- "encoding_selector",
- "feature_flags",
- "fs",
- "futures 0.3.32",
- "git",
- "git_hosting_providers",
- "go_to_line",
- "gpui",
- "gpui_platform",
- "gpui_tokio",
- "http_client",
- "i18n",
- "image_viewer",
- "language",
- "language_model",
- "language_models",
- "language_selector",
- "line_ending_selector",
- "log",
- "markdown_preview",
- "menu",
- "node_runtime",
- "outline",
- "parking_lot",
- "paths",
- "platform_title_bar",
- "project",
- "release_channel",
- "reqwest_client",
- "search",
- "serde",
- "serde_json",
- "session",
- "settings",
- "strum 0.27.2",
- "tab_switcher",
- "task",
- "terminal",
- "terminal_view",
- "theme",
- "theme_selector",
- "theme_settings",
- "ui",
- "util",
- "uuid",
- "vim",
- "vim_mode_setting",
- "watch",
- "workspace",
- "zed_actions",
- "zlog",
-]
-
-[[package]]
-name = "ink-mcp-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs 5.0.1",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "inotify"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14771,6 +14693,92 @@ dependencies = [
  "util",
  "workspace",
  "zed_actions",
+]
+
+[[package]]
+name = "terry"
+version = "0.1.0"
+dependencies = [
+ "acp_thread",
+ "agent",
+ "agent-client-protocol",
+ "agent_settings",
+ "anyhow",
+ "assets",
+ "client",
+ "cocoa 0.26.0",
+ "collections",
+ "command_palette",
+ "command_palette_hooks",
+ "db",
+ "dirs 6.0.0",
+ "editor",
+ "encoding_selector",
+ "feature_flags",
+ "fs",
+ "futures 0.3.32",
+ "git",
+ "git_hosting_providers",
+ "go_to_line",
+ "gpui",
+ "gpui_platform",
+ "gpui_tokio",
+ "http_client",
+ "i18n",
+ "image",
+ "image_viewer",
+ "language",
+ "language_model",
+ "language_models",
+ "language_selector",
+ "line_ending_selector",
+ "log",
+ "markdown_preview",
+ "menu",
+ "node_runtime",
+ "objc",
+ "outline",
+ "parking_lot",
+ "paths",
+ "platform_title_bar",
+ "project",
+ "prompt_store",
+ "release_channel",
+ "reqwest_client",
+ "search",
+ "serde",
+ "serde_json",
+ "session",
+ "settings",
+ "strum 0.27.2",
+ "tab_switcher",
+ "task",
+ "terminal",
+ "terminal_view",
+ "theme",
+ "theme_selector",
+ "theme_settings",
+ "ui",
+ "util",
+ "uuid",
+ "vim",
+ "vim_mode_setting",
+ "watch",
+ "workspace",
+ "zed_actions",
+ "zlog",
+]
+
+[[package]]
+name = "terry-mcp-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs 5.0.1",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

@@ -132,7 +132,7 @@ impl TerminalListPanel {
     fn session_file_path() -> PathBuf {
         dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("ink/sessions/default.json")
+            .join("terry/sessions/default.json")
     }
 
     pub fn save_session(&self, cx: &App) {

@@ -22,12 +22,12 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join(".ink")
+                .join(".terry")
                 .join("ipc.json")
         });
 
     if !conn_file.exists() {
-        eprintln!("Connection file {:?} not found. Is Ink running?", conn_file);
+        eprintln!("Connection file {:?} not found. Is Terry running?", conn_file);
         std::process::exit(1);
     }
 
@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     let conn_info: ConnectionInfo = serde_json::from_str(&conn_data)
         .context("Failed to parse connection info")?;
 
-    eprintln!("Connected to Ink on port {}", conn_info.port);
+    eprintln!("Connected to Terry on port {}", conn_info.port);
 
     // Minimal JSON-RPC MCP loop over Stdio
     let stdin = io::stdin();
@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
                     "tools": {}
                 },
                 "serverInfo": {
-                    "name": "ink-mcp-server",
+                    "name": "terry-mcp-server",
                     "version": "1.0.0"
                 }
             });
@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
             } else {
                 response["result"] = serde_json::json!({
                     "isError": true,
-                    "content": [{"type": "text", "text": "Failed to connect to Ink locally"}]
+                    "content": [{"type": "text", "text": "Failed to connect to Terry locally"}]
                 });
             }
         } else {
