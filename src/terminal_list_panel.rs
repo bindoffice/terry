@@ -189,8 +189,12 @@ pub struct TerminalListPanel {
     /// auto-spawn (worktree / orphan claim) so we neither wipe groups to
     /// `terminals: []` nor inflate counts mid-restore.
     session_restoring: bool,
+    /// Active group has already been shown; remaining groups may still spawn.
+    session_active_revealed: bool,
     /// Ensures [`Self::finish_session_restore`] is deferred at most once.
     session_finish_scheduled: bool,
+    /// Ensures [`Self::reveal_active_group_during_restore`] is deferred at most once.
+    session_reveal_scheduled: bool,
     /// Stable key for this workspace (db id / project paths / "default").
     session_workspace_key: String,
     /// File stem under `sessions/` — workspace key for the owner, or
@@ -271,7 +275,9 @@ impl TerminalListPanel {
             pending_switch_from: None,
             pending_layout_restore: false,
             session_restoring: false,
+            session_active_revealed: false,
             session_finish_scheduled: false,
+            session_reveal_scheduled: false,
             session_workspace_key,
             session_file_stem,
             owns_workspace_session,
@@ -353,6 +359,46 @@ impl TerminalListPanel {
         }
     }
 
+    /// Show the active group as soon as its terminals are ready. Other groups
+    /// keep spawning in the background — we still wait for them before clearing
+    /// `session_restoring` and writing the session file.
+    fn reveal_active_group_during_restore(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.session_restoring
+            || self.session_active_revealed
+            || self.session_reveal_scheduled
+            || !self.active_group_layout_ready()
+        {
+            return;
+        }
+        self.session_reveal_scheduled = true;
+        cx.defer_in(window, |this, window, cx| {
+            this.session_reveal_scheduled = false;
+            if !this.session_restoring || this.session_active_revealed {
+                return;
+            }
+            if !this.active_group_layout_ready() {
+                return;
+            }
+            this.session_active_revealed = true;
+
+            if this.pending_layout_restore {
+                this.pending_layout_restore = false;
+                this.switching = true;
+                this.restore_active_group_layout(window, cx);
+                this.switching = false;
+            } else {
+                this.switching = true;
+                this.sync_active_group_to_pane(window, cx);
+                this.switching = false;
+            }
+            cx.notify();
+        });
+    }
+
     /// Called when every group's expected session terminals have been spawned.
     fn finish_session_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.session_restoring || self.session_finish_scheduled {
@@ -362,31 +408,36 @@ impl TerminalListPanel {
         // Defer: load/spawn completion may still hold Workspace leases.
         cx.defer_in(window, |this, window, cx| {
             this.session_finish_scheduled = false;
-            this.clear_session_terminal_counts();
+            if !this.session_restoring {
+                return;
+            }
 
-            // Keep session_restoring true through layout restore so worktree /
-            // orphan handlers cannot inflate groups mid-apply.
-            if this.pending_layout_restore {
-                if this.active_group_layout_ready() {
-                    this.pending_layout_restore = false;
-                    this.switching = true;
-                    this.restore_active_group_layout(window, cx);
-                    this.switching = false;
+            // Active group may not have been revealed yet (e.g. empty session
+            // finished immediately, or active group was the last to complete).
+            if !this.session_active_revealed {
+                if this.pending_layout_restore {
+                    if this.active_group_layout_ready() {
+                        this.pending_layout_restore = false;
+                        this.switching = true;
+                        this.restore_active_group_layout(window, cx);
+                        this.switching = false;
+                    } else {
+                        this.pending_layout_restore = false;
+                        this.switching = true;
+                        this.sync_active_group_to_pane(window, cx);
+                        this.switching = false;
+                    }
                 } else {
-                    // Layout references missing terminals (corrupted / wiped
-                    // session) — fall back to a flat sync.
-                    this.pending_layout_restore = false;
                     this.switching = true;
                     this.sync_active_group_to_pane(window, cx);
                     this.switching = false;
                 }
-            } else {
-                this.switching = true;
-                this.sync_active_group_to_pane(window, cx);
-                this.switching = false;
+                this.session_active_revealed = true;
             }
 
+            this.clear_session_terminal_counts();
             this.session_restoring = false;
+            this.session_active_revealed = false;
 
             // First safe disk write after restore — preserves full terminal
             // lists and layouts for every group.
@@ -569,12 +620,17 @@ impl TerminalListPanel {
 
         self.pending_layout_restore = active_has_layout;
         self.session_restoring = true;
+        self.session_active_revealed = false;
+        self.session_reveal_scheduled = false;
+        self.session_finish_scheduled = false;
 
         for (id, cwd) in to_spawn {
             self.spawn_terminal(id, cwd, None, None, window, cx);
         }
 
-        // All groups empty (or already satisfied): finish immediately.
+        // Active group empty / already satisfied: show it immediately while
+        // other groups continue spawning (or finish if nothing left).
+        self.reveal_active_group_during_restore(window, cx);
         if self.session_spawns_complete() {
             self.finish_session_restore(window, cx);
         }
@@ -984,17 +1040,20 @@ impl TerminalListPanel {
 
                 this.add_terminal_to_group(group_id, terminal_view.clone(), cx);
 
-                if this.session_restoring && this.session_spawns_complete() {
-                    cx.defer_in(window, |this, window, cx| {
-                        this.finish_session_restore(window, cx);
-                    });
+                if this.session_restoring {
+                    this.reveal_active_group_during_restore(window, cx);
+                    if this.session_spawns_complete() {
+                        cx.defer_in(window, |this, window, cx| {
+                            this.finish_session_restore(window, cx);
+                        });
+                    }
                     return;
                 }
 
                 if group_id != this.active_group_id {
                     return;
                 }
-                if this.session_restoring || this.pending_layout_restore {
+                if this.pending_layout_restore {
                     return;
                 }
 
