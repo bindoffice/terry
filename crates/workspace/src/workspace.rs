@@ -5492,6 +5492,41 @@ impl Workspace {
         self.center.bounding_box_for_pane(pane)
     }
 
+    /// Clone of the center pane-group tree (for inspecting split layout).
+    pub fn center_root(&self) -> Member {
+        self.center.root.clone()
+    }
+
+    /// Creates a new center pane and registers it with the workspace.
+    pub fn create_center_pane(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<Pane> {
+        self.add_pane(window, cx)
+    }
+
+    /// Replaces the center pane group with `new_center`, removing panes that
+    /// belonged to the previous layout. Panes referenced by `new_center` must
+    /// already have been created via [`Self::create_center_pane`].
+    pub fn replace_center_layout(
+        &mut self,
+        new_center: PaneGroup,
+        active_pane: Entity<Pane>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.remove_panes(self.center.root.clone(), window, cx);
+        self.center = new_center;
+        self.center.set_is_center(true);
+        self.center.mark_positions(cx);
+        self.set_active_pane(&active_pane, window, cx);
+        if !self.has_active_modal(window, cx) {
+            window.focus(&active_pane.focus_handle(cx), cx);
+        }
+        cx.notify();
+    }
+
     pub fn find_pane_in_direction(
         &mut self,
         direction: SplitDirection,

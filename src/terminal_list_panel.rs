@@ -1,6 +1,6 @@
 use editor::{Editor, MultiBufferOffset};
 use gpui::{
-    Action, AnyElement, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
+    Action, AnyElement, App, Axis, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
     Render, SharedString, Subscription, TaskExt, WeakEntity, Window, div, px,
 };
 use project::Project;
@@ -11,10 +11,11 @@ use ui::{
 };
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
-use workspace::{ItemHandle, Pane};
+use workspace::{ItemHandle, Member, Pane, PaneAxis, PaneGroup};
 use zed_actions::terminal_list_panel::{NewTerminal, ToggleFocus};
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -45,12 +46,37 @@ pub fn init(cx: &mut App) {
                 panel.update(cx, |panel, cx| panel.new_terminal(window, cx));
             }
         });
+        // Welcome page and default keymaps dispatch workspace::NewTerminal.
+        // Terry has no TerminalPanel dock, so that handler no-ops — route here.
+        // Registered before terminal_view::init so we run first in the bubble phase.
+        workspace.register_action(|workspace, _: &workspace::NewTerminal, window, cx| {
+            if let Some(panel) = workspace.panel::<TerminalListPanel>(cx) {
+                panel.update(cx, |panel, cx| panel.new_terminal(window, cx));
+            } else {
+                cx.propagate();
+            }
+        });
     })
     .detach();
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct GroupId(usize);
+
+/// In-memory split layout for a terminal group (entity ids of that group's
+/// terminals). Restored when switching back to the group.
+#[derive(Clone, Debug)]
+enum GroupLayoutNode {
+    Pane {
+        terminals: Vec<EntityId>,
+        active: Option<EntityId>,
+    },
+    Split {
+        axis: Axis,
+        flexes: Vec<f32>,
+        children: Vec<GroupLayoutNode>,
+    },
+}
 
 /// A named collection of terminals. Selecting a group shows its terminals as
 /// tabs in the center pane.
@@ -61,6 +87,8 @@ struct TerminalGroup {
     collapsed: bool,
     #[allow(dead_code)]
     pub has_unread: bool,
+    /// Last known center split layout while this group was active.
+    saved_layout: Option<GroupLayoutNode>,
 }
 
 pub struct TerminalListPanel {
@@ -197,6 +225,7 @@ impl TerminalListPanel {
                 terminals: Vec::new(),
                 collapsed: p_group.collapsed,
                 has_unread: false,
+                saved_layout: None,
             });
 
             if i == session.active_group_index {
@@ -235,6 +264,7 @@ impl TerminalListPanel {
                 terminals: Vec::new(),
                 collapsed: false,
                 has_unread: false,
+                saved_layout: None,
             });
             self.active_group_id = id;
             for cwd in project_dirs {
@@ -254,6 +284,7 @@ impl TerminalListPanel {
             terminals: Vec::new(),
             collapsed: false,
             has_unread: false,
+            saved_layout: None,
         });
         self.active_group_id = id;
         self.spawn_terminal(id, None, None, window, cx);
@@ -285,16 +316,22 @@ impl TerminalListPanel {
         id
     }
 
-    /// Resolves the pane used to display the active group's terminals,
-    /// falling back to the workspace's active pane if the original is gone.
+    /// Resolves the pane used for new tabs: the focused center pane after
+    /// splits, so group operations stay in the pane the user is working in.
     fn display_pane_entity(&self, cx: &App) -> Option<Entity<Pane>> {
-        if let Some(pane) = self.display_pane.upgrade() {
-            Some(pane)
-        } else {
-            self.workspace
-                .upgrade()
-                .map(|workspace| workspace.read(cx).active_pane().clone())
-        }
+        self.workspace
+            .upgrade()
+            .map(|workspace| workspace.read(cx).active_pane().clone())
+            .or_else(|| self.display_pane.upgrade())
+    }
+
+    /// All center panes — splits belong to the active group and must be
+    /// reconciled together so terminals are never duplicated across panes.
+    fn center_panes(&self, cx: &App) -> Vec<Entity<Pane>> {
+        self.workspace
+            .upgrade()
+            .map(|workspace| workspace.read(cx).panes().to_vec())
+            .unwrap_or_default()
     }
 
     /// Adds a new terminal to the currently active group.
@@ -397,6 +434,7 @@ impl TerminalListPanel {
             terminals: Vec::new(),
             collapsed: false,
             has_unread: false,
+            saved_layout: None,
         });
         self.switch_group(id, window, cx);
         self.spawn_terminal(id, cwd, source, window, cx);
@@ -510,6 +548,7 @@ impl TerminalListPanel {
                 terminals: Vec::new(),
                 collapsed: false,
                 has_unread: false,
+                saved_layout: None,
             });
             self.active_group_id = id;
         }
@@ -530,13 +569,20 @@ impl TerminalListPanel {
         cx.notify();
     }
 
-    /// Replaces the display pane's terminal tabs with exactly the active
-    /// group's terminals. Inactive groups stay in the model but are not shown.
+    /// Shows only the active group's terminals across all center panes.
+    ///
+    /// Split panes stay within the active group: a terminal already visible in
+    /// any pane is left there (never copied into another pane — that would
+    /// share one PTY across splits). Terminals from other groups are removed
+    /// from every pane, and empty panes left behind are closed so the active
+    /// group's terminals fill the center.
+    ///
+    /// Prefer [`Self::switch_group`] when changing groups so split layouts are
+    /// saved and restored. This method is for in-group updates (spawn, etc.).
     fn sync_active_group_to_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pane) = self.display_pane_entity(cx) else {
+        let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        self.display_pane = pane.downgrade();
 
         let active_terminals: Vec<Entity<TerminalView>> = self
             .groups
@@ -547,32 +593,59 @@ impl TerminalListPanel {
         let active_ids: std::collections::HashSet<EntityId> =
             active_terminals.iter().map(|tv| tv.entity_id()).collect();
 
-        // Do not workspace.update() here — sync often runs while Workspace is
-        // already being updated (init, ItemAdded). Default to focusing.
-        let focus_item = true;
+        let panes = workspace.read(cx).panes().to_vec();
 
-        // While swapping items the pane emits ItemRemoved/ItemAdded; those
-        // must not be treated as user closes or orphan claims.
-        self.switching = true;
-        pane.update(cx, |pane, cx| {
-            let to_remove: Vec<EntityId> = pane
-                .items()
-                .filter_map(|item| {
-                    let id = item.item_id();
-                    if item.act_as::<TerminalView>(cx).is_some() && !active_ids.contains(&id) {
-                        Some(id)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for id in to_remove {
-                pane.remove_item(id, false, false, window, cx);
+        let owns_switching_guard = !self.switching;
+        if owns_switching_guard {
+            self.switching = true;
+        }
+
+        for pane in &panes {
+            pane.update(cx, |pane, cx| {
+                let to_remove: Vec<EntityId> = pane
+                    .items()
+                    .filter_map(|item| {
+                        let id = item.item_id();
+                        if item.act_as::<TerminalView>(cx).is_some() && !active_ids.contains(&id)
+                        {
+                            Some(id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for id in to_remove {
+                    pane.remove_item(id, false, false, window, cx);
+                }
+            });
+        }
+
+        let panes = workspace.read(cx).panes().to_vec();
+        let mut visible: std::collections::HashSet<EntityId> =
+            std::collections::HashSet::default();
+        for pane in &panes {
+            for item in pane.read(cx).items() {
+                if active_ids.contains(&item.item_id()) {
+                    visible.insert(item.item_id());
+                }
             }
+        }
 
+        let target_pane = panes
+            .iter()
+            .find(|pane| {
+                pane.read(cx)
+                    .items()
+                    .any(|item| active_ids.contains(&item.item_id()))
+            })
+            .cloned()
+            .unwrap_or_else(|| workspace.read(cx).active_pane().clone());
+        self.display_pane = target_pane.downgrade();
+
+        target_pane.update(cx, |pane, cx| {
             for terminal_view in &active_terminals {
                 let id = terminal_view.entity_id();
-                if pane.items().any(|item| item.item_id() == id) {
+                if visible.contains(&id) {
                     continue;
                 }
                 pane.add_item(
@@ -583,18 +656,48 @@ impl TerminalListPanel {
                     window,
                     cx,
                 );
-            }
-
-            if let Some(last) = active_terminals.last() {
-                let index = pane
-                    .items()
-                    .position(|item| item.item_id() == last.entity_id());
-                if let Some(index) = index {
-                    pane.activate_item(index, true, focus_item, window, cx);
-                }
+                visible.insert(id);
             }
         });
-        self.switching = false;
+
+        let panes = workspace.read(cx).panes().to_vec();
+        if panes.len() > 1 {
+            for pane in panes {
+                if pane.entity_id() == target_pane.entity_id() {
+                    continue;
+                }
+                let has_terminal = pane
+                    .read(cx)
+                    .items()
+                    .any(|item| item.act_as::<TerminalView>(cx).is_some());
+                if !has_terminal {
+                    pane.update(cx, |_, cx| {
+                        cx.emit(workspace::pane::Event::Remove {
+                            focus_on_pane: Some(target_pane.clone()),
+                        });
+                    });
+                }
+            }
+        }
+
+        let focus_item = true;
+        if let Some(last) = active_terminals.last() {
+            let id = last.entity_id();
+            let panes = workspace.read(cx).panes().to_vec();
+            for pane in panes {
+                let index = pane.read(cx).items().position(|item| item.item_id() == id);
+                if let Some(index) = index {
+                    pane.update(cx, |pane, cx| {
+                        pane.activate_item(index, true, focus_item, window, cx);
+                    });
+                    break;
+                }
+            }
+        }
+
+        if owns_switching_guard {
+            self.switching = false;
+        }
     }
 
     /// Schedules a pane sync after the current update stack unwinds, so we
@@ -605,37 +708,269 @@ impl TerminalListPanel {
         });
     }
 
-    /// Switches the display pane to show the given group's terminals as tabs.
+    fn capture_layout_from_member(
+        member: &Member,
+        group_ids: &std::collections::HashSet<EntityId>,
+        cx: &App,
+    ) -> Option<GroupLayoutNode> {
+        match member {
+            Member::Pane(pane) => {
+                let terminals: Vec<EntityId> = pane
+                    .read(cx)
+                    .items()
+                    .filter_map(|item| {
+                        let id = item.item_id();
+                        group_ids.contains(&id).then_some(id)
+                    })
+                    .collect();
+                if terminals.is_empty() {
+                    return None;
+                }
+                let active = pane
+                    .read(cx)
+                    .active_item()
+                    .map(|item| item.item_id())
+                    .filter(|id| group_ids.contains(id));
+                Some(GroupLayoutNode::Pane { terminals, active })
+            }
+            Member::Axis(axis) => {
+                let children: Vec<GroupLayoutNode> = axis
+                    .members
+                    .iter()
+                    .filter_map(|child| Self::capture_layout_from_member(child, group_ids, cx))
+                    .collect();
+                match children.len() {
+                    0 => None,
+                    1 => children.into_iter().next(),
+                    _ => Some(GroupLayoutNode::Split {
+                        axis: axis.axis,
+                        flexes: axis.flexes.lock().clone(),
+                        children,
+                    }),
+                }
+            }
+        }
+    }
+
+    fn capture_active_group_layout(&self, cx: &App) -> Option<GroupLayoutNode> {
+        let workspace = self.workspace.upgrade()?;
+        let group_ids: std::collections::HashSet<EntityId> = self
+            .groups
+            .iter()
+            .find(|g| g.id == self.active_group_id)?
+            .terminals
+            .iter()
+            .map(|tv| tv.entity_id())
+            .collect();
+        if group_ids.is_empty() {
+            return None;
+        }
+        Self::capture_layout_from_member(&workspace.read(cx).center_root(), &group_ids, cx)
+    }
+
+    fn clear_center_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let panes = workspace.read(cx).panes().to_vec();
+        for pane in panes {
+            pane.update(cx, |pane, cx| {
+                let ids: Vec<EntityId> = pane
+                    .items()
+                    .filter_map(|item| {
+                        item.act_as::<TerminalView>(cx)
+                            .map(|tv| tv.entity_id())
+                    })
+                    .collect();
+                for id in ids {
+                    pane.remove_item(id, false, false, window, cx);
+                }
+            });
+        }
+    }
+
+    fn build_layout_member(
+        workspace: &mut Workspace,
+        node: &GroupLayoutNode,
+        terminals: &HashMap<EntityId, Entity<TerminalView>>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Workspace>,
+    ) -> (Member, Entity<Pane>, Option<EntityId>) {
+        match node {
+            GroupLayoutNode::Pane {
+                terminals: ids,
+                active,
+            } => {
+                let pane = workspace.create_center_pane(window, cx);
+                for id in ids {
+                    if let Some(tv) = terminals.get(id) {
+                        pane.update(cx, |pane, cx| {
+                            pane.add_item(
+                                Box::new(tv.clone()),
+                                false,
+                                false,
+                                None,
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                }
+                if let Some(active_id) = active {
+                    let index = pane
+                        .read(cx)
+                        .items()
+                        .position(|item| item.item_id() == *active_id);
+                    if let Some(index) = index {
+                        pane.update(cx, |pane, cx| {
+                            pane.activate_item(index, true, true, window, cx);
+                        });
+                    }
+                }
+                (Member::Pane(pane.clone()), pane, *active)
+            }
+            GroupLayoutNode::Split {
+                axis,
+                flexes,
+                children,
+            } => {
+                let mut members = Vec::new();
+                let mut focus_pane = None;
+                let mut focus_terminal = None;
+                for child in children {
+                    let (member, pane, active) =
+                        Self::build_layout_member(workspace, child, terminals, window, cx);
+                    if focus_pane.is_none() {
+                        focus_pane = Some(pane.clone());
+                    }
+                    if active.is_some() {
+                        focus_pane = Some(pane);
+                        focus_terminal = active;
+                    }
+                    members.push(member);
+                }
+                let focus_pane = focus_pane
+                    .or_else(|| members.first().and_then(|m| match m {
+                        Member::Pane(p) => Some(p.clone()),
+                        _ => None,
+                    }))
+                    .expect("split layout has children");
+                let axis = PaneAxis::load(*axis, members, Some(flexes.clone()));
+                (Member::Axis(axis), focus_pane, focus_terminal)
+            }
+        }
+    }
+
+    fn restore_active_group_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+
+        let (terminals, layout) = match self.groups.iter().find(|g| g.id == self.active_group_id) {
+            Some(group) => (group.terminals.clone(), group.saved_layout.clone()),
+            None => return,
+        };
+
+        if terminals.is_empty() {
+            self.clear_center_terminals(window, cx);
+            // Leave a single empty pane.
+            let panes = workspace.read(cx).panes().to_vec();
+            if let Some(keep) = panes.first().cloned() {
+                for pane in panes.into_iter().skip(1) {
+                    pane.update(cx, |_, cx| {
+                        cx.emit(workspace::pane::Event::Remove {
+                            focus_on_pane: Some(keep.clone()),
+                        });
+                    });
+                }
+            }
+            return;
+        }
+
+        let terminals_by_id: HashMap<EntityId, Entity<TerminalView>> = terminals
+            .iter()
+            .map(|tv| (tv.entity_id(), tv.clone()))
+            .collect();
+
+        match layout {
+            Some(layout) => {
+                self.clear_center_terminals(window, cx);
+                workspace.update(cx, |workspace, cx| {
+                    let (root, focus_pane, _) =
+                        Self::build_layout_member(workspace, &layout, &terminals_by_id, window, cx);
+                    let new_center = PaneGroup::with_root(root);
+                    workspace.replace_center_layout(new_center, focus_pane.clone(), window, cx);
+                });
+                self.display_pane = workspace.read(cx).active_pane().downgrade();
+                // Terminals created after the layout was saved still need a home.
+                self.sync_active_group_to_pane(window, cx);
+            }
+            None => {
+                // No saved splits — show all terminals as tabs in one pane.
+                self.sync_active_group_to_pane(window, cx);
+            }
+        }
+    }
+
+    /// Switches the display pane to show the given group's terminals as tabs,
+    /// preserving each group's split layout across switches.
     fn switch_group(&mut self, group_id: GroupId, window: &mut Window, cx: &mut Context<Self>) {
         if !self.groups.iter().any(|g| g.id == group_id) {
             return;
         }
+
+        if group_id == self.active_group_id {
+            if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
+                group.collapsed = false;
+            }
+            cx.notify();
+            return;
+        }
+
+        // Persist the outgoing group's center layout before tearing it down.
+        if let Some(layout) = self.capture_active_group_layout(cx) {
+            if let Some(group) = self
+                .groups
+                .iter_mut()
+                .find(|g| g.id == self.active_group_id)
+            {
+                group.saved_layout = Some(layout);
+            }
+        }
+
         self.active_group_id = group_id;
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
             group.collapsed = false;
         }
-        self.sync_active_group_to_pane(window, cx);
+
+        self.switching = true;
+        self.restore_active_group_layout(window, cx);
+        self.switching = false;
+
         self.save_session(cx);
         cx.notify();
     }
 
-    /// Activates a specific terminal's tab in the display pane.
+    /// Activates a specific terminal's tab in whichever pane is showing it.
     fn focus_terminal(
         &mut self,
         terminal_view: Entity<TerminalView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane) = self.display_pane_entity(cx) else {
-            return;
-        };
         let target_id = terminal_view.entity_id();
-        pane.update(cx, |pane, cx| {
-            let index = pane.items().position(|item| item.item_id() == target_id);
+        for pane in self.center_panes(cx) {
+            let index = pane
+                .read(cx)
+                .items()
+                .position(|item| item.item_id() == target_id);
             if let Some(index) = index {
-                pane.activate_item(index, true, true, window, cx);
+                pane.update(cx, |pane, cx| {
+                    pane.activate_item(index, true, true, window, cx);
+                });
+                return;
             }
-        });
+        }
     }
 
     /// Toggles the collapsed state of a group without switching to it.
@@ -962,7 +1297,7 @@ impl Render for TerminalListPanel {
             if is_expanded {
                 for (ix, (terminal_view, title)) in terminals.into_iter().enumerate() {
                     let is_terminal_active = Some(terminal_view.entity_id()) == active_terminal_id;
-                    let display_pane = self.display_pane.clone();
+                    let workspace = self.workspace.clone();
                     let terminal_id = terminal_view.entity_id();
 
                     let on_click = cx.listener({
@@ -1015,10 +1350,9 @@ impl Render for TerminalListPanel {
                                     .on_click(on_click)
                             })
                             .menu(move |window, cx| {
-                                let display_pane = display_pane.clone();
+                                let workspace = workspace.clone();
                                 let terminal_view = terminal_view.clone();
                                 ContextMenu::build(window, cx, move |menu, _, _| {
-                                    let display_pane = display_pane.clone();
                                     menu.entry(i18n::t("rename"), None, move |window, cx| {
                                         terminal_view.update(cx, |this, cx| {
                                             this.rename_terminal(
@@ -1032,16 +1366,27 @@ impl Render for TerminalListPanel {
                                         i18n::t("close"),
                                         None,
                                         move |window, cx| {
-                                            if let Some(pane) = display_pane.upgrade() {
-                                                pane.update(cx, |pane, cx| {
-                                                    pane.close_item_by_id(
-                                                        terminal_id,
-                                                        workspace::SaveIntent::Close,
-                                                        window,
-                                                        cx,
-                                                    )
-                                                    .detach_and_log_err(cx);
-                                                });
+                                            let Some(workspace) = workspace.upgrade() else {
+                                                return;
+                                            };
+                                            let panes = workspace.read(cx).panes().to_vec();
+                                            for pane in panes {
+                                                let has_item = pane
+                                                    .read(cx)
+                                                    .items()
+                                                    .any(|item| item.item_id() == terminal_id);
+                                                if has_item {
+                                                    pane.update(cx, |pane, cx| {
+                                                        pane.close_item_by_id(
+                                                            terminal_id,
+                                                            workspace::SaveIntent::Close,
+                                                            window,
+                                                            cx,
+                                                        )
+                                                        .detach_and_log_err(cx);
+                                                    });
+                                                    break;
+                                                }
                                             }
                                         },
                                     )
