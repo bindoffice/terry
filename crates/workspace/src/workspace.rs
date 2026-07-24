@@ -2386,23 +2386,15 @@ impl Workspace {
         size_state: dock::PanelSizeState,
         cx: &mut App,
     ) {
-        let Some(workspace_id) = self
-            .database_id()
-            .map(|id| i64::from(id).to_string())
-            .or(self.session_id())
-        else {
-            return;
-        };
-
+        // Key by panel only (not workspace/session). Empty Terry windows get a
+        // fresh workspace id every launch; workspace-scoped keys would forget
+        // Terminal / Files / Agent widths across restarts.
         let kvp = db::kvp::KeyValueStore::global(cx);
         let panel_key = panel_key.to_string();
         cx.background_spawn(async move {
             let scope = kvp.scoped(dock::PANEL_SIZE_STATE_KEY);
             scope
-                .write(
-                    format!("{workspace_id}:{panel_key}"),
-                    serde_json::to_string(&size_state)?,
-                )
+                .write(panel_key, serde_json::to_string(&size_state)?)
                 .await
         })
         .detach_and_log_err(cx);

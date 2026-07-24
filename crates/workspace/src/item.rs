@@ -285,7 +285,7 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
 
     fn toggle_read_only(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
 
-    fn directory_for_new_file(&self, cx: &App) -> Option<PathBuf> {
+    fn directory_for_new_file(&self, _cx: &App) -> Option<PathBuf> {
         None
     }
 

@@ -797,7 +797,8 @@
   },
   // Whether to resize all the panels in a dock when resizing the dock.
   // Can be a combination of "left", "right" and "bottom".
-  "resize_all_panels_in_dock": ["left"],
+  // Terry: leave empty so Terminal / Files / Agent each keep their own width.
+  "resize_all_panels_in_dock": [],
   "project_panel": {
     // Whether to show the project panel button in the status bar
     "button": true,
@@ -1065,8 +1066,9 @@
     "dock": "left",
     // Whether the agent panel should use flexible (proportional) sizing.
     //
-    // Default: true
-    "flexible": true,
+    // Terry: fixed pixels so the remembered width matches what the user set.
+    // Default: false
+    "flexible": false,
     // Where to position the threads sidebar. Can be 'left' or 'right'.
     "sidebar_side": "left",
     // Default width when the agent panel is docked to the left or right.

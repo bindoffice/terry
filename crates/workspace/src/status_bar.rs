@@ -1,12 +1,12 @@
-use crate::{ItemHandle, MultiWorkspace, Pane, SidebarSide, ToggleWorkspaceSidebar};
+use crate::{ItemHandle, MultiWorkspace, Pane, SidebarSide};
 use gpui::{
-    Anchor, AnyView, App, Context, Decorations, Entity, FocusHandle, Focusable, IntoElement,
-    ParentElement, Render, Role, SharedString, Styled, Subscription, WeakEntity, Window,
+    AnyView, App, Context, Decorations, Entity, FocusHandle, Focusable, IntoElement, ParentElement,
+    Render, Role, SharedString, Styled, Subscription, WeakEntity, Window,
 };
 use settings::{SettingsContent, update_settings_file};
 use std::{any::TypeId, sync::Arc};
 use theme::CLIENT_SIDE_DECORATION_ROUNDING;
-use ui::{ContextMenu, Divider, IconPosition, Indicator, Tooltip, prelude::*, right_click_menu};
+use ui::{ContextMenu, IconPosition, prelude::*, right_click_menu};
 
 /// Describes how a status-bar item can be hidden by the user.
 ///
@@ -71,8 +71,6 @@ trait StatusItemViewHandle: Send {
 struct SidebarStatus {
     open: bool,
     side: SidebarSide,
-    has_notifications: bool,
-    show_toggle: bool,
 }
 
 impl SidebarStatus {
@@ -86,8 +84,6 @@ impl SidebarStatus {
                 Self {
                     open: mw.sidebar_open() && enabled,
                     side: mw.sidebar_side(cx),
-                    has_notifications: mw.sidebar_has_notifications(cx),
-                    show_toggle: enabled,
                 }
             })
             .unwrap_or_default()
@@ -186,7 +182,7 @@ impl Render for StatusBar {
 impl StatusBar {
     fn render_left_tools(
         &self,
-        sidebar: &SidebarStatus,
+        _sidebar: &SidebarStatus,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         h_flex()
@@ -200,7 +196,7 @@ impl StatusBar {
 
     fn render_right_tools(
         &self,
-        sidebar: &SidebarStatus,
+        _sidebar: &SidebarStatus,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         h_flex()

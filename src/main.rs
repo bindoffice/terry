@@ -16,8 +16,8 @@ use fs::{Fs, RealFs};
 use futures::channel::oneshot;
 use git::GitHostingProviderRegistry;
 use gpui::{
-    Action, Anchor, AppContext as _, Application, IntoElement, ParentElement, Styled, TaskExt,
-    point, px,
+    Action, Anchor, AppContext as _, Application, IntoElement, ParentElement, SharedString, Styled,
+    TaskExt, point, px,
 };
 use gpui_tokio::Tokio;
 use language::LanguageRegistry;
@@ -39,9 +39,9 @@ use util::ResultExt;
 use uuid::Uuid;
 use vim_mode_setting::VimModeSetting;
 use workspace::{
-    AppState, OpenOptions, RestoreOnStartupBehavior, SerializedWorkspaceLocation, SessionWorkspace,
-    SplitDown, SplitLeft, SplitMode, SplitRight, SplitUp, ToggleZoom, Workspace, WorkspaceDb,
-    WorkspaceSettings, WorkspaceStore, last_opened_workspace_location,
+    AppState, OpenOptions, Pane, RestoreOnStartupBehavior, SerializedWorkspaceLocation,
+    SessionWorkspace, SplitDown, SplitLeft, SplitMode, SplitRight, SplitUp, ToggleZoom, Workspace,
+    WorkspaceDb, WorkspaceSettings, WorkspaceStore, last_opened_workspace_location,
     last_session_workspace_locations, read_serialized_multi_workspaces, restore_multiworkspace,
 };
 
@@ -56,6 +56,10 @@ fn main() {
 
     zlog::init();
     zlog::init_output_stderr();
+
+    // Restore last login-shell PATH/etc. immediately so session terminals do
+    // not wait on a fresh multi-second `zsh -lic` capture before first paint.
+    util::shell_env::apply_cached_environment();
 
     let app_version = AppVersion::load(env!("CARGO_PKG_VERSION"), None, None);
 
@@ -103,6 +107,24 @@ fn main() {
         paths::keymap_file().clone(),
     );
 
+    // Dock icon click with no windows (e.g. after closing the last window
+    // via the traffic-light button) must reopen a workspace.
+    // `on_reopen` is an Application API — register before `run`.
+    app.on_reopen(|cx| {
+        if !cx.windows().is_empty() {
+            return;
+        }
+        let Some(app_state) = AppState::try_global(cx) else {
+            return;
+        };
+        workspace::open_new(OpenOptions::default(), app_state, cx, {
+            move |workspace, window, cx| {
+                init_workspace(workspace, window, cx);
+            }
+        })
+        .detach_and_log_err(cx);
+    });
+
     app.run(move |cx| {
         cx.set_global(app_db);
         // Identity + dock icon before any windows open.
@@ -116,6 +138,10 @@ fn main() {
         release_channel::init(app_version, cx);
         gpui_tokio::init(cx);
         settings::init(cx);
+        // Load user settings from disk (theme, etc.) and watch for changes.
+        SettingsStore::update(cx, |store, cx| {
+            store.watch_settings_files(fs.clone(), cx, |_file, _result, _cx| {});
+        });
         i18n::init(cx);
         settings_window::init(cx);
         keymap_settings::init(cx);
@@ -256,6 +282,16 @@ fn main() {
         })
         .detach();
 
+        // Every center pane (including ones created by splits / layout restore)
+        // gets Terry's tab-bar "+" and menu controls.
+        cx.observe_new(|pane: &mut Pane, window, cx| {
+            let Some(window) = window else {
+                return;
+            };
+            configure_terry_tab_bar(pane, window, cx);
+        })
+        .detach();
+
         open_or_restore_workspaces(app_state.clone(), cx);
     });
 }
@@ -372,6 +408,180 @@ async fn restorable_workspace_locations(
     }
 }
 
+fn configure_terry_tab_bar(
+    pane: &mut Pane,
+    _window: &mut gpui::Window,
+    cx: &mut gpui::Context<Pane>,
+) {
+    pane.set_render_tab_bar_trailing(cx, |_pane, _window, cx| {
+        let pane = cx.entity();
+        let button_id = SharedString::from(format!(
+            "new-terminal-after-tabs-{}",
+            pane.entity_id().as_u64()
+        ));
+        Some(
+            IconButton::new(button_id, IconName::Plus)
+                .icon_size(ui::IconSize::Small)
+                .tooltip(Tooltip::text(i18n::t("new_terminal")))
+                .on_click(move |_, window, cx| {
+                    // Pass the exact split pane through — do not rely on
+                    // workspace.active_pane or a clearable pending pin.
+                    if let Some(workspace) = pane.read(cx).workspace().upgrade() {
+                        if let Some(panel) = workspace.read(cx).panel::<TerminalListPanel>(cx) {
+                            panel.update(cx, |panel, cx| {
+                                panel.new_terminal_with_destination(
+                                    Some(pane.clone()),
+                                    window,
+                                    cx,
+                                );
+                            });
+                            return;
+                        }
+                    }
+                    window.dispatch_action(
+                        Box::new(zed_actions::terminal_list_panel::NewTerminal),
+                        cx,
+                    );
+                })
+                .into_any_element(),
+        )
+    });
+    pane.set_render_tab_bar_buttons(cx, |pane, _window, cx| {
+        let pane_entity = cx.entity();
+        let new_item_menu_handle = pane.new_item_context_menu_handle.clone();
+        let split_item_menu_handle = pane.split_item_context_menu_handle.clone();
+        let (can_clone, can_split_move) = match pane.active_item() {
+            Some(active_item) if active_item.can_split(cx) => (true, false),
+            Some(_) => (false, pane.items_len() > 1),
+            None => (false, false),
+        };
+        let right_children = ui::h_flex()
+            .gap_1()
+            .child(
+                PopoverMenu::new("pane-tab-bar-popover-menu")
+                    .trigger_with_tooltip(
+                        IconButton::new("pane-menu", IconName::Menu)
+                            .icon_size(ui::IconSize::Small),
+                        Tooltip::text(i18n::t("new_ellipsis")),
+                    )
+                    .anchor(Anchor::TopRight)
+                    .with_handle(new_item_menu_handle)
+                    .menu({
+                        let pane_entity = pane_entity.clone();
+                        move |window, cx| {
+                            let pane_entity = pane_entity.clone();
+                            Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                                menu.action(i18n::t("new_file"), workspace::NewFile.boxed_clone())
+                                    .action(
+                                        i18n::t("open_file"),
+                                        workspace::ToggleFileFinder::default().boxed_clone(),
+                                    )
+                                    .separator()
+                                    .action(
+                                        i18n::t("search_project"),
+                                        workspace::DeploySearch::default().boxed_clone(),
+                                    )
+                                    .action(
+                                        i18n::t("search_symbols"),
+                                        workspace::ToggleProjectSymbols.boxed_clone(),
+                                    )
+                                    .separator()
+                                    .entry(i18n::t("new_terminal"), None, move |window, cx| {
+                                        if let Some(workspace) =
+                                            pane_entity.read(cx).workspace().upgrade()
+                                        {
+                                            if let Some(panel) = workspace
+                                                .read(cx)
+                                                .panel::<TerminalListPanel>(cx)
+                                            {
+                                                panel.update(cx, |panel, cx| {
+                                                    panel.new_terminal_with_destination(
+                                                        Some(pane_entity.clone()),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                });
+                                                return;
+                                            }
+                                        }
+                                        window.dispatch_action(
+                                            Box::new(
+                                                zed_actions::terminal_list_panel::NewTerminal,
+                                            ),
+                                            cx,
+                                        );
+                                    })
+                            }))
+                        }
+                    }),
+            )
+            .child(
+                PopoverMenu::new("pane-tab-bar-split")
+                    .trigger_with_tooltip(
+                        IconButton::new("split", IconName::Split)
+                            .icon_size(ui::IconSize::Small)
+                            .disabled(!can_clone && !can_split_move),
+                        Tooltip::text(i18n::t("split_pane")),
+                    )
+                    .anchor(Anchor::TopRight)
+                    .with_handle(split_item_menu_handle)
+                    .menu(move |window, cx| {
+                        ContextMenu::build(window, cx, |menu, _, _| {
+                            let mode = SplitMode::MovePane;
+                            if can_split_move {
+                                menu.action(
+                                    i18n::t("split_right"),
+                                    SplitRight { mode }.boxed_clone(),
+                                )
+                                .action(i18n::t("split_left"), SplitLeft { mode }.boxed_clone())
+                                .action(i18n::t("split_up"), SplitUp { mode }.boxed_clone())
+                                .action(i18n::t("split_down"), SplitDown { mode }.boxed_clone())
+                            } else {
+                                menu.action(
+                                    i18n::t("split_right"),
+                                    SplitRight::default().boxed_clone(),
+                                )
+                                .action(
+                                    i18n::t("split_left"),
+                                    SplitLeft::default().boxed_clone(),
+                                )
+                                .action(i18n::t("split_up"), SplitUp::default().boxed_clone())
+                                .action(
+                                    i18n::t("split_down"),
+                                    SplitDown::default().boxed_clone(),
+                                )
+                            }
+                        })
+                        .into()
+                    }),
+            )
+            .child({
+                let zoomed = pane.is_zoomed();
+                IconButton::new("toggle_zoom", IconName::Maximize)
+                    .icon_size(ui::IconSize::Small)
+                    .toggle_state(zoomed)
+                    .selected_icon(IconName::Minimize)
+                    .on_click(cx.listener(|pane, _, window, cx| {
+                        pane.toggle_zoom(&ToggleZoom, window, cx);
+                    }))
+                    .tooltip(move |_window, cx| {
+                        Tooltip::for_action(
+                            if zoomed {
+                                i18n::t("zoom_out")
+                            } else {
+                                i18n::t("zoom_in")
+                            },
+                            &ToggleZoom,
+                            cx,
+                        )
+                    })
+            })
+            .into_any_element()
+            .into();
+        (None, right_children)
+    });
+}
+
 fn init_workspace(
     workspace: &mut Workspace,
     window: &mut gpui::Window,
@@ -407,144 +617,8 @@ fn init_workspace(
     };
 
     if !has_terminal {
-        // Tab bar: quick "+" creates a terminal in the active group; the following
-        // button restores the original pane "New…" popover menu unchanged.
         display_pane.update(cx, |pane, cx| {
-            pane.set_render_tab_bar_buttons(cx, |pane, _window, cx| {
-                let new_item_menu_handle = pane.new_item_context_menu_handle.clone();
-                let split_item_menu_handle = pane.split_item_context_menu_handle.clone();
-                let (can_clone, can_split_move) = match pane.active_item() {
-                    Some(active_item) if active_item.can_split(cx) => (true, false),
-                    Some(_) => (false, pane.items_len() > 1),
-                    None => (false, false),
-                };
-                let right_children = ui::h_flex()
-                    .gap_1()
-                    .child(
-                        IconButton::new("new-terminal-tab", IconName::Plus)
-                            .icon_size(ui::IconSize::Small)
-                            .tooltip(Tooltip::text(i18n::t("new_terminal")))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(
-                                    Box::new(zed_actions::terminal_list_panel::NewTerminal),
-                                    cx,
-                                );
-                            }),
-                    )
-                    .child(
-                        PopoverMenu::new("pane-tab-bar-popover-menu")
-                            .trigger_with_tooltip(
-                                IconButton::new("new-menu", IconName::ChevronDown)
-                                    .icon_size(ui::IconSize::Small),
-                                Tooltip::text(i18n::t("new_ellipsis")),
-                            )
-                            .anchor(Anchor::TopRight)
-                            .with_handle(new_item_menu_handle)
-                            .menu(move |window, cx| {
-                                Some(ContextMenu::build(window, cx, |menu, _, _| {
-                                    menu.action(
-                                        i18n::t("new_file"),
-                                        workspace::NewFile.boxed_clone(),
-                                    )
-                                    .action(
-                                        i18n::t("open_file"),
-                                        workspace::ToggleFileFinder::default().boxed_clone(),
-                                    )
-                                    .separator()
-                                    .action(
-                                        i18n::t("search_project"),
-                                        workspace::DeploySearch::default().boxed_clone(),
-                                    )
-                                    .action(
-                                        i18n::t("search_symbols"),
-                                        workspace::ToggleProjectSymbols.boxed_clone(),
-                                    )
-                                    .separator()
-                                    .action(
-                                        i18n::t("new_terminal"),
-                                        zed_actions::terminal_list_panel::NewTerminal
-                                            .boxed_clone(),
-                                    )
-                                }))
-                            }),
-                    )
-                    .child(
-                        PopoverMenu::new("pane-tab-bar-split")
-                            .trigger_with_tooltip(
-                                IconButton::new("split", IconName::Split)
-                                    .icon_size(ui::IconSize::Small)
-                                    .disabled(!can_clone && !can_split_move),
-                                Tooltip::text(i18n::t("split_pane")),
-                            )
-                            .anchor(Anchor::TopRight)
-                            .with_handle(split_item_menu_handle)
-                            .menu(move |window, cx| {
-                                ContextMenu::build(window, cx, |menu, _, _| {
-                                    let mode = SplitMode::MovePane;
-                                    if can_split_move {
-                                        menu.action(
-                                            i18n::t("split_right"),
-                                            SplitRight { mode }.boxed_clone(),
-                                        )
-                                        .action(
-                                            i18n::t("split_left"),
-                                            SplitLeft { mode }.boxed_clone(),
-                                        )
-                                        .action(
-                                            i18n::t("split_up"),
-                                            SplitUp { mode }.boxed_clone(),
-                                        )
-                                        .action(
-                                            i18n::t("split_down"),
-                                            SplitDown { mode }.boxed_clone(),
-                                        )
-                                    } else {
-                                        menu.action(
-                                            i18n::t("split_right"),
-                                            SplitRight::default().boxed_clone(),
-                                        )
-                                        .action(
-                                            i18n::t("split_left"),
-                                            SplitLeft::default().boxed_clone(),
-                                        )
-                                        .action(
-                                            i18n::t("split_up"),
-                                            SplitUp::default().boxed_clone(),
-                                        )
-                                        .action(
-                                            i18n::t("split_down"),
-                                            SplitDown::default().boxed_clone(),
-                                        )
-                                    }
-                                })
-                                .into()
-                            }),
-                    )
-                    .child({
-                        let zoomed = pane.is_zoomed();
-                        IconButton::new("toggle_zoom", IconName::Maximize)
-                            .icon_size(ui::IconSize::Small)
-                            .toggle_state(zoomed)
-                            .selected_icon(IconName::Minimize)
-                            .on_click(cx.listener(|pane, _, window, cx| {
-                                pane.toggle_zoom(&ToggleZoom, window, cx);
-                            }))
-                            .tooltip(move |_window, cx| {
-                                Tooltip::for_action(
-                                    if zoomed {
-                                        i18n::t("zoom_out")
-                                    } else {
-                                        i18n::t("zoom_in")
-                                    },
-                                    &ToggleZoom,
-                                    cx,
-                                )
-                            })
-                    })
-                    .into_any_element()
-                    .into();
-                (None, right_children)
-            });
+            configure_terry_tab_bar(pane, window, cx);
         });
 
         // Seed the terminal list panel with a default group holding one terminal.

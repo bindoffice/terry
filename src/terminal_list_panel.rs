@@ -16,7 +16,39 @@ use zed_actions::terminal_list_panel::{NewTerminal, ToggleFocus};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+
+/// Which window currently owns the shared restore file for a workspace key.
+/// A second window for the same workspace starts fresh instead of respawning
+/// the same PTYs.
+fn session_owners() -> &'static Mutex<HashMap<String, EntityId>> {
+    static OWNERS: OnceLock<Mutex<HashMap<String, EntityId>>> = OnceLock::new();
+    OWNERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn try_claim_session(workspace_key: &str, owner: EntityId) -> bool {
+    let mut owners = session_owners()
+        .lock()
+        .expect("session owners mutex poisoned");
+    match owners.get(workspace_key) {
+        Some(existing) if *existing != owner => false,
+        _ => {
+            owners.insert(workspace_key.to_string(), owner);
+            true
+        }
+    }
+}
+
+fn release_session_claim(workspace_key: &str, owner: EntityId) {
+    let mut owners = session_owners()
+        .lock()
+        .expect("session owners mutex poisoned");
+    if owners.get(workspace_key) == Some(&owner) {
+        owners.remove(workspace_key);
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct PersistedTerminal {
@@ -86,19 +118,26 @@ pub fn init(cx: &mut App) {
             workspace.toggle_panel_focus::<TerminalListPanel>(window, cx);
         });
         workspace.register_action(|workspace, _: &NewTerminal, window, cx| {
-            if let Some(panel) = workspace.panel::<TerminalListPanel>(cx) {
+            let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
+                return;
+            };
+            // Must use window.defer (not cx.defer_in): defer_in would re-enter a
+            // Workspace update, and new_terminal reads workspace for the active pane.
+            window.defer(cx, move |window, cx| {
                 panel.update(cx, |panel, cx| panel.new_terminal(window, cx));
-            }
+            });
         });
         // Welcome page and default keymaps dispatch workspace::NewTerminal.
         // Terry has no TerminalPanel dock, so that handler no-ops — route here.
         // Registered before terminal_view::init so we run first in the bubble phase.
         workspace.register_action(|workspace, _: &workspace::NewTerminal, window, cx| {
-            if let Some(panel) = workspace.panel::<TerminalListPanel>(cx) {
-                panel.update(cx, |panel, cx| panel.new_terminal(window, cx));
-            } else {
+            let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
                 cx.propagate();
-            }
+                return;
+            };
+            window.defer(cx, move |window, cx| {
+                panel.update(cx, |panel, cx| panel.new_terminal(window, cx));
+            });
         });
     })
     .detach();
@@ -132,6 +171,9 @@ pub struct TerminalListPanel {
     _quit_subscription: Subscription,
     /// The center pane that displays the active group's terminals as tabs.
     display_pane: WeakEntity<Pane>,
+    /// Pane that should receive the next newly spawned terminal (e.g. where
+    /// "+" was clicked). Cleared when consumed by sync.
+    pending_spawn_pane: Option<WeakEntity<Pane>>,
     groups: Vec<TerminalGroup>,
     active_group_id: GroupId,
     next_group_id: usize,
@@ -149,6 +191,14 @@ pub struct TerminalListPanel {
     session_restoring: bool,
     /// Ensures [`Self::finish_session_restore`] is deferred at most once.
     session_finish_scheduled: bool,
+    /// Stable key for this workspace (db id / project paths / "default").
+    session_workspace_key: String,
+    /// File stem under `sessions/` — workspace key for the owner, or
+    /// `{key}-w{panel_id}` for secondary windows.
+    session_file_stem: String,
+    /// True when this panel owns the shared restore file for `session_workspace_key`.
+    owns_workspace_session: bool,
+    _session_release_subscription: Subscription,
     renaming_group_id: Option<GroupId>,
     rename_editor: Entity<Editor>,
 }
@@ -189,6 +239,21 @@ impl TerminalListPanel {
             async {}
         });
 
+        let panel_id = cx.entity_id();
+        let session_workspace_key = Self::compute_workspace_session_key(&workspace, &project, cx);
+        let owns_workspace_session = try_claim_session(&session_workspace_key, panel_id);
+        let session_file_stem = if owns_workspace_session {
+            session_workspace_key.clone()
+        } else {
+            format!("{}-w{}", session_workspace_key, panel_id.as_u64())
+        };
+
+        let _session_release_subscription = cx.on_release(move |this, _cx| {
+            if this.owns_workspace_session {
+                release_session_claim(&this.session_workspace_key, panel_id);
+            }
+        });
+
         Self {
             workspace: workspace.downgrade(),
             project: project.downgrade(),
@@ -198,6 +263,7 @@ impl TerminalListPanel {
             _project_subscription,
             _quit_subscription,
             display_pane: display_pane.downgrade(),
+            pending_spawn_pane: None,
             groups: Vec::new(),
             active_group_id: GroupId(0),
             next_group_id: 0,
@@ -206,6 +272,10 @@ impl TerminalListPanel {
             pending_layout_restore: false,
             session_restoring: false,
             session_finish_scheduled: false,
+            session_workspace_key,
+            session_file_stem,
+            owns_workspace_session,
+            _session_release_subscription,
             renaming_group_id: None,
             rename_editor,
         }
@@ -213,8 +283,36 @@ impl TerminalListPanel {
 
     /// Creates the initial group (with one terminal) if none exists yet.
 
-    fn session_file_path() -> PathBuf {
-        paths::data_dir().join("sessions").join("default.json")
+    fn compute_workspace_session_key(
+        workspace: &Entity<Workspace>,
+        project: &Entity<Project>,
+        cx: &App,
+    ) -> String {
+        let mut roots: Vec<String> = project
+            .read(cx)
+            .visible_worktrees(cx)
+            .map(|worktree| worktree.read(cx).abs_path().to_string_lossy().into_owned())
+            .collect();
+        roots.sort();
+        roots.dedup();
+        // Empty welcome windows share one stable key so the first window can
+        // restore `default.json` across restarts; later windows are isolated
+        // via ownership (they get a `-w{id}` file stem).
+        if roots.is_empty() {
+            return "default".to_string();
+        }
+        if let Some(id) = workspace.read(cx).database_id() {
+            return format!("ws-{}", i64::from(id));
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        roots.hash(&mut hasher);
+        format!("paths-{:x}", hasher.finish())
+    }
+
+    fn session_file_path(&self) -> PathBuf {
+        paths::data_dir()
+            .join("sessions")
+            .join(format!("{}.json", self.session_file_stem))
     }
 
     pub fn save_session(&mut self, cx: &App) {
@@ -330,7 +428,7 @@ impl TerminalListPanel {
             session.groups.push(p_group);
         }
 
-        let path = Self::session_file_path();
+        let path = self.session_file_path();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -382,7 +480,13 @@ impl TerminalListPanel {
     }
 
     pub fn load_persisted_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let path = Self::session_file_path();
+        // Secondary windows must not restore the shared session — that would
+        // duplicate every PTY from the first window.
+        if !self.owns_workspace_session {
+            return false;
+        }
+
+        let path = self.session_file_path();
         let Ok(data) = std::fs::read_to_string(path) else {
             return false;
         };
@@ -467,7 +571,7 @@ impl TerminalListPanel {
         self.session_restoring = true;
 
         for (id, cwd) in to_spawn {
-            self.spawn_terminal(id, cwd, None, window, cx);
+            self.spawn_terminal(id, cwd, None, None, window, cx);
         }
 
         // All groups empty (or already satisfied): finish immediately.
@@ -499,7 +603,7 @@ impl TerminalListPanel {
             });
             self.active_group_id = id;
             for cwd in project_dirs {
-                self.spawn_terminal(id, Some(cwd), None, window, cx);
+                self.spawn_terminal(id, Some(cwd), None, None, window, cx);
             }
             self.save_session(cx);
             return;
@@ -519,7 +623,7 @@ impl TerminalListPanel {
             session_terminal_count: None,
         });
         self.active_group_id = id;
-        self.spawn_terminal(id, None, None, window, cx);
+        self.spawn_terminal(id, None, None, None, window, cx);
         self.save_session(cx);
     }
 
@@ -567,8 +671,37 @@ impl TerminalListPanel {
     }
 
     /// Adds a new terminal to the currently active group.
-    fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.new_terminal_in_group(self.active_group_id, window, cx);
+    pub fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_terminal_with_destination(None, window, cx);
+    }
+
+    /// Pin the pane that should receive the next spawned terminal.
+    pub fn pin_spawn_pane(&mut self, pane: Entity<Pane>) {
+        self.pending_spawn_pane = Some(pane.downgrade());
+    }
+
+    /// Create a terminal, optionally forcing it into `destination` (the split
+    /// whose "+" was clicked). Prefer this over pin + new_terminal so the
+    /// destination cannot be cleared by a mid-flight sync.
+    pub fn new_terminal_with_destination(
+        &mut self,
+        destination: Option<Entity<Pane>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let destination = destination
+            .or_else(|| self.pending_spawn_pane.take().and_then(|p| p.upgrade()))
+            .or_else(|| self.display_pane_entity(cx));
+        if let Some(pane) = destination.as_ref() {
+            self.pending_spawn_pane = Some(pane.downgrade());
+            self.display_pane = pane.downgrade();
+        }
+        self.new_terminal_in_group_with_destination(
+            self.active_group_id,
+            destination,
+            window,
+            cx,
+        );
     }
 
     /// Currently focused terminal view (pane active item, else last in the
@@ -604,6 +737,16 @@ impl TerminalListPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.new_terminal_in_group_with_destination(group_id, None, window, cx);
+    }
+
+    fn new_terminal_in_group_with_destination(
+        &mut self,
+        group_id: GroupId,
+        destination: Option<Entity<Pane>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.groups.iter().any(|group| group.id == group_id) {
             return;
         }
@@ -615,7 +758,7 @@ impl TerminalListPanel {
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
             group.collapsed = false;
         }
-        self.spawn_terminal(group_id, cwd, source, window, cx);
+        self.spawn_terminal(group_id, cwd, source, destination, window, cx);
         self.save_session(cx);
     }
 
@@ -625,32 +768,44 @@ impl TerminalListPanel {
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<ContextMenu> {
+        let can_delete = panel.read(cx).groups.len() > 1;
         ContextMenu::build(window, cx, move |menu, _, _| {
             let view1 = panel.clone();
             let view2 = panel.clone();
             let view3 = panel.clone();
             let view4 = panel.clone();
-            menu.entry(i18n::t("rename"), None, move |window, cx| {
-                view1.update(cx, |this, cx| {
-                    this.start_renaming(group_id, window, cx);
+            let view5 = panel.clone();
+            let menu = menu
+                .entry(i18n::t("rename"), None, move |window, cx| {
+                    view1.update(cx, |this, cx| {
+                        this.start_renaming(group_id, window, cx);
+                    });
+                })
+                .entry(i18n::t("move_up"), None, move |_window, cx| {
+                    view2.update(cx, |this, cx| {
+                        this.move_group_up(group_id, cx);
+                    });
+                })
+                .entry(i18n::t("move_down"), None, move |_window, cx| {
+                    view3.update(cx, |this, cx| {
+                        this.move_group_down(group_id, cx);
+                    });
+                })
+                .separator()
+                .entry(i18n::t("new_terminal"), None, move |window, cx| {
+                    view4.update(cx, |this, cx| {
+                        this.new_terminal_in_group(group_id, window, cx);
+                    });
                 });
-            })
-            .entry(i18n::t("move_up"), None, move |_window, cx| {
-                view2.update(cx, |this, cx| {
-                    this.move_group_up(group_id, cx);
-                });
-            })
-            .entry(i18n::t("move_down"), None, move |_window, cx| {
-                view3.update(cx, |this, cx| {
-                    this.move_group_down(group_id, cx);
-                });
-            })
-            .separator()
-            .entry(i18n::t("new_terminal"), None, move |window, cx| {
-                view4.update(cx, |this, cx| {
-                    this.new_terminal_in_group(group_id, window, cx);
-                });
-            })
+            if can_delete {
+                menu.separator().entry(i18n::t("delete_group"), None, move |window, cx| {
+                    view5.update(cx, |this, cx| {
+                        this.delete_group(group_id, window, cx);
+                    });
+                })
+            } else {
+                menu
+            }
         })
     }
 
@@ -670,8 +825,91 @@ impl TerminalListPanel {
             session_terminal_count: None,
         });
         self.switch_group(id, window, cx);
-        self.spawn_terminal(id, cwd, source, window, cx);
+        self.spawn_terminal(id, cwd, source, None, window, cx);
         self.save_session(cx);
+    }
+
+    /// Deletes a group and drops all of its `TerminalView` entities so PTYs
+    /// are killed. The last remaining group cannot be deleted.
+    fn delete_group(
+        &mut self,
+        group_id: GroupId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.groups.len() <= 1 {
+            return;
+        }
+        let Some(index) = self.groups.iter().position(|g| g.id == group_id) else {
+            return;
+        };
+
+        let was_active = self.active_group_id == group_id;
+        let removed = self.groups.remove(index);
+        let terminal_ids: std::collections::HashSet<EntityId> =
+            removed.terminals.iter().map(|tv| tv.entity_id()).collect();
+
+        // Pull closed items out of panes before dropping Entities.
+        self.switching = true;
+        if let Some(workspace) = self.workspace.upgrade() {
+            let panes = workspace.read(cx).panes().to_vec();
+            for pane in panes {
+                pane.update(cx, |pane, cx| {
+                    for id in &terminal_ids {
+                        if pane.items().any(|item| item.item_id() == *id) {
+                            pane.remove_item(*id, false, false, window, cx);
+                        }
+                    }
+                });
+            }
+        }
+
+        if self.renaming_group_id == Some(group_id) {
+            self.renaming_group_id = None;
+        }
+
+        if was_active {
+            let next_index = index.min(self.groups.len().saturating_sub(1));
+            let next_id = self.groups[next_index].id;
+            self.active_group_id = next_id;
+            self.pending_switch_from = None;
+            if let Some(group) = self.groups.iter_mut().find(|g| g.id == next_id) {
+                group.collapsed = false;
+            }
+            self.restore_active_group_layout(window, cx);
+        }
+        self.switching = false;
+
+        // Drop TerminalViews (and their Terminal/PTY) — last strong refs.
+        drop(removed);
+
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Closes a terminal: remove from every pane, then drop the model Entity
+    /// so the PTY is killed even if the terminal belonged to an inactive group.
+    fn close_terminal(
+        &mut self,
+        terminal_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(workspace) = self.workspace.upgrade() {
+            let panes = workspace.read(cx).panes().to_vec();
+            for pane in panes {
+                let has_item = pane
+                    .read(cx)
+                    .items()
+                    .any(|item| item.item_id() == terminal_id);
+                if has_item {
+                    pane.update(cx, |pane, cx| {
+                        pane.remove_item(terminal_id, false, false, window, cx);
+                    });
+                }
+            }
+        }
+        self.remove_terminal_by_id(terminal_id, window, cx);
     }
 
     /// Spawns a shell terminal and attaches it to the given group. The
@@ -679,16 +917,25 @@ impl TerminalListPanel {
     /// the (async) terminal is ready.
     ///
     /// When `source` is set, clones that terminal (shell + env) into `cwd`.
+    /// When `destination` is set, the new tab is added to that pane (the split
+    /// whose "+" was clicked) instead of whatever happens to be active.
     fn spawn_terminal(
         &mut self,
         group_id: GroupId,
         cwd: Option<std::path::PathBuf>,
         source: Option<Entity<TerminalView>>,
+        destination: Option<Entity<Pane>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let project = self.project.clone();
         let workspace = self.workspace.clone();
+        // Prefer the explicit destination; fall back to any leftover pin.
+        let destination_pane = destination
+            .map(|p| p.downgrade())
+            .or_else(|| self.pending_spawn_pane.take());
+        // Clear pin so a later sync cannot steal a stale target.
+        self.pending_spawn_pane = None;
         cx.spawn_in(window, async move |this, cx| {
             let working_directory = cwd.or_else(|| {
                 workspace.upgrade().and_then(|workspace| {
@@ -727,7 +974,7 @@ impl TerminalListPanel {
                     )
                 });
 
-                this.add_terminal_to_group(group_id, terminal_view, cx);
+                this.add_terminal_to_group(group_id, terminal_view.clone(), cx);
 
                 if this.session_restoring && this.session_spawns_complete() {
                     cx.defer_in(window, |this, window, cx| {
@@ -736,20 +983,66 @@ impl TerminalListPanel {
                     return;
                 }
 
-                if group_id == this.active_group_id {
-                    // Defer pane/workspace work — spawn completion can run while
-                    // other entities still hold leases.
-                    cx.defer_in(window, move |this, window, cx| {
-                        if this.active_group_id != group_id {
-                            return;
-                        }
-                        if this.session_restoring || this.pending_layout_restore {
-                            // Wait for finish_session_restore / layout restore.
-                            return;
-                        }
-                        this.sync_active_group_to_pane(window, cx);
-                    });
+                if group_id != this.active_group_id {
+                    return;
                 }
+                if this.session_restoring || this.pending_layout_restore {
+                    return;
+                }
+
+                let dest = destination_pane.and_then(|p| p.upgrade()).filter(|pane| {
+                    workspace.read(cx).panes().iter().any(|p| p == pane)
+                });
+
+                if let Some(pane) = dest {
+                    let terminal_id = terminal_view.entity_id();
+                    let already_visible = workspace.read(cx).panes().iter().any(|p| {
+                        p.read(cx)
+                            .items()
+                            .any(|item| item.item_id() == terminal_id)
+                    });
+                    if !already_visible {
+                        // Keep switching through the deferred ItemAdded so
+                        // sync_active_group_to_pane does not re-home this tab
+                        // onto workspace.active_pane.
+                        this.switching = true;
+                        pane.update(cx, |pane, cx| {
+                            pane.add_item(
+                                Box::new(terminal_view),
+                                true,
+                                true,
+                                None,
+                                window,
+                                cx,
+                            );
+                        });
+                        this.display_pane = pane.downgrade();
+                        if let Some(layout) = this.capture_active_group_layout(cx) {
+                            if let Some(group) = this
+                                .groups
+                                .iter_mut()
+                                .find(|g| g.id == this.active_group_id)
+                            {
+                                group.saved_layout = Some(layout);
+                            }
+                        }
+                        this.write_session_file(cx);
+                        cx.defer_in(window, |this, _window, _cx| {
+                            this.switching = false;
+                        });
+                        return;
+                    }
+                }
+
+                cx.defer_in(window, move |this, window, cx| {
+                    if this.active_group_id != group_id {
+                        return;
+                    }
+                    if this.session_restoring || this.pending_layout_restore {
+                        return;
+                    }
+                    this.sync_active_group_to_pane(window, cx);
+                });
             })?;
             anyhow::Ok(())
         })
@@ -809,7 +1102,7 @@ impl TerminalListPanel {
             self.active_group_id = id;
         }
         let group_id = self.active_group_id;
-        self.spawn_terminal(group_id, Some(cwd), None, window, cx);
+        self.spawn_terminal(group_id, Some(cwd), None, None, window, cx);
         self.save_session(cx);
     }
 
@@ -894,15 +1187,38 @@ impl TerminalListPanel {
             }
         }
 
-        let target_pane = panes
+        // Prefer: pane pinned by NewTerminal ("+" / menu) → active center pane
+        // → first pane that already shows this group. Never dump new tabs into
+        // an arbitrary first split when the user clicked another one.
+        let active_pane = workspace.read(cx).active_pane().clone();
+        let has_missing = active_terminals
             .iter()
-            .find(|pane| {
-                pane.read(cx)
-                    .items()
-                    .any(|item| active_ids.contains(&item.item_id()))
-            })
-            .cloned()
-            .unwrap_or_else(|| workspace.read(cx).active_pane().clone());
+            .any(|tv| !visible.contains(&tv.entity_id()));
+        // Only consume the pin when we are about to place a new tab; other
+        // syncs (ItemAdded mid-spawn) must not clear it early.
+        let pinned = if has_missing {
+            self.pending_spawn_pane
+                .take()
+                .and_then(|p| p.upgrade())
+                .filter(|pane| panes.iter().any(|p| p == pane))
+        } else {
+            None
+        };
+        let target_pane = pinned.unwrap_or_else(|| {
+            if panes.iter().any(|pane| pane == &active_pane) {
+                active_pane
+            } else {
+                panes
+                    .iter()
+                    .find(|pane| {
+                        pane.read(cx)
+                            .items()
+                            .any(|item| active_ids.contains(&item.item_id()))
+                    })
+                    .cloned()
+                    .unwrap_or(active_pane)
+            }
+        });
         self.display_pane = target_pane.downgrade();
 
         target_pane.update(cx, |pane, cx| {
@@ -948,16 +1264,29 @@ impl TerminalListPanel {
         }
 
         let focus_item = true;
-        if let Some(last) = active_terminals.last() {
+        // Prefer the pane we just filled (or the pinned/active target), not the
+        // first center pane that happens to contain the last terminal id.
+        let last = active_terminals.last().cloned();
+        if let Some(last) = last {
             let id = last.entity_id();
-            let panes = workspace.read(cx).panes().to_vec();
-            for pane in panes {
-                let index = pane.read(cx).items().position(|item| item.item_id() == id);
-                if let Some(index) = index {
-                    pane.update(cx, |pane, cx| {
-                        pane.activate_item(index, true, focus_item, window, cx);
-                    });
-                    break;
+            let index = target_pane
+                .read(cx)
+                .items()
+                .position(|item| item.item_id() == id);
+            if let Some(index) = index {
+                target_pane.update(cx, |pane, cx| {
+                    pane.activate_item(index, true, focus_item, window, cx);
+                });
+            } else {
+                let panes = workspace.read(cx).panes().to_vec();
+                for pane in panes {
+                    let index = pane.read(cx).items().position(|item| item.item_id() == id);
+                    if let Some(index) = index {
+                        pane.update(cx, |pane, cx| {
+                            pane.activate_item(index, true, focus_item, window, cx);
+                        });
+                        break;
+                    }
                 }
             }
         }
@@ -1396,7 +1725,7 @@ impl TerminalListPanel {
                     }
                 }
                 if belongs_to_active_group {
-                    self.remove_terminal_by_id(*item_id, cx);
+                    self.remove_terminal_by_id(*item_id, window, cx);
                 }
             }
             workspace::Event::ItemAdded { item } => {
@@ -1409,10 +1738,14 @@ impl TerminalListPanel {
                         .groups
                         .iter()
                         .any(|g| g.terminals.iter().any(|t| t.entity_id() == id));
-                    if !already {
-                        self.add_terminal_to_group(self.active_group_id, tv, cx);
-                        self.save_session(cx);
+                    if already {
+                        // Already tracked (e.g. "+" placement into a specific
+                        // split). Do not sync — that would move the tab to
+                        // workspace.active_pane.
+                        return;
                     }
+                    self.add_terminal_to_group(self.active_group_id, tv, cx);
+                    self.save_session(cx);
                     // ItemAdded is emitted while Workspace is updating the
                     // pane — sync must wait until that stack unwinds.
                     self.defer_sync_active_group_to_pane(window, cx);
@@ -1436,24 +1769,61 @@ impl TerminalListPanel {
         cx.notify();
     }
 
-    fn remove_terminal_by_id(&mut self, item_id: EntityId, cx: &App) {
+    fn remove_terminal_by_id(
+        &mut self,
+        item_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let mut changed = false;
+        let mut emptied_group: Option<GroupId> = None;
         for group in &mut self.groups {
             if let Some(removed_ix) = group
                 .terminals
                 .iter()
                 .position(|tv| tv.entity_id() == item_id)
             {
-                group.terminals.remove(removed_ix);
+                // Drop the Entity so Terminal::Drop kills the PTY. Pane refs
+                // should already be gone when this runs after ItemRemoved.
+                let _dropped = group.terminals.remove(removed_ix);
                 if let Some(layout) = group.saved_layout.as_mut() {
                     Self::remap_layout_after_remove(layout, removed_ix);
                 }
+                if group.terminals.is_empty() {
+                    emptied_group = Some(group.id);
+                }
                 changed = true;
+                break;
             }
         }
-        if changed {
-            self.save_session(cx);
+        if !changed {
+            return;
         }
+
+        // Drop empty groups (keep at least one).
+        if let Some(empty_id) = emptied_group
+            && self.groups.len() > 1
+        {
+            if let Some(index) = self.groups.iter().position(|g| g.id == empty_id) {
+                let was_active = self.active_group_id == empty_id;
+                self.groups.remove(index);
+                if was_active {
+                    let next_index = index.min(self.groups.len().saturating_sub(1));
+                    let next_id = self.groups[next_index].id;
+                    self.active_group_id = next_id;
+                    self.pending_switch_from = None;
+                    self.switching = true;
+                    if let Some(group) = self.groups.iter_mut().find(|g| g.id == next_id) {
+                        group.collapsed = false;
+                    }
+                    self.restore_active_group_layout(window, cx);
+                    self.switching = false;
+                }
+            }
+        }
+
+        self.save_session(cx);
+        cx.notify();
     }
 
     fn remap_layout_after_remove(node: &mut GroupLayoutNode, removed: usize) {
@@ -1504,7 +1874,6 @@ impl Render for TerminalListPanel {
         let mut groups_snapshot: Vec<(
             GroupId,
             SharedString,
-            usize,
             bool,
             bool,
             Vec<(Entity<TerminalView>, SharedString)>,
@@ -1521,7 +1890,6 @@ impl Render for TerminalListPanel {
             groups_snapshot.push((
                 group.id,
                 group.name.clone(),
-                group.terminals.len(),
                 is_active,
                 collapsed,
                 terminals,
@@ -1529,7 +1897,7 @@ impl Render for TerminalListPanel {
         }
 
         let mut rows: Vec<AnyElement> = Vec::new();
-        for (group_id, name, count, is_active, collapsed, terminals) in groups_snapshot {
+        for (group_id, name, is_active, collapsed, terminals) in groups_snapshot {
             let _colors = theme.colors().clone();
             let is_expanded = !collapsed;
             let panel = cx.entity().clone();
@@ -1617,11 +1985,6 @@ impl Render for TerminalListPanel {
                                                         .size(LabelSize::Small)
                                                         .truncate(),
                                                 )
-                                                .child(
-                                                    Label::new(format!("{count}"))
-                                                        .size(LabelSize::Small)
-                                                        .color(Color::Muted),
-                                                )
                                             }
                                         })
                                         .child(
@@ -1657,8 +2020,11 @@ impl Render for TerminalListPanel {
                                 .on_click(on_group_click)
                         }
                     })
-                    .menu(move |window, cx| {
-                        Self::build_group_context_menu(panel.clone(), group_id, window, cx)
+                    .menu({
+                        let panel = panel.clone();
+                        move |window, cx| {
+                            Self::build_group_context_menu(panel.clone(), group_id, window, cx)
+                        }
                     })
                     .into_any_element(),
             );
@@ -1666,7 +2032,6 @@ impl Render for TerminalListPanel {
             if is_expanded {
                 for (ix, (terminal_view, title)) in terminals.into_iter().enumerate() {
                     let is_terminal_active = Some(terminal_view.entity_id()) == active_terminal_id;
-                    let workspace = self.workspace.clone();
                     let terminal_id = terminal_view.entity_id();
 
                     let on_click = cx.listener({
@@ -1686,8 +2051,9 @@ impl Render for TerminalListPanel {
                             .trigger(move |_is_open, _window, _cx| {
                                 div()
                                     .id(SharedString::from(format!("term-{}-{ix}", group_id.0)))
-                                    .pl_5()
-                                    .pr_2()
+                                    // Match group row padding; spacer below equals the
+                                    // chevron so the terminal icon lines up with Folder.
+                                    .px_2()
                                     .py_1()
                                     .mx_1()
                                     .rounded_md()
@@ -1701,6 +2067,7 @@ impl Render for TerminalListPanel {
                                         h_flex()
                                             .gap_1()
                                             .items_center()
+                                            .child(div().size(IconSize::Small.rems()))
                                             .child(
                                                 ui::Icon::new(IconName::Terminal)
                                                     .size(IconSize::Small)
@@ -1718,48 +2085,30 @@ impl Render for TerminalListPanel {
                                     )
                                     .on_click(on_click)
                             })
-                            .menu(move |window, cx| {
-                                let workspace = workspace.clone();
+                            .menu({
                                 let terminal_view = terminal_view.clone();
-                                ContextMenu::build(window, cx, move |menu, _, _| {
-                                    menu.entry(i18n::t("rename"), None, move |window, cx| {
-                                        terminal_view.update(cx, |this, cx| {
-                                            this.rename_terminal(
-                                                &terminal_view::RenameTerminal,
-                                                window,
-                                                cx,
-                                            )
-                                        });
+                                let panel = panel.clone();
+                                move |window, cx| {
+                                    let terminal_view = terminal_view.clone();
+                                    let panel = panel.clone();
+                                    ContextMenu::build(window, cx, move |menu, _, _| {
+                                        let panel = panel.clone();
+                                        menu.entry(i18n::t("rename"), None, move |window, cx| {
+                                            terminal_view.update(cx, |this, cx| {
+                                                this.rename_terminal(
+                                                    &terminal_view::RenameTerminal,
+                                                    window,
+                                                    cx,
+                                                )
+                                            });
+                                        })
+                                        .entry(i18n::t("close"), None, move |window, cx| {
+                                            panel.update(cx, |this, cx| {
+                                                this.close_terminal(terminal_id, window, cx);
+                                            });
+                                        })
                                     })
-                                    .entry(
-                                        i18n::t("close"),
-                                        None,
-                                        move |window, cx| {
-                                            let Some(workspace) = workspace.upgrade() else {
-                                                return;
-                                            };
-                                            let panes = workspace.read(cx).panes().to_vec();
-                                            for pane in panes {
-                                                let has_item = pane
-                                                    .read(cx)
-                                                    .items()
-                                                    .any(|item| item.item_id() == terminal_id);
-                                                if has_item {
-                                                    pane.update(cx, |pane, cx| {
-                                                        pane.close_item_by_id(
-                                                            terminal_id,
-                                                            workspace::SaveIntent::Close,
-                                                            window,
-                                                            cx,
-                                                        )
-                                                        .detach_and_log_err(cx);
-                                                    });
-                                                    break;
-                                                }
-                                            }
-                                        },
-                                    )
-                                })
+                                }
                             })
                             .into_any_element(),
                     );

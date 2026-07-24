@@ -5,7 +5,7 @@ use remote::RemoteClient;
 use rpc::proto::{self, REMOTE_SERVER_PROJECT_ID};
 use std::{collections::VecDeque, path::Path, sync::Arc};
 use task::{Shell, shell_to_proto};
-use util::{ResultExt, command::new_command};
+use util::{ResultExt, command::new_command, paths::home_dir};
 use worktree::Worktree;
 
 use collections::HashMap;
@@ -206,6 +206,22 @@ impl ProjectEnvironment {
         self.local_environments
             .entry((shell.clone(), abs_path.clone()))
             .or_insert_with(|| {
+                // Home-directory terminals are the common Terry session case.
+                // Reuse the login-shell env (cache or in-flight capture) instead
+                // of spawning another multi-second interactive login shell.
+                if is_home_directory(&abs_path) {
+                    return cx
+                        .spawn(async move |_| {
+                            if !util::shell_env::is_shell_env_loaded() {
+                                util::shell_env::wait_until_shell_env_loaded().await;
+                            }
+                            let mut env = util::shell_env::process_environment_map();
+                            set_origin_marker(&mut env, EnvironmentOrigin::WorktreeShell);
+                            Some(env)
+                        })
+                        .shared();
+                }
+
                 let load_direnv = ProjectSettings::get_global(cx).load_direnv.clone();
                 let shell = shell.clone();
                 let tx = self.environment_error_messages_tx.clone();
@@ -385,6 +401,15 @@ async fn load_directory_shell_environment(
     }
 
     Ok(envs)
+}
+
+fn is_home_directory(path: &Path) -> bool {
+    let home = home_dir();
+    path == home.as_path()
+        || path
+            .canonicalize()
+            .ok()
+            .is_some_and(|canonical| canonical == *home)
 }
 
 async fn load_direnv_environment(

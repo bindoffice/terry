@@ -427,6 +427,11 @@ pub struct Pane {
             &mut Context<Pane>,
         ) -> (Option<AnyElement>, Option<AnyElement>),
     >,
+    /// Optional control rendered immediately after the last tab (e.g. "+" to
+    /// create a new item) and before the tab-bar drop target.
+    render_tab_bar_trailing: Rc<
+        dyn Fn(&mut Pane, &mut Window, &mut Context<Pane>) -> Option<AnyElement>,
+    >,
     render_tab_bar: Rc<dyn Fn(&mut Pane, &mut Window, &mut Context<Pane>) -> AnyElement>,
     show_tab_bar_buttons: bool,
     max_tabs: Option<NonZeroUsize>,
@@ -606,6 +611,7 @@ impl Pane {
             should_display_tab_bar: Rc::new(|_, cx| TabBarSettings::get_global(cx).show),
             should_display_welcome_page: false,
             render_tab_bar_buttons: Rc::new(default_render_tab_bar_buttons),
+            render_tab_bar_trailing: Rc::new(|_, _, _| None),
             render_tab_bar: Rc::new(Self::render_tab_bar),
             show_tab_bar_buttons: TabBarSettings::get_global(cx).show_tab_bar_buttons,
             display_nav_history_buttons: Some(
@@ -883,6 +889,18 @@ impl Pane {
     {
         self.render_tab_bar_buttons = Rc::new(render);
         cx.notify();
+    }
+
+    pub fn set_render_tab_bar_trailing<F>(&mut self, cx: &mut Context<Self>, render: F)
+    where
+        F: 'static + Fn(&mut Pane, &mut Window, &mut Context<Pane>) -> Option<AnyElement>,
+    {
+        self.render_tab_bar_trailing = Rc::new(render);
+        cx.notify();
+    }
+
+    pub fn workspace(&self) -> WeakEntity<Workspace> {
+        self.workspace.clone()
     }
 
     pub fn nav_history_for_item<T: Item>(&self, item: &Entity<T>) -> ItemNavHistory {
@@ -3562,7 +3580,7 @@ impl Pane {
                             .border_color(cx.theme().colors().border)
                     })
             }))
-            .child(self.render_unpinned_tabs_container(unpinned_tabs, tab_count, cx));
+            .child(self.render_unpinned_tabs_container(unpinned_tabs, tab_count, window, cx));
         tab_bar.into_any_element()
     }
 
@@ -3601,6 +3619,7 @@ impl Pane {
                 TabBar::new("unpinned_tab_bar").child(self.render_unpinned_tabs_container(
                     unpinned_tabs,
                     tab_count,
+                    window,
                     cx,
                 )),
             )
@@ -3611,8 +3630,10 @@ impl Pane {
         &mut self,
         unpinned_tabs: Vec<AnyElement>,
         tab_count: usize,
+        window: &mut Window,
         cx: &mut Context<Pane>,
     ) -> impl IntoElement {
+        let trailing = (self.render_tab_bar_trailing.clone())(self, window, cx);
         h_flex()
             .id("unpinned tabs")
             .overflow_x_scroll()
@@ -3622,6 +3643,7 @@ impl Pane {
                 this.suppress_scroll = true;
             }))
             .children(unpinned_tabs)
+            .children(trailing)
             .child(self.render_tab_bar_drop_target(tab_count, cx))
     }
 

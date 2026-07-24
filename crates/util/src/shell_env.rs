@@ -1,10 +1,131 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result};
 use collections::HashMap;
+use futures::channel::oneshot;
 use serde::Deserialize;
 
 use crate::shell::ShellKind;
+
+static SHELL_ENV_LOADED: AtomicBool = AtomicBool::new(false);
+static SHELL_ENV_WAITERS: Mutex<Vec<oneshot::Sender<()>>> = Mutex::new(Vec::new());
+
+fn shell_env_cache_path() -> PathBuf {
+    let base = if cfg!(target_os = "macos") {
+        dirs::home_dir()
+            .map(|home| home.join("Library/Application Support/Terry"))
+            .unwrap_or_else(|| PathBuf::from("."))
+    } else if cfg!(target_os = "windows") {
+        dirs::data_local_dir()
+            .map(|dir| dir.join("Terry"))
+            .unwrap_or_else(|| PathBuf::from("."))
+    } else {
+        dirs::data_local_dir()
+            .map(|dir| dir.join("terry"))
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
+    base.join("shell_env.json")
+}
+
+/// True after a login-shell capture has been applied (cache or live).
+pub fn is_shell_env_loaded() -> bool {
+    SHELL_ENV_LOADED.load(Ordering::Acquire)
+}
+
+fn mark_shell_env_loaded() {
+    SHELL_ENV_LOADED.store(true, Ordering::Release);
+    if let Ok(mut waiters) = SHELL_ENV_WAITERS.lock() {
+        for tx in waiters.drain(..) {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// Wait until the login-shell environment (cached or freshly captured) is ready.
+pub async fn wait_until_shell_env_loaded() {
+    if is_shell_env_loaded() {
+        return;
+    }
+    let (tx, rx) = oneshot::channel();
+    {
+        let Ok(mut waiters) = SHELL_ENV_WAITERS.lock() else {
+            return;
+        };
+        if is_shell_env_loaded() {
+            return;
+        }
+        waiters.push(tx);
+    }
+    let _ = rx.await;
+}
+
+/// Apply the last successful login-shell environment from disk so terminals can
+/// start before a fresh multi-second `zsh -lic` capture finishes.
+pub fn apply_cached_environment() -> bool {
+    let path = shell_env_cache_path();
+    let Ok(bytes) = std::fs::read(&path) else {
+        return false;
+    };
+    let Ok(env_map) = serde_json::from_slice::<HashMap<String, String>>(&bytes) else {
+        return false;
+    };
+    if env_map.is_empty() {
+        return false;
+    }
+    apply_environment_map(&env_map);
+    mark_shell_env_loaded();
+    log::info!(
+        "applied cached shell environment from {} ({} vars)",
+        path.display(),
+        env_map.len()
+    );
+    true
+}
+
+fn save_environment_cache(env_map: &HashMap<String, String>) {
+    let path = shell_env_cache_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_vec(env_map) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+fn apply_environment_map(env_map: &HashMap<String, String>) {
+    for (name, value) in env_map {
+        // Skip SHLVL to prevent it from polluting the process environment.
+        // The login shell used for env capture increments SHLVL, and if we
+        // propagate it, terminals inherit it and increment again.
+        if name == "SHLVL" {
+            continue;
+        }
+        // SAFETY: called during app startup / background env refresh before /
+        // while spawning user shells. Same pattern as prior set_var usage.
+        unsafe { std::env::set_var(name, value) };
+    }
+}
+
+/// Apply a captured login-shell environment to this process and persist it for
+/// the next cold start.
+pub fn apply_environment_map_and_cache(env_map: &HashMap<String, String>) {
+    apply_environment_map(env_map);
+    save_environment_cache(env_map);
+    mark_shell_env_loaded();
+}
+
+/// Unblock waiters even when login-shell capture fails, so terminals can still
+/// start with the current process environment.
+pub fn notify_shell_env_ready() {
+    mark_shell_env_loaded();
+}
+
+/// Snapshot of the current process environment for terminal spawning.
+pub fn process_environment_map() -> HashMap<String, String> {
+    std::env::vars().collect()
+}
 
 fn parse_env_map_from_noisy_output(output: &str) -> Result<collections::HashMap<String, String>> {
     for (position, _) in output.match_indices('{') {

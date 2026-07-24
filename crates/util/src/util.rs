@@ -384,19 +384,18 @@ pub async fn load_login_shell_environment() -> Result<()> {
     // into shell's `cd` command (and hooks) to manipulate env.
     // We do this so that we get the env a user would have when spawning a shell
     // in home directory.
-    for (name, value) in shell_env::capture(get_system_shell(), &[], paths::home_dir())
-        .await
-        .with_context(|| format!("capturing environment with {:?}", get_system_shell()))?
-    {
-        // Skip SHLVL to prevent it from polluting Zed's process environment.
-        // The login shell used for env capture increments SHLVL, and if we propagate it,
-        // terminals spawned by Zed will inherit it and increment again, causing SHLVL
-        // to start at 2 instead of 1 (and increase by 2 on each reload).
-        if name == "SHLVL" {
-            continue;
+    let env_map = match shell_env::capture(get_system_shell(), &[], paths::home_dir()).await {
+        Ok(env_map) => env_map,
+        Err(err) => {
+            // Don't leave home-directory terminals blocked on a failed capture.
+            shell_env::notify_shell_env_ready();
+            return Err(err).with_context(|| {
+                format!("capturing environment with {:?}", get_system_shell())
+            });
         }
-        unsafe { std::env::set_var(&name, &value) };
-    }
+    };
+
+    shell_env::apply_environment_map_and_cache(&env_map);
 
     log::info!(
         "set environment variables from shell:{}, path:{}",

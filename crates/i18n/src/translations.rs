@@ -22,6 +22,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("terminal_list", "Terminal List");
             m.insert("group", "Group");
             m.insert("new_group", "New Group");
+            m.insert("delete_group", "Delete Group");
             m.insert("files", "Files");
             m.insert("up_one_level", "Up One Level");
             m.insert("refresh", "Refresh");
@@ -151,6 +152,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("terminal_list", "终端列表");
             m.insert("group", "分组");
             m.insert("new_group", "新建分组");
+            m.insert("delete_group", "删除分组");
             m.insert("files", "文件");
             m.insert("up_one_level", "上级目录");
             m.insert("refresh", "刷新");
@@ -282,6 +284,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("terminal_list", "終端機列表");
             m.insert("group", "分組");
             m.insert("new_group", "新增分組");
+            m.insert("delete_group", "刪除分組");
             m.insert("files", "檔案");
             m.insert("up_one_level", "上一層");
             m.insert("refresh", "重新整理");
@@ -335,6 +338,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("terminal_list", "ターミナル一覧");
             m.insert("group", "グループ");
             m.insert("new_group", "新しいグループ");
+            m.insert("delete_group", "グループを削除");
             m.insert("files", "ファイル");
             m.insert("up_one_level", "上の階層へ");
             m.insert("refresh", "更新");
@@ -391,6 +395,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("terminal_list", "터미널 목록");
             m.insert("group", "그룹");
             m.insert("new_group", "새 그룹");
+            m.insert("delete_group", "그룹 삭제");
             m.insert("files", "파일");
             m.insert("up_one_level", "상위 폴더");
             m.insert("refresh", "새로고침");

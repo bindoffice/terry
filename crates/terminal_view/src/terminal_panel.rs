@@ -135,7 +135,6 @@ impl TerminalPanel {
                 {
                     return (None, None);
                 }
-                let focus_handle = pane.focus_handle(cx);
                 let right_children = h_flex()
                     .gap(DynamicSpacing::Base02.rems(cx))
                     .child(

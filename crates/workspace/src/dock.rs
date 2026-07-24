@@ -1075,12 +1075,21 @@ impl Dock {
         panel_key: &'static str,
         cx: &App,
     ) -> Option<PanelSizeState> {
+        let kvp = KeyValueStore::global(cx);
+        let scope = kvp.scoped(PANEL_SIZE_STATE_KEY);
+        if let Some(state) = scope
+            .read(panel_key)
+            .log_err()
+            .flatten()
+            .and_then(|json| serde_json::from_str::<PanelSizeState>(&json).log_err())
+        {
+            return Some(state);
+        }
+        // Legacy workspace-scoped keys (pre Terry global panel sizes).
         let workspace_id = workspace
             .database_id()
             .map(|id| i64::from(id).to_string())
             .or(workspace.session_id())?;
-        let kvp = KeyValueStore::global(cx);
-        let scope = kvp.scoped(PANEL_SIZE_STATE_KEY);
         scope
             .read(&format!("{workspace_id}:{panel_key}"))
             .log_err()
