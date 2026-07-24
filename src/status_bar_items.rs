@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn format_cwd_compacts_home() {
         let home = util::paths::home_dir();
-        let path = home.join("dev/terminal_app");
+        let path = home.join("dev/terry");
         let (display, full) = format_cwd(&path);
         assert!(display.as_ref().starts_with("~/") || display.as_ref().starts_with("…/"));
         assert_eq!(full.as_ref(), path.display().to_string());
