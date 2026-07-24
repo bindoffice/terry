@@ -2707,6 +2707,7 @@ impl Terminal {
         })
     }
 
+    pub fn shell(&self) -> &task::Shell { &self.template.shell }
     pub fn working_directory(&self) -> Option<PathBuf> {
         if self.is_remote_terminal {
             // We can't yet reliably detect the working directory of a shell on the

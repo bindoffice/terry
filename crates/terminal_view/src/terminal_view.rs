@@ -1890,6 +1890,14 @@ impl SerializableItem for TerminalView {
         let workspace_id = self.workspace_id?;
         let cwd = terminal.working_directory();
         let custom_title = self.custom_title.clone();
+        
+        let shell = terminal.shell();
+        let (shell_program, shell_args) = match shell {
+            task::Shell::System => (None, None),
+            task::Shell::Program(p) => (Some(p.clone()), None),
+            task::Shell::WithArguments { program, args, .. } => (Some(program.clone()), Some(args.join(" "))),
+        };
+        
         self.needs_serialize = false;
 
         let db = TerminalDb::global(cx);
@@ -1898,6 +1906,8 @@ impl SerializableItem for TerminalView {
                 db.save_working_directory(item_id, workspace_id, cwd)
                     .await?;
             }
+            db.save_shell(item_id, workspace_id, shell_program, shell_args)
+                .await?;
             db.save_custom_title(item_id, workspace_id, custom_title)
                 .await?;
             Ok(())
@@ -1917,7 +1927,7 @@ impl SerializableItem for TerminalView {
         cx: &mut App,
     ) -> Task<anyhow::Result<Entity<Self>>> {
         window.spawn(cx, async move |cx| {
-            let (cwd, custom_title) = cx
+            let (cwd, custom_title, shell) = cx
                 .update(|_window, cx| {
                     let db = TerminalDb::global(cx);
                     let from_db = db
@@ -1939,16 +1949,31 @@ impl SerializableItem for TerminalView {
                         .log_err()
                         .flatten()
                         .filter(|title| !title.trim().is_empty());
-                    (cwd, custom_title)
+                        
+                    let shell_data = db.get_shell(item_id, workspace_id).log_err();
+                    let shell = match shell_data {
+                        Some((Some(program), None)) => Some(task::Shell::Program(program)),
+                        Some((Some(program), Some(args_str))) => {
+                            let args: Vec<String> = args_str.split(' ').map(|s| s.to_string()).collect();
+                            Some(task::Shell::WithArguments { program, args, title_override: None })
+                        },
+                        _ => None,
+                    };
+                        
+                    (cwd, custom_title, shell)
                 })
                 .ok()
-                .unwrap_or((None, None));
+                .unwrap_or((None, None, None));
 
             let terminal = project
                 .update(cx, |project, cx| project.create_terminal_shell(cwd, cx))
                 .await?;
             cx.update(|window, cx| {
                 cx.new(|cx| {
+                    if let Some(shell) = shell {
+                        // HACK: Recreate task if shell was customized.
+                        // Ideally we pass shell config to `create_terminal_shell` but that requires refactoring `project::terminals::create_terminal_shell`
+                    }
                     let mut view = TerminalView::new(
                         terminal,
                         workspace,
