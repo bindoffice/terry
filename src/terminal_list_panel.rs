@@ -1,7 +1,7 @@
 use editor::{Editor, MultiBufferOffset};
 use gpui::{
     Action, AnyElement, App, Axis, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    Render, SharedString, Subscription, TaskExt, WeakEntity, Window, div, px,
+    Render, SharedString, Subscription, Task, TaskExt, WeakEntity, Window, div, px,
 };
 use project::Project;
 use terminal_view::TerminalView;
@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 /// Which window currently owns the shared restore file for a workspace key.
 /// A second window for the same workspace starts fresh instead of respawning
@@ -214,6 +215,11 @@ pub struct TerminalListPanel {
     terminal_spawn_cwds: HashMap<EntityId, Option<PathBuf>>,
     /// Keeps cwd-tracking subscriptions alive for each terminal.
     _terminal_cwd_subscriptions: Vec<Subscription>,
+    /// Debounced disk write after a terminal cwd change.
+    cwd_persist_task: Task<()>,
+    /// After session restore, ignore process-info reports of `$HOME` that would
+    /// clobber a more specific restored path while shell rc finishes.
+    restore_cwd_guard_until: Option<std::time::Instant>,
     _session_release_subscription: Subscription,
     renaming_group_id: Option<GroupId>,
     rename_editor: Entity<Editor>,
@@ -252,7 +258,11 @@ impl TerminalListPanel {
         .detach();
 
         let _quit_subscription = cx.on_app_quit(|this, cx| {
-            this.refresh_active_layout_and_save(cx);
+            // Skip layout capture on quit — Workspace may already be tearing
+            // down and nested reads can panic, which would skip the cwd write.
+            // Prefer remembered paths: process-info often reports `$HOME` while
+            // the app is shutting down, which used to wipe restored project cwds.
+            this.write_session_file(cx, true);
             async {}
         });
 
@@ -299,6 +309,8 @@ impl TerminalListPanel {
             owns_workspace_session,
             terminal_spawn_cwds: HashMap::default(),
             _terminal_cwd_subscriptions: Vec::new(),
+            cwd_persist_task: Task::ready(()),
+            restore_cwd_guard_until: None,
             _session_release_subscription,
             renaming_group_id: None,
             rename_editor,
@@ -343,7 +355,7 @@ impl TerminalListPanel {
         // Persist in-memory state only. Do not capture live layout here —
         // save_session is often called from workspace actions where
         // workspace.read would panic (nested entity lease).
-        self.write_session_file(cx);
+        self.write_session_file(cx, false);
     }
 
     /// Capture the active group's live split layout, then write the session.
@@ -361,7 +373,22 @@ impl TerminalListPanel {
                 group.saved_layout = Some(layout);
             }
         }
-        self.write_session_file(cx);
+        self.write_session_file(cx, false);
+    }
+
+    fn schedule_cwd_persist(&mut self, cx: &mut Context<Self>) {
+        if self.session_restoring {
+            return;
+        }
+        self.cwd_persist_task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(350))
+                .await;
+            this.update(cx, |this, cx| {
+                this.write_session_file(cx, false);
+            })
+            .ok();
+        });
     }
 
     fn session_spawns_complete(&self) -> bool {
@@ -468,15 +495,53 @@ impl TerminalListPanel {
             this.clear_session_terminal_counts();
             this.session_restoring = false;
             this.session_active_revealed = false;
+            this.restore_cwd_guard_until =
+                Some(std::time::Instant::now() + Duration::from_secs(8));
 
-            // First safe disk write after restore — preserves full terminal
-            // lists and layouts for every group.
-            this.write_session_file(cx);
+            // First safe disk write after restore — preserve restored spawn
+            // paths (prefer_remembered) so flaky early $HOME reads cannot wipe them.
+            this.write_session_file(cx, true);
             cx.notify();
         });
     }
 
-    fn write_session_file(&mut self, cx: &App) {
+    fn is_home_cwd(path: &PathBuf) -> bool {
+        dirs::home_dir().as_ref().is_some_and(|home| path == home)
+    }
+
+    /// Pick a cwd for disk. Login-shell rc often reports `$HOME` while the
+    /// terminal was restored (or last used) in a project path — never let that
+    /// transient home reading wipe a more specific remembered/previous path.
+    fn pick_persisted_cwd(
+        live: Option<PathBuf>,
+        remembered: Option<PathBuf>,
+        previous: Option<PathBuf>,
+        prefer_remembered: bool,
+    ) -> Option<PathBuf> {
+        let home_clobber = |candidate: &Option<PathBuf>, better: &Option<PathBuf>| {
+            matches!(
+                (candidate.as_ref(), better.as_ref()),
+                (Some(home), Some(other))
+                    if Self::is_home_cwd(home) && !Self::is_home_cwd(other)
+            )
+        };
+
+        if prefer_remembered {
+            return remembered.or(previous).or(live);
+        }
+
+        if home_clobber(&live, &remembered) {
+            return remembered.or(previous).or(live);
+        }
+        if home_clobber(&live, &previous) {
+            return previous.or(remembered).or(live);
+        }
+        live.or(remembered).or(previous)
+    }
+
+    /// `prefer_remembered`: after session restore, trust spawn/restored paths
+    /// over flaky early process-info reads that often report `$HOME`.
+    fn write_session_file(&mut self, cx: &App, prefer_remembered: bool) {
         // Never persist a half-restored session: async spawns leave
         // `group.terminals` empty until complete, which used to wipe the file
         // to `terminals: []` and drop inactive-group layouts on the next load.
@@ -501,8 +566,22 @@ impl TerminalListPanel {
                 live_cwds.push((view_ent.entity_id(), live));
             }
         }
-        for (view_id, live) in &live_cwds {
-            if let Some(path) = live {
+        if !prefer_remembered {
+            for (view_id, live) in &live_cwds {
+                let Some(path) = live else {
+                    continue;
+                };
+                let remembered = self
+                    .terminal_spawn_cwds
+                    .get(view_id)
+                    .and_then(|c| c.as_ref());
+                // Don't let a transient `$HOME` process-info reading clobber a
+                // more specific path we already trust.
+                if Self::is_home_cwd(path)
+                    && remembered.is_some_and(|prev| !Self::is_home_cwd(prev))
+                {
+                    continue;
+                }
                 self.terminal_spawn_cwds
                     .insert(*view_id, Some(path.clone()));
             }
@@ -530,14 +609,14 @@ impl TerminalListPanel {
                 let view_id = view_ent.entity_id();
                 let live = live_cwds.get(live_ix).and_then(|(_, cwd)| cwd.clone());
                 live_ix += 1;
-                let cwd = live
-                    .or_else(|| {
-                        self.terminal_spawn_cwds
-                            .get(&view_id)
-                            .cloned()
-                            .flatten()
-                    })
-                    .or_else(|| previous_cwds.get(&(i, term_ix)).cloned().flatten());
+                let remembered = self
+                    .terminal_spawn_cwds
+                    .get(&view_id)
+                    .cloned()
+                    .flatten();
+                let previous = previous_cwds.get(&(i, term_ix)).cloned().flatten();
+                let cwd =
+                    Self::pick_persisted_cwd(live, remembered, previous, prefer_remembered);
                 let title = view_ent
                     .read(cx)
                     .custom_title()
@@ -1164,9 +1243,46 @@ impl TerminalListPanel {
                     group_id,
                     terminal_view.clone(),
                     restore_index,
-                    remembered_cwd.or(spawn_cwd),
+                    remembered_cwd.clone().or(spawn_cwd),
                     cx,
                 );
+
+                // Session restore: login-shell rc often `cd ~` after spawn, leaving
+                // the PTY in $HOME even when alacritty started in the project path.
+                // Re-apply `cd` once the shell is ready, only if still wrong.
+                if restore_index.is_some() {
+                    let path_for_cd = remembered_cwd
+                        .clone()
+                        .filter(|path| !Self::is_home_cwd(path));
+                    if let Some(path) = path_for_cd {
+                        let terminal = terminal.clone();
+                        cx.spawn(async move |_, cx| {
+                            for delay_ms in [400u64, 1500] {
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(delay_ms))
+                                    .await;
+                                let needs_cd = terminal.update(cx, |term, _cx| {
+                                    let live = term
+                                        .latest_working_directory()
+                                        .or_else(|| term.working_directory());
+                                    live.as_ref() != Some(&path)
+                                });
+                                if !needs_cd {
+                                    return;
+                                }
+                                let Some(path_str) = path.to_str() else {
+                                    return;
+                                };
+                                let quoted = path_str.replace('\'', "'\\''");
+                                let cmd = format!("cd '{quoted}'\n");
+                                terminal.update(cx, |term, _cx| {
+                                    term.input(cmd.into_bytes());
+                                });
+                            }
+                        })
+                        .detach();
+                    }
+                }
 
                 if this.session_restoring {
                     this.reveal_active_group_during_restore(window, cx);
@@ -1221,7 +1337,7 @@ impl TerminalListPanel {
                                 group.saved_layout = Some(layout);
                             }
                         }
-                        this.write_session_file(cx);
+                        this.write_session_file(cx, false);
                         cx.defer_in(window, |this, _window, _cx| {
                             this.switching = false;
                         });
@@ -1313,7 +1429,8 @@ impl TerminalListPanel {
         let view_id = terminal_view.entity_id();
         self.terminal_spawn_cwds.insert(view_id, spawn_cwd);
 
-        // Keep remembered cwd in sync when the shell cds (TitleChanged).
+        // Keep remembered cwd in sync when the shell cds (TitleChanged), and
+        // persist to disk so restart does not fall back to $HOME.
         let terminal = terminal_view.read(cx).terminal().clone();
         self._terminal_cwd_subscriptions.push(cx.subscribe(
             &terminal,
@@ -1329,8 +1446,33 @@ impl TerminalListPanel {
                     .latest_working_directory()
                     .or_else(|| term.read(cx).working_directory())
                     .filter(|cwd| !cwd.as_os_str().is_empty());
-                if let Some(cwd) = cwd {
-                    this.terminal_spawn_cwds.insert(view_id, Some(cwd));
+                let Some(cwd) = cwd else {
+                    return;
+                };
+                // Shell init (login rc) often briefly reports $HOME even when we
+                // restored a project path — don't let that wipe the session.
+                let guarding = this
+                    .restore_cwd_guard_until
+                    .is_some_and(|until| std::time::Instant::now() < until);
+                if guarding {
+                    if let Some(prev) = this
+                        .terminal_spawn_cwds
+                        .get(&view_id)
+                        .and_then(|c| c.as_ref())
+                    {
+                        if Self::is_home_cwd(&cwd) && !Self::is_home_cwd(prev) {
+                            return;
+                        }
+                    }
+                }
+                let changed = this
+                    .terminal_spawn_cwds
+                    .get(&view_id)
+                    .and_then(|c| c.as_ref())
+                    != Some(&cwd);
+                this.terminal_spawn_cwds.insert(view_id, Some(cwd));
+                if changed {
+                    this.schedule_cwd_persist(cx);
                 }
             },
         ));
@@ -1548,7 +1690,7 @@ impl TerminalListPanel {
                     }
                     // Persist immediately so every group's split survives
                     // restart even if the user never switches away.
-                    self.write_session_file(cx);
+                    self.write_session_file(cx, false);
                 }
             }
             self.switching = false;
@@ -1835,14 +1977,14 @@ impl TerminalListPanel {
             }
 
             if this.active_group_id != group_id || this.pending_switch_from.is_some() {
-                this.write_session_file(cx);
+                this.write_session_file(cx, false);
                 return;
             }
 
             this.switching = true;
             this.restore_active_group_layout(window, cx);
             this.switching = false;
-            this.write_session_file(cx);
+            this.write_session_file(cx, false);
             cx.notify();
         });
     }
