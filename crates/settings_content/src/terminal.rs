@@ -238,7 +238,9 @@ pub enum Shell {
 )]
 #[strum_discriminants(derive(strum::VariantArray, strum::VariantNames, strum::FromRepr))]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum WorkingDirectory {
+    #[default]
     /// Use the current file's directory, falling back to the project directory,
     /// then the first project in the workspace.
     CurrentFileDirectory,
@@ -363,11 +365,13 @@ pub enum CursorShapeContent {
     strum::VariantNames,
 )]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum TerminalBlink {
     /// Never blink the cursor, ignoring the terminal mode.
     Off,
     /// Default the cursor blink to off, but allow the terminal to
     /// set blinking.
+    #[default]
     TerminalControlled,
     /// Always blink the cursor, ignoring the terminal mode.
     On,
@@ -387,7 +391,9 @@ pub enum TerminalBlink {
     strum::VariantNames,
 )]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AlternateScroll {
+    #[default]
     On,
     Off,
 }
@@ -511,8 +517,10 @@ pub enum PathHyperlinkRegex {
     strum::VariantNames,
 )]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum TerminalDockPosition {
     Left,
+    #[default]
     Bottom,
     Right,
 }

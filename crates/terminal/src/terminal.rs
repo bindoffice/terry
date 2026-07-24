@@ -913,7 +913,7 @@ fn init_command_startup_marker_command(shell_kind: ShellKind, marker_id: u64) ->
 
 pub struct TerminalBuilder {
     terminal: Terminal,
-    events_rx: UnboundedReceiver<PtyEvent>,
+    events_rx: async_channel::Receiver<PtyEvent>,
 }
 
 impl TerminalBuilder {
@@ -952,10 +952,11 @@ impl TerminalBuilder {
             .min(MAX_SCROLL_HISTORY_LINES);
         let config = display_only_term_config(scrolling_history, cursor_shape);
 
-        let (events_tx, events_rx) = unbounded();
+        let (events_tx, events_rx) = async_channel::bounded(1024);
         let term = new_term(&config, terminal_bounds, events_tx, alternate_scroll);
 
         let terminal = Terminal {
+            content_dirty: true,
             task: None,
             terminal_type: TerminalType::DisplayOnly,
             subprocess: None,
@@ -1136,7 +1137,7 @@ impl TerminalBuilder {
 
             //Spawn a task so the Alacritty EventLoop (or the subprocess reader) can communicate with us
             //TODO: Remove with a bounded sender which can be dispatched on &self
-            let (events_tx, events_rx) = unbounded();
+            let (events_tx, events_rx) = async_channel::bounded(1024);
             //Set up the terminal...
             let term = new_term(
                 &config,
@@ -1229,6 +1230,7 @@ impl TerminalBuilder {
 
             let no_task = task.is_none();
             let terminal = Terminal {
+            content_dirty: true,
                 task,
                 terminal_type,
                 subprocess,
@@ -1315,7 +1317,7 @@ impl TerminalBuilder {
     pub fn subscribe(mut self, cx: &Context<Terminal>) -> Terminal {
         //Event loop
         self.terminal.event_loop_task = cx.spawn(async move |terminal, cx| {
-            while let Some(event) = self.events_rx.next().await {
+            while let Ok(event) = self.events_rx.recv().await {
                 terminal.update(cx, |terminal, cx| {
                     //Process the first event immediately for lowered latency
                     terminal.process_pty_event(event, cx);
@@ -1336,8 +1338,8 @@ impl TerminalBuilder {
                     loop {
                         futures::select_biased! {
                             _ = timer => break,
-                            event = self.events_rx.next() => {
-                                if let Some(event) = event {
+                            event = self.events_rx.recv().fuse() => {
+                                if let Ok(event) = event {
                                     if matches!(event, PtyEvent::Event(TerminalBackendEvent::Wakeup))
                                     {
                                         wakeup = true;
@@ -1421,6 +1423,7 @@ pub struct Terminal {
     mouse_down_position: Option<GpuiPoint<Pixels>>,
     pub matches: Vec<Range>,
     pub last_content: Content,
+    pub content_dirty: bool,
     pub selection_head: Option<Point>,
 
     pub breadcrumb_text: String,
@@ -1563,6 +1566,7 @@ impl Terminal {
                 //NOOP, Handled in render
             }
             TerminalBackendEvent::Wakeup => {
+                self.content_dirty = true;
                 self.detect_init_command_startup_marker();
                 cx.emit(Event::Wakeup);
 
@@ -2260,6 +2264,10 @@ impl Terminal {
     }
 
     pub fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.content_dirty && self.events.is_empty() {
+             return;
+        }
+
         let term = self.term.clone();
         let mut terminal = term.lock_unfair();
         //Note that the ordering of events matters for event processing
@@ -2268,6 +2276,7 @@ impl Terminal {
         }
 
         self.last_content = make_content(&terminal, &self.last_content);
+        self.content_dirty = false;
     }
 
     pub fn with_renderable_cells<R>(&self, f: impl for<'a> FnOnce(RenderableCells<'a>) -> R) -> R {
@@ -3040,7 +3049,7 @@ fn spawn_task_subprocess(
     env: HashMap<String, String>,
     working_directory: Option<PathBuf>,
     term: Arc<AlacrittyTermLock>,
-    events_tx: futures::channel::mpsc::UnboundedSender<PtyEvent>,
+    events_tx: async_channel::Sender<PtyEvent>,
     executor: &BackgroundExecutor,
 ) -> Result<SubprocessHandle> {
     use futures::io::AsyncReadExt as _;
@@ -3089,7 +3098,7 @@ fn spawn_task_subprocess(
                                     processor.advance(&mut *term, &converted);
                                 }
                                 events_tx
-                                    .unbounded_send(PtyEvent::Event(TerminalBackendEvent::Wakeup))
+                                    .try_send(PtyEvent::Event(TerminalBackendEvent::Wakeup))
                                     .ok();
                             }
                         }
@@ -3123,7 +3132,7 @@ fn spawn_task_subprocess(
                 Some(status) => TerminalBackendEvent::ChildExit(status),
                 None => TerminalBackendEvent::Exit,
             };
-            events_tx.unbounded_send(PtyEvent::Event(event)).ok();
+            events_tx.try_send(PtyEvent::Event(event)).ok();
         }
     });
 

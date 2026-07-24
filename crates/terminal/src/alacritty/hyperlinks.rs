@@ -1631,12 +1631,12 @@ mod tests {
                             }
                             CapturesState::RowScan => CapturesState::Row(String::new()),
                             CapturesState::Row(number) => {
-                                row = Some(number.parse::<u32>().unwrap());
+                                row = Some(number.parse::<u32>().unwrap_or(0));
                                 CapturesState::ColumnScan
                             }
                             CapturesState::ColumnScan => CapturesState::Column(String::new()),
                             CapturesState::Column(number) => {
-                                column = Some(number.parse::<u32>().unwrap());
+                                column = Some(number.parse::<u32>().unwrap_or(0));
                                 CapturesState::Done
                             }
                             CapturesState::Done => {

@@ -29,7 +29,7 @@ use alacritty_terminal::{
     },
 };
 use anyhow::{Context as _, Result};
-use futures::channel::mpsc::UnboundedSender;
+use async_channel::Sender;
 use util::paths::PathStyle;
 use vte::ansi::Handler;
 #[cfg(target_os = "windows")]
@@ -54,7 +54,7 @@ pub(super) type AlacrittyGridIterator<'a> = GridIterator<'a, AlacCell>;
 pub(super) type AlacrittyHyperlink = AlacHyperlink;
 
 #[derive(Clone)]
-pub(super) struct ZedListener(UnboundedSender<PtyEvent>);
+pub(super) struct ZedListener(async_channel::Sender<PtyEvent>);
 
 #[derive(Clone, Debug)]
 pub(super) struct AlacrittySearch {
@@ -185,7 +185,7 @@ pub(super) fn open_pty(
 pub(super) fn new_term(
     config: &AlacrittyTermConfig,
     bounds: TerminalBounds,
-    events_tx: UnboundedSender<PtyEvent>,
+    events_tx: async_channel::Sender<PtyEvent>,
     alternate_scroll: AlternateScroll,
 ) -> Arc<AlacrittyTermLock> {
     let mut term = Term::new(config.clone(), &bounds, ZedListener(events_tx));
@@ -199,7 +199,7 @@ pub(super) fn new_term(
 
 pub(super) fn spawn_event_loop(
     term: Arc<AlacrittyTermLock>,
-    events_tx: UnboundedSender<PtyEvent>,
+    events_tx: async_channel::Sender<PtyEvent>,
     pty: AlacrittyPty,
     drain_on_exit: bool,
 ) -> Result<PtySender> {
@@ -322,7 +322,7 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
 
 impl EventListener for ZedListener {
     fn send_event(&self, event: AlacTermEvent) {
-        self.0.unbounded_send(PtyEvent::Event(event.into())).ok();
+        self.0.try_send(PtyEvent::Event(event.into())).ok();
     }
 }
 
