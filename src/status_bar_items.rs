@@ -8,7 +8,7 @@ use terminal::Event as TerminalEvent;
 use terminal_view::TerminalView;
 use ui::{Button, LabelSize, Tooltip, prelude::*};
 use util::paths::PathExt;
-use workspace::{HideStatusItem, StatusItemView, Workspace, item::ItemHandle};
+use workspace::{HideStatusItem, StatusItemView, item::ItemHandle};
 
 use crate::terminal_list_panel::TerminalListPanel;
 
@@ -16,7 +16,8 @@ const CWD_MAX_CHARS: usize = 48;
 
 /// Status-bar item: active group name and current terminal title.
 pub struct ActiveTerminalContext {
-    workspace: WeakEntity<Workspace>,
+    panel: WeakEntity<TerminalListPanel>,
+    active_terminal: Option<WeakEntity<TerminalView>>,
     label: Option<SharedString>,
     tooltip: Option<SharedString>,
     _terminal_subscription: Option<Subscription>,
@@ -24,9 +25,10 @@ pub struct ActiveTerminalContext {
 }
 
 impl ActiveTerminalContext {
-    pub fn new(workspace: &Workspace) -> Self {
+    pub fn new(panel: &Entity<TerminalListPanel>) -> Self {
         Self {
-            workspace: workspace.weak_handle(),
+            panel: panel.downgrade(),
+            active_terminal: None,
             label: None,
             tooltip: None,
             _terminal_subscription: None,
@@ -35,24 +37,19 @@ impl ActiveTerminalContext {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let Some(workspace) = self.workspace.upgrade() else {
-            self.clear();
-            cx.notify();
-            return;
-        };
-        let Some(panel) = workspace.read(cx).panel::<TerminalListPanel>(cx) else {
-            self.clear();
-            cx.notify();
-            return;
-        };
+        let group_name = self
+            .panel
+            .upgrade()
+            .and_then(|panel| panel.read(cx).active_group_name());
 
-        let panel = panel.read(cx);
-        let group_name = panel.active_group_name();
-        let terminal_title = panel.active_terminal_view(cx).map(|tv| {
+        let terminal_title = self.active_terminal.as_ref().and_then(|tv| {
+            let tv = tv.upgrade()?;
             let view = tv.read(cx);
-            view.custom_title()
-                .map(|title| title.to_string())
-                .unwrap_or_else(|| view.terminal().read(cx).title(true))
+            Some(
+                view.custom_title()
+                    .map(|title| title.to_string())
+                    .unwrap_or_else(|| view.terminal().read(cx).title(true)),
+            )
         });
 
         match (group_name, terminal_title) {
@@ -84,6 +81,7 @@ impl ActiveTerminalContext {
         terminal_view: Option<Entity<TerminalView>>,
         cx: &mut Context<Self>,
     ) {
+        self.active_terminal = terminal_view.as_ref().map(|tv| tv.downgrade());
         self._terminal_subscription = terminal_view.map(|tv| {
             let terminal = tv.read(cx).terminal().clone();
             cx.subscribe(&terminal, |this, _, event, cx| {
@@ -97,16 +95,15 @@ impl ActiveTerminalContext {
         });
     }
 
-    fn track_panel(&mut self, cx: &mut Context<Self>) {
-        self._panel_observation = self
-            .workspace
-            .upgrade()
-            .and_then(|workspace| workspace.read(cx).panel::<TerminalListPanel>(cx))
-            .map(|panel| {
-                cx.observe(&panel, |this, _, cx| {
-                    this.refresh(cx);
-                })
-            });
+    fn ensure_panel_observation(&mut self, cx: &mut Context<Self>) {
+        if self._panel_observation.is_some() {
+            return;
+        }
+        self._panel_observation = self.panel.upgrade().map(|panel| {
+            cx.observe(&panel, |this, _, cx| {
+                this.refresh(cx);
+            })
+        });
     }
 }
 
@@ -138,7 +135,7 @@ impl StatusItemView for ActiveTerminalContext {
     ) {
         let terminal_view = active_pane_item.and_then(|item| item.act_as::<TerminalView>(cx));
         self.track_active_terminal(terminal_view, cx);
-        self.track_panel(cx);
+        self.ensure_panel_observation(cx);
         self.refresh(cx);
     }
 
@@ -150,40 +147,27 @@ impl StatusItemView for ActiveTerminalContext {
 
 /// Status-bar item: working directory of the focused terminal.
 pub struct ActiveTerminalCwd {
-    workspace: WeakEntity<Workspace>,
+    active_terminal: Option<WeakEntity<TerminalView>>,
     display: Option<SharedString>,
     full: Option<SharedString>,
     _terminal_subscription: Option<Subscription>,
-    _panel_observation: Option<Subscription>,
 }
 
 impl ActiveTerminalCwd {
-    pub fn new(workspace: &Workspace) -> Self {
+    pub fn new() -> Self {
         Self {
-            workspace: workspace.weak_handle(),
+            active_terminal: None,
             display: None,
             full: None,
             _terminal_subscription: None,
-            _panel_observation: None,
         }
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let Some(workspace) = self.workspace.upgrade() else {
-            self.clear();
-            cx.notify();
-            return;
-        };
-        let Some(panel) = workspace.read(cx).panel::<TerminalListPanel>(cx) else {
-            self.clear();
-            cx.notify();
-            return;
-        };
-
-        let cwd = panel
-            .read(cx)
-            .active_terminal_view(cx)
-            .and_then(|tv| tv.read(cx).terminal().read(cx).working_directory());
+        let cwd = self.active_terminal.as_ref().and_then(|tv| {
+            let tv = tv.upgrade()?;
+            tv.read(cx).terminal().read(cx).working_directory()
+        });
 
         match cwd {
             Some(path) => {
@@ -206,6 +190,7 @@ impl ActiveTerminalCwd {
         terminal_view: Option<Entity<TerminalView>>,
         cx: &mut Context<Self>,
     ) {
+        self.active_terminal = terminal_view.as_ref().map(|tv| tv.downgrade());
         self._terminal_subscription = terminal_view.map(|tv| {
             let terminal = tv.read(cx).terminal().clone();
             cx.subscribe(&terminal, |this, _, event, cx| {
@@ -218,17 +203,11 @@ impl ActiveTerminalCwd {
             })
         });
     }
+}
 
-    fn track_panel(&mut self, cx: &mut Context<Self>) {
-        self._panel_observation = self
-            .workspace
-            .upgrade()
-            .and_then(|workspace| workspace.read(cx).panel::<TerminalListPanel>(cx))
-            .map(|panel| {
-                cx.observe(&panel, |this, _, cx| {
-                    this.refresh(cx);
-                })
-            });
+impl Default for ActiveTerminalCwd {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -260,7 +239,6 @@ impl StatusItemView for ActiveTerminalCwd {
     ) {
         let terminal_view = active_pane_item.and_then(|item| item.act_as::<TerminalView>(cx));
         self.track_active_terminal(terminal_view, cx);
-        self.track_panel(cx);
         self.refresh(cx);
     }
 

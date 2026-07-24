@@ -360,6 +360,23 @@ impl StatusBar {
         cx.notify();
     }
 
+    /// Inserts a right-side item at the front of the list. Because right tools
+    /// render in reverse, the first item appears furthest to the right.
+    pub fn prepend_right_item<T>(
+        &mut self,
+        item: Entity<T>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) where
+        T: 'static + StatusItemView,
+    {
+        let active_pane_item = self.active_pane.read(cx).active_item();
+        item.set_active_pane_item(active_pane_item.as_deref(), window, cx);
+
+        self.right_items.insert(0, Box::new(item));
+        cx.notify();
+    }
+
     pub fn set_active_pane(
         &mut self,
         active_pane: &Entity<Pane>,

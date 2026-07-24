@@ -639,8 +639,8 @@ fn init_workspace(
     }
 
     let active_terminal_context =
-        cx.new(|_| status_bar_items::ActiveTerminalContext::new(workspace));
-    let active_terminal_cwd = cx.new(|_| status_bar_items::ActiveTerminalCwd::new(workspace));
+        cx.new(|_| status_bar_items::ActiveTerminalContext::new(&terminal_panel));
+    let active_terminal_cwd = cx.new(|_| status_bar_items::ActiveTerminalCwd::new());
     let active_file_name = cx.new(|_| workspace::active_file_name::ActiveFileName::new());
     let active_buffer_encoding =
         cx.new(|_| encoding_selector::ActiveBufferEncoding::new(workspace));
@@ -651,14 +651,16 @@ fn init_workspace(
     let cursor_position = cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
 
     workspace.status_bar().update(cx, |status_bar, cx| {
-        status_bar.add_left_item(active_terminal_context, window, cx);
-        status_bar.add_left_item(active_terminal_cwd, window, cx);
         status_bar.add_left_item(active_file_name, window, cx);
         status_bar.add_right_item(active_buffer_encoding, window, cx);
         status_bar.add_right_item(active_buffer_language, window, cx);
         status_bar.add_right_item(line_ending_indicator, window, cx);
         status_bar.add_right_item(vim_mode_indicator, window, cx);
         status_bar.add_right_item(cursor_position, window, cx);
+        // Right tools render reversed: prepend so cwd sits at the far right,
+        // with group name immediately to its left.
+        status_bar.prepend_right_item(active_terminal_context, window, cx);
+        status_bar.prepend_right_item(active_terminal_cwd, window, cx);
     });
 }
 
