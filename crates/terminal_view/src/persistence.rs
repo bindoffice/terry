@@ -502,8 +502,6 @@ impl TerminalDb {
         .await
     }
 
-    query! {
-        
     pub async fn save_shell(
         &self,
         item_id: ItemId,
@@ -535,7 +533,8 @@ impl TerminalDb {
         }
     }
 
-    pub fn get_custom_title(item_id: ItemId, workspace_id: WorkspaceId) -> Result<Option<String>> {
+    query! {
+        pub fn get_custom_title(item_id: ItemId, workspace_id: WorkspaceId) -> Result<Option<String>> {
             SELECT custom_title
             FROM terminals
             WHERE item_id = ? AND workspace_id = ?
