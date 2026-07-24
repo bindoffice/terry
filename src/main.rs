@@ -5,6 +5,7 @@ mod file_list_panel;
 mod keymap_settings;
 mod llm_provider_settings;
 mod settings_window;
+mod status_bar_items;
 mod terminal_list_panel;
 use std::sync::Arc;
 
@@ -474,16 +475,7 @@ fn configure_terry_tab_bar(
                                 menu.action(i18n::t("new_file"), workspace::NewFile.boxed_clone())
                                     .action(
                                         i18n::t("open_file"),
-                                        workspace::ToggleFileFinder::default().boxed_clone(),
-                                    )
-                                    .separator()
-                                    .action(
-                                        i18n::t("search_project"),
-                                        workspace::DeploySearch::default().boxed_clone(),
-                                    )
-                                    .action(
-                                        i18n::t("search_symbols"),
-                                        workspace::ToggleProjectSymbols.boxed_clone(),
+                                        workspace::OpenFiles.boxed_clone(),
                                     )
                                     .separator()
                                     .entry(i18n::t("new_terminal"), None, move |window, cx| {
@@ -637,10 +629,18 @@ fn init_workspace(
         workspace.add_panel(agent_panel, window, cx);
     }
 
-    if has_terminal {
+    let already_has_terminal_status = workspace
+        .status_bar()
+        .read(cx)
+        .item_of_type::<status_bar_items::ActiveTerminalCwd>()
+        .is_some();
+    if already_has_terminal_status {
         return;
     }
 
+    let active_terminal_context =
+        cx.new(|_| status_bar_items::ActiveTerminalContext::new(workspace));
+    let active_terminal_cwd = cx.new(|_| status_bar_items::ActiveTerminalCwd::new(workspace));
     let active_file_name = cx.new(|_| workspace::active_file_name::ActiveFileName::new());
     let active_buffer_encoding =
         cx.new(|_| encoding_selector::ActiveBufferEncoding::new(workspace));
@@ -651,6 +651,8 @@ fn init_workspace(
     let cursor_position = cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
 
     workspace.status_bar().update(cx, |status_bar, cx| {
+        status_bar.add_left_item(active_terminal_context, window, cx);
+        status_bar.add_left_item(active_terminal_cwd, window, cx);
         status_bar.add_left_item(active_file_name, window, cx);
         status_bar.add_right_item(active_buffer_encoding, window, cx);
         status_bar.add_right_item(active_buffer_language, window, cx);

@@ -704,9 +704,17 @@ impl TerminalListPanel {
         );
     }
 
+    /// Name of the currently selected group, if any.
+    pub fn active_group_name(&self) -> Option<SharedString> {
+        self.groups
+            .iter()
+            .find(|group| group.id == self.active_group_id)
+            .map(|group| group.name.clone())
+    }
+
     /// Currently focused terminal view (pane active item, else last in the
     /// active group).
-    fn active_terminal_view(&self, cx: &App) -> Option<Entity<TerminalView>> {
+    pub fn active_terminal_view(&self, cx: &App) -> Option<Entity<TerminalView>> {
         if let Some(tv) = self
             .display_pane_entity(cx)
             .and_then(|pane| pane.read(cx).active_item())
@@ -721,7 +729,7 @@ impl TerminalListPanel {
     }
 
     /// Live cwd of the currently focused terminal, force-refreshed from the PTY.
-    fn active_terminal_cwd(&self, cx: &App) -> Option<PathBuf> {
+    pub fn active_terminal_cwd(&self, cx: &App) -> Option<PathBuf> {
         self.active_terminal_view(cx).and_then(|tv| {
             tv.read(cx)
                 .terminal()
@@ -1884,7 +1892,7 @@ impl Render for TerminalListPanel {
             let mut terminals = Vec::new();
             if !collapsed {
                 for tv in &group.terminals {
-                    terminals.push((tv.clone(), tv.tab_content_text(0, cx)));
+                    terminals.push((tv.clone(), sidebar_terminal_name(tv, cx)));
                 }
             }
             groups_snapshot.push((
@@ -2235,4 +2243,34 @@ impl Panel for TerminalListPanel {
     fn activation_priority(&self) -> u32 {
         2
     }
+}
+
+/// Sidebar label: custom title, else cwd basename — never appends the shell
+/// name (`dir — zsh`).
+fn sidebar_terminal_name(tv: &Entity<TerminalView>, cx: &App) -> SharedString {
+    let view = tv.read(cx);
+    if let Some(custom) = view.custom_title().filter(|title| !title.trim().is_empty()) {
+        return custom.to_string().into();
+    }
+
+    let terminal = view.terminal().read(cx);
+    if let Some(name) = terminal
+        .working_directory()
+        .and_then(|cwd| {
+            cwd.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .filter(|name| !name.is_empty())
+    {
+        return name.into();
+    }
+
+    let title = terminal.title(true);
+    title
+        .split_once(" — ")
+        .or_else(|| title.split_once(" - "))
+        .map(|(left, _)| left)
+        .unwrap_or(&title)
+        .to_string()
+        .into()
 }
