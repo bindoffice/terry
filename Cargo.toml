@@ -55,6 +55,7 @@ paths.workspace = true
 platform_title_bar.workspace = true
 project.workspace = true
 release_channel.workspace = true
+recent_projects.workspace = true
 reqwest_client.workspace = true
 session.workspace = true
 search.workspace = true

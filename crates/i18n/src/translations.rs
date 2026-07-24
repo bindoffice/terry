@@ -44,6 +44,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("keymap_bindings_count", "shortcuts");
             m.insert("open_keymap_file", "Open Keymap File");
             m.insert("vim_mode", "Vim Mode");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "Settings");
             m.insert("recent_terminals", "Recent Terminals");
             m.insert("recent_folders", "Recent Folders");
@@ -162,6 +167,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("keymap_bindings_count", "个快捷键");
             m.insert("open_keymap_file", "打开快捷键配置文件");
             m.insert("vim_mode", "Vim 模式");
+                        m.insert("menu_file", "文件");
+            m.insert("open", "打开…");
+            m.insert("open_recent", "打开最近项目…");
+            m.insert("add_folder_to_project", "将文件夹添加到项目…");
+            m.insert("close_window", "关闭窗口");
             m.insert("settings", "设置");
             m.insert("recent_terminals", "最近终端");
             m.insert("recent_folders", "最近文件夹");
@@ -281,6 +291,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "跟隨系統");
             m.insert("appearance", "外觀");
             m.insert("select_theme", "選擇主題…");
+                        m.insert("menu_file", "檔案");
+            m.insert("open", "開啟…");
+            m.insert("open_recent", "開啟最近專案…");
+            m.insert("add_folder_to_project", "將資料夾加入專案…");
+            m.insert("close_window", "關閉視窗");
             m.insert("settings", "設定");
             m.insert("open_recent_project", "開啟最近專案");
             m.insert("agent", "Agent");
@@ -332,6 +347,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "システムに従う");
             m.insert("appearance", "外観");
             m.insert("select_theme", "テーマを選択…");
+                        m.insert("menu_file", "ファイル");
+            m.insert("open", "開く…");
+            m.insert("open_recent", "最近のプロジェクトを開く…");
+            m.insert("add_folder_to_project", "フォルダをプロジェクトに追加…");
+            m.insert("close_window", "ウインドウを閉じる");
             m.insert("settings", "設定");
             m.insert("open_recent_project", "最近のプロジェクトを開く");
             m.insert("agent", "Agent");
@@ -383,6 +403,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "시스템");
             m.insert("appearance", "모양");
             m.insert("select_theme", "테마 선택…");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "설정");
             m.insert("open_recent_project", "최근 프로젝트 열기");
             m.insert("agent", "Agent");
@@ -416,6 +441,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "Sistema");
             m.insert("appearance", "Apariencia");
             m.insert("select_theme", "Seleccionar tema…");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "Ajustes");
             m.insert("open_recent_project", "Abrir proyecto reciente");
             m
@@ -439,6 +469,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "Système");
             m.insert("appearance", "Apparence");
             m.insert("select_theme", "Choisir un thème…");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "Réglages");
             m.insert("open_recent_project", "Ouvrir un projet récent");
             m
@@ -462,6 +497,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "System");
             m.insert("appearance", "Erscheinungsbild");
             m.insert("select_theme", "Design auswählen…");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "Einstellungen");
             m.insert("open_recent_project", "Zuletzt verwendetes Projekt öffnen");
             m
@@ -485,6 +525,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "Sistema");
             m.insert("appearance", "Aparência");
             m.insert("select_theme", "Selecionar tema…");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "Configurações");
             m.insert("open_recent_project", "Abrir projeto recente");
             m
@@ -508,6 +553,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "Системный");
             m.insert("appearance", "Оформление");
             m.insert("select_theme", "Выбрать тему…");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "Настройки");
             m.insert("open_recent_project", "Открыть недавний проект");
             m
@@ -531,6 +581,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "النظام");
             m.insert("appearance", "المظهر");
             m.insert("select_theme", "اختر السمة…");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "الإعدادات");
             m.insert("open_recent_project", "فتح مشروع حديث");
             m
@@ -554,6 +609,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "सिस्टम");
             m.insert("appearance", "दिखावट");
             m.insert("select_theme", "थीम चुनें…");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "सेटिंग्स");
             m.insert("open_recent_project", "हालिया प्रोजेक्ट खोलें");
             m
@@ -577,6 +637,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "Sistema");
             m.insert("appearance", "Aspetto");
             m.insert("select_theme", "Seleziona tema…");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "Impostazioni");
             m.insert("open_recent_project", "Apri progetto recente");
             m
@@ -600,6 +665,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "Systeem");
             m.insert("appearance", "Uiterlijk");
             m.insert("select_theme", "Thema kiezen…");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "Instellingen");
             m.insert("open_recent_project", "Recent project openen");
             m
@@ -623,6 +693,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "Sistem");
             m.insert("appearance", "Görünüm");
             m.insert("select_theme", "Tema seç…");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "Ayarlar");
             m.insert("open_recent_project", "Son projeyi aç");
             m
@@ -646,6 +721,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "Systemowy");
             m.insert("appearance", "Wygląd");
             m.insert("select_theme", "Wybierz motyw…");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "Ustawienia");
             m.insert("open_recent_project", "Otwórz ostatni projekt");
             m
@@ -669,6 +749,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "Hệ thống");
             m.insert("appearance", "Giao diện");
             m.insert("select_theme", "Chọn chủ đề…");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "Cài đặt");
             m.insert("open_recent_project", "Mở dự án gần đây");
             m
@@ -692,6 +777,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "ระบบ");
             m.insert("appearance", "ลักษณะ");
             m.insert("select_theme", "เลือกธีม…");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "การตั้งค่า");
             m.insert("open_recent_project", "เปิดโปรเจกต์ล่าสุด");
             m
@@ -715,6 +805,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "Sistem");
             m.insert("appearance", "Tampilan");
             m.insert("select_theme", "Pilih tema…");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "Pengaturan");
             m.insert("open_recent_project", "Buka proyek terbaru");
             m
@@ -738,6 +833,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "Системна");
             m.insert("appearance", "Вигляд");
             m.insert("select_theme", "Вибрати тему…");
+                        m.insert("menu_file", "File");
+            m.insert("open", "Open…");
+            m.insert("open_recent", "Open Recent…");
+            m.insert("add_folder_to_project", "Add Folder to Project…");
+            m.insert("close_window", "Close Window");
             m.insert("settings", "Налаштування");
             m.insert("open_recent_project", "Відкрити недавній проєкт");
             m

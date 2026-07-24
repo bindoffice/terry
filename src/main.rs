@@ -39,8 +39,10 @@ use util::ResultExt;
 use uuid::Uuid;
 use vim_mode_setting::VimModeSetting;
 use workspace::{
-    AppState, ItemHandle, OpenOptions, SplitDown, SplitLeft, SplitMode, SplitRight, SplitUp,
-    ToggleZoom, Workspace, WorkspaceStore,
+    AppState, OpenOptions, RestoreOnStartupBehavior, SerializedWorkspaceLocation, SessionWorkspace,
+    SplitDown, SplitLeft, SplitMode, SplitRight, SplitUp, ToggleZoom, Workspace, WorkspaceDb,
+    WorkspaceSettings, WorkspaceStore, last_opened_workspace_location,
+    last_session_workspace_locations, read_serialized_multi_workspaces, restore_multiworkspace,
 };
 
 fn main() {
@@ -228,6 +230,7 @@ fn main() {
         line_ending_selector::init(cx);
         markdown_preview::init(cx);
         image_viewer::init(cx);
+        recent_projects::init(cx);
 
         // Enable vim mode by default for this app.
         SettingsStore::update(cx, |store, cx| {
@@ -253,13 +256,120 @@ fn main() {
         })
         .detach();
 
-        workspace::open_new(OpenOptions::default(), app_state.clone(), cx, {
-            move |workspace, window, cx| {
-                init_workspace(workspace, window, cx);
-            }
-        })
-        .detach_and_log_err(cx);
+        open_or_restore_workspaces(app_state.clone(), cx);
     });
+}
+
+/// Restore the previous project window(s) when configured, otherwise open empty.
+fn open_or_restore_workspaces(app_state: Arc<AppState>, cx: &mut gpui::App) {
+    cx.spawn(async move |cx| {
+        let restored = try_restore_workspaces(app_state.clone(), cx).await;
+        if restored {
+            return;
+        }
+        cx.update(|cx| {
+            workspace::open_new(OpenOptions::default(), app_state, cx, {
+                move |workspace, window, cx| {
+                    init_workspace(workspace, window, cx);
+                }
+            })
+            .detach_and_log_err(cx);
+        });
+    })
+    .detach();
+}
+
+async fn try_restore_workspaces(app_state: Arc<AppState>, cx: &mut gpui::AsyncApp) -> bool {
+    let Some(locations) = restorable_workspace_locations(cx, &app_state).await else {
+        return false;
+    };
+    let multi_workspaces = cx.update(|cx| read_serialized_multi_workspaces(locations, cx));
+    if multi_workspaces.is_empty() {
+        return false;
+    }
+
+    let mut any_restored = false;
+    for multi_workspace in multi_workspaces {
+        match &multi_workspace.active_workspace.location {
+            SerializedWorkspaceLocation::Local => {
+                match restore_multiworkspace(multi_workspace, app_state.clone(), cx).await {
+                    Ok(_) => any_restored = true,
+                    Err(error) => log::error!("Failed to restore workspace: {error:#}"),
+                }
+            }
+            SerializedWorkspaceLocation::Remote(_) => {
+                log::info!("Skipping remote workspace restore at startup");
+            }
+        }
+    }
+
+    if any_restored && cx.update(|cx| cx.windows().is_empty()) {
+        return false;
+    }
+
+    any_restored
+}
+
+async fn restorable_workspace_locations(
+    cx: &mut gpui::AsyncApp,
+    app_state: &Arc<AppState>,
+) -> Option<Vec<SessionWorkspace>> {
+    let (mut restore_behavior, db) = cx.update(|cx| {
+        (
+            WorkspaceSettings::get_global(cx).restore_on_startup,
+            WorkspaceDb::global(cx),
+        )
+    });
+
+    let session_handle = app_state.session.clone();
+    let (last_session_id, last_session_window_stack) = cx.update(|cx| {
+        let session = session_handle.read(cx);
+        (
+            session.last_session_id().map(|id| id.to_owned()),
+            session.last_session_window_stack(),
+        )
+    });
+
+    if last_session_id.is_none()
+        && matches!(restore_behavior, RestoreOnStartupBehavior::LastSession)
+    {
+        restore_behavior = RestoreOnStartupBehavior::LastWorkspace;
+    }
+
+    match restore_behavior {
+        RestoreOnStartupBehavior::LastWorkspace => {
+            last_opened_workspace_location(&db, app_state.fs.as_ref())
+                .await
+                .map(|(workspace_id, location, paths)| {
+                    vec![SessionWorkspace {
+                        workspace_id,
+                        location,
+                        paths,
+                        window_id: None,
+                    }]
+                })
+        }
+        RestoreOnStartupBehavior::LastSession => {
+            let last_session_id = last_session_id?;
+            let ordered = last_session_window_stack.is_some();
+            let mut locations = last_session_workspace_locations(
+                &db,
+                &last_session_id,
+                last_session_window_stack,
+                app_state.fs.as_ref(),
+            )
+            .await
+            .filter(|locations| !locations.is_empty())?;
+
+            // last_session_window_stack is front-to-back; reverse so the
+            // previously frontmost window is opened last (and ends up focused).
+            if ordered {
+                locations.reverse();
+            }
+            Some(locations)
+        }
+        RestoreOnStartupBehavior::EmptyTab | RestoreOnStartupBehavior::Launchpad => None,
+    }
 }
 
 fn init_workspace(
@@ -352,11 +462,8 @@ fn init_workspace(
                                     .separator()
                                     .action(
                                         i18n::t("new_terminal"),
-                                        workspace::NewTerminal::default().boxed_clone(),
-                                    )
-                                    .action(
-                                        i18n::t("new_center_terminal"),
-                                        workspace::NewCenterTerminal::default().boxed_clone(),
+                                        zed_actions::terminal_list_panel::NewTerminal
+                                            .boxed_clone(),
                                     )
                                 }))
                             }),

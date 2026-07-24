@@ -91,9 +91,11 @@ impl TerminalListPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-        let _workspace_subscription = cx.subscribe(&workspace, |this, _, event, cx| {
-            this.on_workspace_event(event, cx);
-        });
+        // subscribe_in so ItemAdded/ItemRemoved reconciliation can update the pane.
+        let _workspace_subscription =
+            cx.subscribe_in(&workspace, window, |this, _, event, window, cx| {
+                this.on_workspace_event(event, window, cx);
+            });
         // Use subscribe_in so WorktreeAdded always has the panel's window —
         // cx.active_window() is often None during async project open.
         let _project_subscription =
@@ -131,9 +133,7 @@ impl TerminalListPanel {
     /// Creates the initial group (with one terminal) if none exists yet.
 
     fn session_file_path() -> PathBuf {
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("terry/sessions/default.json")
+        paths::data_dir().join("sessions").join("default.json")
     }
 
     pub fn save_session(&self, cx: &App) {
@@ -163,10 +163,11 @@ impl TerminalListPanel {
 
         let path = Self::session_file_path();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
+            let _ = std::fs::create_dir_all(parent);
         }
-        let json = serde_json::to_string(&session).unwrap_or_default();
-        std::fs::write(path, json).ok();
+        if let Ok(json) = serde_json::to_string_pretty(&session) {
+            let _ = std::fs::write(path, json);
+        }
     }
 
     pub fn load_persisted_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -182,6 +183,11 @@ impl TerminalListPanel {
             return false;
         }
 
+        // Two-pass: create groups and set active_group_id *before* any spawn
+        // completes. Otherwise early groups match the constructor's GroupId(0)
+        // and get added to the pane, while switch_group later no-ops because
+        // active was already updated in the same loop.
+        let mut to_spawn: Vec<(GroupId, Option<PathBuf>)> = Vec::new();
         for (i, p_group) in session.groups.into_iter().enumerate() {
             let id = self.new_group_id();
             let name = SharedString::from(p_group.name);
@@ -198,12 +204,17 @@ impl TerminalListPanel {
             }
 
             for p_term in p_group.terminals {
-                self.spawn_terminal(id, p_term.cwd, None, window, cx);
+                to_spawn.push((id, p_term.cwd));
             }
         }
 
-        // After loading groups, switch to the active one
-        self.switch_group(self.active_group_id, window, cx);
+        for (id, cwd) in to_spawn {
+            self.spawn_terminal(id, cwd, None, window, cx);
+        }
+
+        // Defer: load runs during workspace init, which already holds the
+        // Workspace update lock.
+        self.defer_sync_active_group_to_pane(window, cx);
         true
     }
 
@@ -434,9 +445,6 @@ impl TerminalListPanel {
                 let weak_workspace = workspace.read(cx).weak_handle();
                 let workspace_id = workspace.read(cx).database_id();
                 let weak_project = workspace.read(cx).project().downgrade();
-                let focus_item =
-                    !workspace.update(cx, |workspace, cx| workspace.has_active_modal(window, cx));
-
                 let terminal_view = cx.new(|cx| {
                     TerminalView::new(
                         terminal.clone(),
@@ -448,15 +456,12 @@ impl TerminalListPanel {
                     )
                 });
 
-                this.add_terminal_to_group(group_id, terminal_view.clone(), cx);
+                this.add_terminal_to_group(group_id, terminal_view, cx);
 
-                // Only show the terminal if its group is still the active one.
-                if group_id == this.active_group_id
-                    && let Some(pane) = this.display_pane_entity(cx)
-                {
-                    pane.update(cx, |pane, cx| {
-                        pane.add_item(Box::new(terminal_view), true, focus_item, None, window, cx);
-                    });
+                // Reconcile the display pane so only the active group's
+                // terminals are shown (handles races during session restore).
+                if group_id == this.active_group_id {
+                    this.sync_active_group_to_pane(window, cx);
                 }
             })?;
             anyhow::Ok(())
@@ -525,42 +530,92 @@ impl TerminalListPanel {
         cx.notify();
     }
 
-    /// Switches the display pane to show the given group's terminals as tabs.
-    fn switch_group(&mut self, group_id: GroupId, window: &mut Window, cx: &mut Context<Self>) {
-        if group_id == self.active_group_id {
-            return;
-        }
+    /// Replaces the display pane's terminal tabs with exactly the active
+    /// group's terminals. Inactive groups stay in the model but are not shown.
+    fn sync_active_group_to_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pane) = self.display_pane_entity(cx) else {
             return;
         };
+        self.display_pane = pane.downgrade();
 
-        let new_terminals: Vec<Entity<TerminalView>> = self
+        let active_terminals: Vec<Entity<TerminalView>> = self
             .groups
             .iter()
-            .find(|g| g.id == group_id)
+            .find(|g| g.id == self.active_group_id)
             .map(|g| g.terminals.clone())
             .unwrap_or_default();
+        let active_ids: std::collections::HashSet<EntityId> =
+            active_terminals.iter().map(|tv| tv.entity_id()).collect();
 
-        // While swapping items the pane emits ItemRemoved events for the
-        // outgoing group's terminals; those must not be treated as closes.
+        // Do not workspace.update() here — sync often runs while Workspace is
+        // already being updated (init, ItemAdded). Default to focusing.
+        let focus_item = true;
+
+        // While swapping items the pane emits ItemRemoved/ItemAdded; those
+        // must not be treated as user closes or orphan claims.
         self.switching = true;
         pane.update(cx, |pane, cx| {
             let to_remove: Vec<EntityId> = pane
                 .items()
-                .filter_map(|item| item.act_as::<TerminalView>(cx).map(|tv| tv.entity_id()))
+                .filter_map(|item| {
+                    let id = item.item_id();
+                    if item.act_as::<TerminalView>(cx).is_some() && !active_ids.contains(&id) {
+                        Some(id)
+                    } else {
+                        None
+                    }
+                })
                 .collect();
             for id in to_remove {
                 pane.remove_item(id, false, false, window, cx);
             }
-            for terminal_view in new_terminals {
-                pane.add_item(Box::new(terminal_view), true, false, None, window, cx);
+
+            for terminal_view in &active_terminals {
+                let id = terminal_view.entity_id();
+                if pane.items().any(|item| item.item_id() == id) {
+                    continue;
+                }
+                pane.add_item(
+                    Box::new(terminal_view.clone()),
+                    false,
+                    false,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+
+            if let Some(last) = active_terminals.last() {
+                let index = pane
+                    .items()
+                    .position(|item| item.item_id() == last.entity_id());
+                if let Some(index) = index {
+                    pane.activate_item(index, true, focus_item, window, cx);
+                }
             }
         });
+        self.switching = false;
+    }
+
+    /// Schedules a pane sync after the current update stack unwinds, so we
+    /// never nest Workspace/Pane updates (which panics in gpui).
+    fn defer_sync_active_group_to_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.defer_in(window, |this, window, cx| {
+            this.sync_active_group_to_pane(window, cx);
+        });
+    }
+
+    /// Switches the display pane to show the given group's terminals as tabs.
+    fn switch_group(&mut self, group_id: GroupId, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.groups.iter().any(|g| g.id == group_id) {
+            return;
+        }
         self.active_group_id = group_id;
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
             group.collapsed = false;
         }
-        self.switching = false;
+        self.sync_active_group_to_pane(window, cx);
+        self.save_session(cx);
         cx.notify();
     }
 
@@ -588,6 +643,7 @@ impl TerminalListPanel {
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
             group.collapsed = !group.collapsed;
         }
+        self.save_session(cx);
         cx.notify();
     }
 
@@ -627,6 +683,7 @@ impl TerminalListPanel {
                 if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
                     group.name = new_name.into();
                 }
+                self.save_session(cx);
             }
             cx.notify();
         }
@@ -636,6 +693,7 @@ impl TerminalListPanel {
         if let Some(index) = self.groups.iter().position(|g| g.id == group_id) {
             if index > 0 {
                 self.groups.swap(index, index - 1);
+                self.save_session(cx);
                 cx.notify();
             }
         }
@@ -645,12 +703,18 @@ impl TerminalListPanel {
         if let Some(index) = self.groups.iter().position(|g| g.id == group_id) {
             if index + 1 < self.groups.len() {
                 self.groups.swap(index, index + 1);
+                self.save_session(cx);
                 cx.notify();
             }
         }
     }
 
-    fn on_workspace_event(&mut self, event: &workspace::Event, cx: &mut Context<Self>) {
+    fn on_workspace_event(
+        &mut self,
+        event: &workspace::Event,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // A tab closed directly in the center pane must be dropped from the
         // model too. During a group switch the removals are intentional, so we
         // must not treat them as user closes or the outgoing group's terminals
@@ -659,27 +723,55 @@ impl TerminalListPanel {
             cx.notify();
             return;
         }
-        if let workspace::Event::ItemRemoved { item_id } = event {
-            let mut belongs_to_active_group = false;
-            for group in &self.groups {
-                if group.id == self.active_group_id {
-                    let has_item = group.terminals.iter().any(|tv| tv.entity_id() == *item_id);
-                    if has_item {
-                        belongs_to_active_group = true;
+        match event {
+            workspace::Event::ItemRemoved { item_id } => {
+                let mut belongs_to_active_group = false;
+                for group in &self.groups {
+                    if group.id == self.active_group_id {
+                        let has_item = group.terminals.iter().any(|tv| tv.entity_id() == *item_id);
+                        if has_item {
+                            belongs_to_active_group = true;
+                        }
+                        break;
                     }
-                    break;
+                }
+                if belongs_to_active_group {
+                    self.remove_terminal_by_id(*item_id, cx);
                 }
             }
-            if belongs_to_active_group {
-                self.remove_terminal_by_id(*item_id);
+            workspace::Event::ItemAdded { item } => {
+                // Terminals opened outside the panel (e.g. NewCenterTerminal
+                // still handled by terminal_view) must join the active group,
+                // and extras from other groups must leave the pane.
+                if let Some(tv) = item.act_as::<TerminalView>(cx) {
+                    let id = tv.entity_id();
+                    let already = self
+                        .groups
+                        .iter()
+                        .any(|g| g.terminals.iter().any(|t| t.entity_id() == id));
+                    if !already {
+                        self.add_terminal_to_group(self.active_group_id, tv, cx);
+                        self.save_session(cx);
+                    }
+                    // ItemAdded is emitted while Workspace is updating the
+                    // pane — sync must wait until that stack unwinds.
+                    self.defer_sync_active_group_to_pane(window, cx);
+                }
             }
+            _ => {}
         }
         cx.notify();
     }
 
-    fn remove_terminal_by_id(&mut self, item_id: EntityId) {
+    fn remove_terminal_by_id(&mut self, item_id: EntityId, cx: &App) {
+        let mut changed = false;
         for group in &mut self.groups {
+            let before = group.terminals.len();
             group.terminals.retain(|tv| tv.entity_id() != item_id);
+            changed |= group.terminals.len() != before;
+        }
+        if changed {
+            self.save_session(cx);
         }
     }
 }

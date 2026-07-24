@@ -91,6 +91,24 @@ pub fn app_menus(_cx: &App) -> Vec<Menu> {
             ],
         },
         Menu {
+            name: i18n::t("menu_file").into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action(i18n::t("open"), workspace::Open::default()),
+                MenuItem::action(
+                    i18n::t("open_recent"),
+                    zed_actions::OpenRecent::default(),
+                ),
+                MenuItem::separator(),
+                MenuItem::action(
+                    i18n::t("add_folder_to_project"),
+                    workspace::AddFolderToProject,
+                ),
+                MenuItem::separator(),
+                MenuItem::action(i18n::t("close_window"), workspace::CloseWindow),
+            ],
+        },
+        Menu {
             name: i18n::t("menu_edit").into(),
             disabled: false,
             items: vec![
