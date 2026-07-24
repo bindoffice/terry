@@ -70,6 +70,16 @@ if [[ -f resources/AppIcon.icns ]]; then
   cp resources/AppIcon.icns "${APP_PATH}/Contents/Resources/AppIcon.icns"
 fi
 
+# Unsigned + quarantined (browser download) → Gatekeeper reports the app as
+# "damaged" on Apple Silicon with no Open bypass. Ad-hoc signing downgrades
+# that to the normal "unidentified developer" prompt (right-click → Open).
+# Set MACOS_SIGNING_IDENTITY to a Developer ID name for real distribution.
+echo "==> Code signing…"
+xattr -cr "${APP_PATH}" || true
+SIGN_IDENTITY="${MACOS_SIGNING_IDENTITY:--}"
+codesign --force --deep --sign "${SIGN_IDENTITY}" --timestamp=none "${APP_PATH}"
+codesign --verify --strict --verbose=2 "${APP_PATH}"
+
 OUT_DIR="${TARGET_DIR}/release"
 mkdir -p "$OUT_DIR"
 # Resolve to an absolute path before the subshell `cd`s into the .app parent,

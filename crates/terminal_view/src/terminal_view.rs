@@ -54,7 +54,6 @@ use workspace::{
     item::{
         HighlightedText, Item, ItemEvent, SerializableItem, TabContentParams, TabTooltipContent,
     },
-    register_serializable_item,
     searchable::{
         Direction, SearchEvent, SearchOptions, SearchToken, SearchableItem, SearchableItemHandle,
     },
@@ -107,7 +106,11 @@ pub struct RenameTerminal;
 pub fn init(cx: &mut App) {
     terminal_panel::init(cx);
 
-    register_serializable_item::<TerminalView>(cx);
+    // Terry owns terminal persistence via TerminalListPanel's session file.
+    // Do not register TerminalView as a workspace-serializable item — otherwise
+    // center-pane Terminals are restored from the workspace DB *and* from the
+    // Terry session, doubling group counts on every restart.
+    // register_serializable_item::<TerminalView>(cx);
 
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(TerminalView::deploy);
@@ -1742,7 +1745,10 @@ impl Item for TerminalView {
     }
 
     fn can_split(&self) -> bool {
-        true
+        // Terry groups own terminal identity. Clone-on-split would create a new
+        // shell that ItemAdded then appends to the group (inflating counts).
+        // Prefer MovePane rearrangements of existing group terminals instead.
+        false
     }
 
     fn clone_on_split(

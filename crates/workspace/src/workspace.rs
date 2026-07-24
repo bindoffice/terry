@@ -5516,7 +5516,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.remove_panes(self.center.root.clone(), window, cx);
+        let old_root = self.center.root.clone();
+        // Install the new tree first so the workspace never points at panes we
+        // are about to drop (avoids `Pane not found` from late Remove events).
         self.center = new_center;
         self.center.set_is_center(true);
         self.center.mark_positions(cx);
@@ -5524,6 +5526,7 @@ impl Workspace {
         if !self.has_active_modal(window, cx) {
             window.focus(&active_pane.focus_handle(cx), cx);
         }
+        self.remove_panes(old_root, window, cx);
         cx.notify();
     }
 
@@ -5912,7 +5915,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.center.remove(&pane, cx).unwrap() {
+        // `center.remove` returns Err when the pane is already gone (e.g. a
+        // previous empty-pane cleanup in the same burst). Treat that as a no-op
+        // instead of panicking.
+        let removed = match self.center.remove(&pane, cx) {
+            Ok(removed) => removed,
+            Err(_) => false,
+        };
+        if removed {
             if self
                 .maximized_pane
                 .as_ref()

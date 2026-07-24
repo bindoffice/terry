@@ -18,9 +18,51 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 struct PersistedTerminal {
     cwd: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum PersistedAxis {
+    Horizontal,
+    Vertical,
+}
+
+impl From<Axis> for PersistedAxis {
+    fn from(axis: Axis) -> Self {
+        match axis {
+            Axis::Horizontal => Self::Horizontal,
+            Axis::Vertical => Self::Vertical,
+        }
+    }
+}
+
+impl From<PersistedAxis> for Axis {
+    fn from(axis: PersistedAxis) -> Self {
+        match axis {
+            PersistedAxis::Horizontal => Self::Horizontal,
+            PersistedAxis::Vertical => Self::Vertical,
+        }
+    }
+}
+
+/// Split layout for a terminal group, keyed by index into `group.terminals`
+/// so it survives app restarts (EntityIds do not).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum GroupLayoutNode {
+    Pane {
+        terminals: Vec<usize>,
+        #[serde(default)]
+        active: Option<usize>,
+    },
+    Split {
+        axis: PersistedAxis,
+        flexes: Vec<f32>,
+        children: Vec<GroupLayoutNode>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -28,6 +70,8 @@ struct PersistedGroup {
     name: String,
     collapsed: bool,
     terminals: Vec<PersistedTerminal>,
+    #[serde(default)]
+    layout: Option<GroupLayoutNode>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -63,21 +107,6 @@ pub fn init(cx: &mut App) {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct GroupId(usize);
 
-/// In-memory split layout for a terminal group (entity ids of that group's
-/// terminals). Restored when switching back to the group.
-#[derive(Clone, Debug)]
-enum GroupLayoutNode {
-    Pane {
-        terminals: Vec<EntityId>,
-        active: Option<EntityId>,
-    },
-    Split {
-        axis: Axis,
-        flexes: Vec<f32>,
-        children: Vec<GroupLayoutNode>,
-    },
-}
-
 /// A named collection of terminals. Selecting a group shows its terminals as
 /// tabs in the center pane.
 struct TerminalGroup {
@@ -89,6 +118,8 @@ struct TerminalGroup {
     pub has_unread: bool,
     /// Last known center split layout while this group was active.
     saved_layout: Option<GroupLayoutNode>,
+    /// How many terminals this group had in the session file (restore waits).
+    session_terminal_count: Option<usize>,
 }
 
 pub struct TerminalListPanel {
@@ -98,6 +129,7 @@ pub struct TerminalListPanel {
     position: DockPosition,
     _workspace_subscription: Subscription,
     _project_subscription: Subscription,
+    _quit_subscription: Subscription,
     /// The center pane that displays the active group's terminals as tabs.
     display_pane: WeakEntity<Pane>,
     groups: Vec<TerminalGroup>,
@@ -106,6 +138,17 @@ pub struct TerminalListPanel {
     /// Guards against reconciling the model while a group switch is
     /// transiently removing/adding items in the display pane.
     switching: bool,
+    /// Outgoing group whose live split layout must be captured before any
+    /// sync may clear its terminals from the center panes.
+    pending_switch_from: Option<GroupId>,
+    /// Apply `saved_layout` once after session restore when terminals are ready.
+    pending_layout_restore: bool,
+    /// True while session terminals are still spawning. Blocks disk writes and
+    /// auto-spawn (worktree / orphan claim) so we neither wipe groups to
+    /// `terminals: []` nor inflate counts mid-restore.
+    session_restoring: bool,
+    /// Ensures [`Self::finish_session_restore`] is deferred at most once.
+    session_finish_scheduled: bool,
     renaming_group_id: Option<GroupId>,
     rename_editor: Entity<Editor>,
 }
@@ -141,6 +184,11 @@ impl TerminalListPanel {
         })
         .detach();
 
+        let _quit_subscription = cx.on_app_quit(|this, cx| {
+            this.refresh_active_layout_and_save(cx);
+            async {}
+        });
+
         Self {
             workspace: workspace.downgrade(),
             project: project.downgrade(),
@@ -148,11 +196,16 @@ impl TerminalListPanel {
             position: DockPosition::Left,
             _workspace_subscription,
             _project_subscription,
+            _quit_subscription,
             display_pane: display_pane.downgrade(),
             groups: Vec::new(),
             active_group_id: GroupId(0),
             next_group_id: 0,
             switching: false,
+            pending_switch_from: None,
+            pending_layout_restore: false,
+            session_restoring: false,
+            session_finish_scheduled: false,
             renaming_group_id: None,
             rename_editor,
         }
@@ -164,7 +217,94 @@ impl TerminalListPanel {
         paths::data_dir().join("sessions").join("default.json")
     }
 
-    pub fn save_session(&self, cx: &App) {
+    pub fn save_session(&mut self, cx: &App) {
+        // Persist in-memory state only. Do not capture live layout here —
+        // save_session is often called from workspace actions where
+        // workspace.read would panic (nested entity lease).
+        self.write_session_file(cx);
+    }
+
+    /// Capture the active group's live split layout, then write the session.
+    /// Only call when Workspace is not already being updated.
+    fn refresh_active_layout_and_save(&mut self, cx: &App) {
+        if self.session_restoring {
+            return;
+        }
+        if let Some(layout) = self.capture_active_group_layout(cx) {
+            if let Some(group) = self
+                .groups
+                .iter_mut()
+                .find(|g| g.id == self.active_group_id)
+            {
+                group.saved_layout = Some(layout);
+            }
+        }
+        self.write_session_file(cx);
+    }
+
+    fn session_spawns_complete(&self) -> bool {
+        self.groups.iter().all(|group| match group.session_terminal_count {
+            None => true,
+            Some(expected) => group.terminals.len() >= expected,
+        })
+    }
+
+    fn clear_session_terminal_counts(&mut self) {
+        for group in &mut self.groups {
+            group.session_terminal_count = None;
+        }
+    }
+
+    /// Called when every group's expected session terminals have been spawned.
+    fn finish_session_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.session_restoring || self.session_finish_scheduled {
+            return;
+        }
+        self.session_finish_scheduled = true;
+        // Defer: load/spawn completion may still hold Workspace leases.
+        cx.defer_in(window, |this, window, cx| {
+            this.session_finish_scheduled = false;
+            this.clear_session_terminal_counts();
+
+            // Keep session_restoring true through layout restore so worktree /
+            // orphan handlers cannot inflate groups mid-apply.
+            if this.pending_layout_restore {
+                if this.active_group_layout_ready() {
+                    this.pending_layout_restore = false;
+                    this.switching = true;
+                    this.restore_active_group_layout(window, cx);
+                    this.switching = false;
+                } else {
+                    // Layout references missing terminals (corrupted / wiped
+                    // session) — fall back to a flat sync.
+                    this.pending_layout_restore = false;
+                    this.switching = true;
+                    this.sync_active_group_to_pane(window, cx);
+                    this.switching = false;
+                }
+            } else {
+                this.switching = true;
+                this.sync_active_group_to_pane(window, cx);
+                this.switching = false;
+            }
+
+            this.session_restoring = false;
+
+            // First safe disk write after restore — preserves full terminal
+            // lists and layouts for every group.
+            this.write_session_file(cx);
+            cx.notify();
+        });
+    }
+
+    fn write_session_file(&self, cx: &App) {
+        // Never persist a half-restored session: async spawns leave
+        // `group.terminals` empty until complete, which used to wipe the file
+        // to `terminals: []` and drop inactive-group layouts on the next load.
+        if self.session_restoring {
+            return;
+        }
+
         let mut session = PersistedSession {
             groups: Vec::new(),
             active_group_index: 0,
@@ -179,6 +319,7 @@ impl TerminalListPanel {
                 name: group.name.to_string(),
                 collapsed: group.collapsed,
                 terminals: Vec::new(),
+                layout: group.saved_layout.clone(),
             };
 
             for view_ent in &group.terminals {
@@ -195,6 +336,48 @@ impl TerminalListPanel {
         }
         if let Ok(json) = serde_json::to_string_pretty(&session) {
             let _ = std::fs::write(path, json);
+        }
+    }
+
+    fn layout_referenced_indices(node: &GroupLayoutNode) -> std::collections::HashSet<usize> {
+        let mut indices = std::collections::HashSet::default();
+        Self::collect_layout_indices(node, &mut indices);
+        indices
+    }
+
+    fn collect_layout_indices(
+        node: &GroupLayoutNode,
+        indices: &mut std::collections::HashSet<usize>,
+    ) {
+        match node {
+            GroupLayoutNode::Pane { terminals, active } => {
+                indices.extend(terminals.iter().copied());
+                if let Some(active) = active {
+                    indices.insert(*active);
+                }
+            }
+            GroupLayoutNode::Split { children, .. } => {
+                for child in children {
+                    Self::collect_layout_indices(child, indices);
+                }
+            }
+        }
+    }
+
+    fn remap_layout_indices(node: &mut GroupLayoutNode, old_to_new: &HashMap<usize, usize>) {
+        match node {
+            GroupLayoutNode::Pane { terminals, active } => {
+                *terminals = terminals
+                    .iter()
+                    .filter_map(|i| old_to_new.get(i).copied())
+                    .collect();
+                *active = active.and_then(|a| old_to_new.get(&a).copied());
+            }
+            GroupLayoutNode::Split { children, .. } => {
+                for child in children {
+                    Self::remap_layout_indices(child, old_to_new);
+                }
+            }
         }
     }
 
@@ -216,34 +399,81 @@ impl TerminalListPanel {
         // and get added to the pane, while switch_group later no-ops because
         // active was already updated in the same loop.
         let mut to_spawn: Vec<(GroupId, Option<PathBuf>)> = Vec::new();
+        let mut active_has_layout = false;
         for (i, p_group) in session.groups.into_iter().enumerate() {
             let id = self.new_group_id();
             let name = SharedString::from(p_group.name);
+            let is_active = i == session.active_group_index;
+
+            // If a layout exists, keep only terminals it references. Older bugs
+            // (workspace DB restore + Terry session) left orphan terminals in
+            // the JSON that are not part of the split — drop them on load.
+            let (terminals, layout) = match p_group.layout {
+                Some(mut layout) => {
+                    let referenced = Self::layout_referenced_indices(&layout);
+                    if referenced.is_empty() {
+                        // Empty/broken layout — keep all terminals, drop layout.
+                        (p_group.terminals, None)
+                    } else {
+                        let mut keep: Vec<usize> = referenced.into_iter().collect();
+                        keep.sort_unstable();
+                        keep.retain(|&ix| ix < p_group.terminals.len());
+                        let old_to_new: HashMap<usize, usize> = keep
+                            .iter()
+                            .enumerate()
+                            .map(|(new_ix, &old_ix)| (old_ix, new_ix))
+                            .collect();
+                        Self::remap_layout_indices(&mut layout, &old_to_new);
+                        let terminals = keep
+                            .iter()
+                            .filter_map(|&ix| p_group.terminals.get(ix).cloned())
+                            .collect();
+                        (terminals, Some(layout))
+                    }
+                }
+                None => (p_group.terminals, None),
+            };
+
+            // Drop layouts that still can't be applied after pruning.
+            let term_count = terminals.len();
+            let layout = layout.and_then(|layout| match Self::layout_max_index(&layout) {
+                None => Some(layout),
+                Some(max) if term_count > max => Some(layout),
+                Some(_) => None,
+            });
+            if is_active && layout.is_some() {
+                active_has_layout = true;
+            }
             self.groups.push(TerminalGroup {
                 id,
                 name,
                 terminals: Vec::new(),
                 collapsed: p_group.collapsed,
                 has_unread: false,
-                saved_layout: None,
+                saved_layout: layout,
+                session_terminal_count: Some(term_count),
             });
 
-            if i == session.active_group_index {
+            if is_active {
                 self.active_group_id = id;
             }
 
-            for p_term in p_group.terminals {
+            for p_term in terminals {
                 to_spawn.push((id, p_term.cwd));
             }
         }
+
+        self.pending_layout_restore = active_has_layout;
+        self.session_restoring = true;
 
         for (id, cwd) in to_spawn {
             self.spawn_terminal(id, cwd, None, window, cx);
         }
 
-        // Defer: load runs during workspace init, which already holds the
-        // Workspace update lock.
-        self.defer_sync_active_group_to_pane(window, cx);
+        // All groups empty (or already satisfied): finish immediately.
+        if self.session_spawns_complete() {
+            self.finish_session_restore(window, cx);
+        }
         true
     }
 
@@ -265,6 +495,7 @@ impl TerminalListPanel {
                 collapsed: false,
                 has_unread: false,
                 saved_layout: None,
+                session_terminal_count: None,
             });
             self.active_group_id = id;
             for cwd in project_dirs {
@@ -285,6 +516,7 @@ impl TerminalListPanel {
             collapsed: false,
             has_unread: false,
             saved_layout: None,
+            session_terminal_count: None,
         });
         self.active_group_id = id;
         self.spawn_terminal(id, None, None, window, cx);
@@ -435,6 +667,7 @@ impl TerminalListPanel {
             collapsed: false,
             has_unread: false,
             saved_layout: None,
+            session_terminal_count: None,
         });
         self.switch_group(id, window, cx);
         self.spawn_terminal(id, cwd, source, window, cx);
@@ -496,10 +729,26 @@ impl TerminalListPanel {
 
                 this.add_terminal_to_group(group_id, terminal_view, cx);
 
-                // Reconcile the display pane so only the active group's
-                // terminals are shown (handles races during session restore).
+                if this.session_restoring && this.session_spawns_complete() {
+                    cx.defer_in(window, |this, window, cx| {
+                        this.finish_session_restore(window, cx);
+                    });
+                    return;
+                }
+
                 if group_id == this.active_group_id {
-                    this.sync_active_group_to_pane(window, cx);
+                    // Defer pane/workspace work — spawn completion can run while
+                    // other entities still hold leases.
+                    cx.defer_in(window, move |this, window, cx| {
+                        if this.active_group_id != group_id {
+                            return;
+                        }
+                        if this.session_restoring || this.pending_layout_restore {
+                            // Wait for finish_session_restore / layout restore.
+                            return;
+                        }
+                        this.sync_active_group_to_pane(window, cx);
+                    });
                 }
             })?;
             anyhow::Ok(())
@@ -513,6 +762,12 @@ impl TerminalListPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Restoring a session must not auto-spawn project terminals — that was
+        // inflating group counts across restarts (cwd check fails while PTYs
+        // are still coming up).
+        if self.session_restoring {
+            return;
+        }
         let Some(project) = self.project.upgrade() else {
             return;
         };
@@ -549,6 +804,7 @@ impl TerminalListPanel {
                 collapsed: false,
                 has_unread: false,
                 saved_layout: None,
+                session_terminal_count: None,
             });
             self.active_group_id = id;
         }
@@ -580,6 +836,13 @@ impl TerminalListPanel {
     /// Prefer [`Self::switch_group`] when changing groups so split layouts are
     /// saved and restored. This method is for in-group updates (spawn, etc.).
     fn sync_active_group_to_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // While a group switch is waiting to capture the outgoing layout, or a
+        // session layout restore is pending, do not reconcile — that would
+        // strip the outgoing/persisted split and write layout: null.
+        if self.pending_switch_from.is_some() || self.pending_layout_restore {
+            return;
+        }
+
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
@@ -660,6 +923,10 @@ impl TerminalListPanel {
             }
         });
 
+        // Close empty leftover panes. `cx.emit(Remove)` is deferred, so we must
+        // not loop waiting for panes().len() to shrink (that busy-waits forever).
+        // Workspace::remove_pane treats "already gone" as a no-op if several
+        // Removes collapse the same split tree.
         let panes = workspace.read(cx).panes().to_vec();
         if panes.len() > 1 {
             for pane in panes {
@@ -696,6 +963,23 @@ impl TerminalListPanel {
         }
 
         if owns_switching_guard {
+            // Keep saved_layout fresh after in-group splits/tab changes —
+            // but never while a session layout restore is still pending
+            // (progressive flat sync must not clobber the persisted tree).
+            if !self.pending_layout_restore {
+                if let Some(layout) = self.capture_active_group_layout(cx) {
+                    if let Some(group) = self
+                        .groups
+                        .iter_mut()
+                        .find(|g| g.id == self.active_group_id)
+                    {
+                        group.saved_layout = Some(layout);
+                    }
+                    // Persist immediately so every group's split survives
+                    // restart even if the user never switches away.
+                    self.write_session_file(cx);
+                }
+            }
             self.switching = false;
         }
     }
@@ -708,20 +992,49 @@ impl TerminalListPanel {
         });
     }
 
+    fn layout_max_index(node: &GroupLayoutNode) -> Option<usize> {
+        match node {
+            GroupLayoutNode::Pane { terminals, active } => terminals
+                .iter()
+                .copied()
+                .chain(active.iter().copied())
+                .max(),
+            GroupLayoutNode::Split { children, .. } => {
+                children.iter().filter_map(Self::layout_max_index).max()
+            }
+        }
+    }
+
+    fn active_group_layout_ready(&self) -> bool {
+        let Some(group) = self.groups.iter().find(|g| g.id == self.active_group_id) else {
+            return false;
+        };
+        if let Some(expected) = group.session_terminal_count {
+            if group.terminals.len() < expected {
+                return false;
+            }
+        }
+        match &group.saved_layout {
+            None => true,
+            Some(layout) => match Self::layout_max_index(layout) {
+                None => true,
+                // Indices are 0-based; need len > max (== max+1 terminals).
+                Some(max) => group.terminals.len() > max,
+            },
+        }
+    }
+
     fn capture_layout_from_member(
         member: &Member,
-        group_ids: &std::collections::HashSet<EntityId>,
+        id_to_index: &HashMap<EntityId, usize>,
         cx: &App,
     ) -> Option<GroupLayoutNode> {
         match member {
             Member::Pane(pane) => {
-                let terminals: Vec<EntityId> = pane
+                let terminals: Vec<usize> = pane
                     .read(cx)
                     .items()
-                    .filter_map(|item| {
-                        let id = item.item_id();
-                        group_ids.contains(&id).then_some(id)
-                    })
+                    .filter_map(|item| id_to_index.get(&item.item_id()).copied())
                     .collect();
                 if terminals.is_empty() {
                     return None;
@@ -729,21 +1042,20 @@ impl TerminalListPanel {
                 let active = pane
                     .read(cx)
                     .active_item()
-                    .map(|item| item.item_id())
-                    .filter(|id| group_ids.contains(id));
+                    .and_then(|item| id_to_index.get(&item.item_id()).copied());
                 Some(GroupLayoutNode::Pane { terminals, active })
             }
             Member::Axis(axis) => {
                 let children: Vec<GroupLayoutNode> = axis
                     .members
                     .iter()
-                    .filter_map(|child| Self::capture_layout_from_member(child, group_ids, cx))
+                    .filter_map(|child| Self::capture_layout_from_member(child, id_to_index, cx))
                     .collect();
                 match children.len() {
                     0 => None,
                     1 => children.into_iter().next(),
                     _ => Some(GroupLayoutNode::Split {
-                        axis: axis.axis,
+                        axis: PersistedAxis::from(axis.axis),
                         flexes: axis.flexes.lock().clone(),
                         children,
                     }),
@@ -753,19 +1065,22 @@ impl TerminalListPanel {
     }
 
     fn capture_active_group_layout(&self, cx: &App) -> Option<GroupLayoutNode> {
+        self.capture_group_layout(self.active_group_id, cx)
+    }
+
+    fn capture_group_layout(&self, group_id: GroupId, cx: &App) -> Option<GroupLayoutNode> {
         let workspace = self.workspace.upgrade()?;
-        let group_ids: std::collections::HashSet<EntityId> = self
-            .groups
-            .iter()
-            .find(|g| g.id == self.active_group_id)?
-            .terminals
-            .iter()
-            .map(|tv| tv.entity_id())
-            .collect();
-        if group_ids.is_empty() {
+        let group = self.groups.iter().find(|g| g.id == group_id)?;
+        if group.terminals.is_empty() {
             return None;
         }
-        Self::capture_layout_from_member(&workspace.read(cx).center_root(), &group_ids, cx)
+        let id_to_index: HashMap<EntityId, usize> = group
+            .terminals
+            .iter()
+            .enumerate()
+            .map(|(i, tv)| (tv.entity_id(), i))
+            .collect();
+        Self::capture_layout_from_member(&workspace.read(cx).center_root(), &id_to_index, cx)
     }
 
     fn clear_center_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -792,18 +1107,18 @@ impl TerminalListPanel {
     fn build_layout_member(
         workspace: &mut Workspace,
         node: &GroupLayoutNode,
-        terminals: &HashMap<EntityId, Entity<TerminalView>>,
+        terminals: &[Entity<TerminalView>],
         window: &mut Window,
         cx: &mut gpui::Context<Workspace>,
-    ) -> (Member, Entity<Pane>, Option<EntityId>) {
+    ) -> (Member, Entity<Pane>, Option<usize>) {
         match node {
             GroupLayoutNode::Pane {
-                terminals: ids,
+                terminals: indices,
                 active,
             } => {
                 let pane = workspace.create_center_pane(window, cx);
-                for id in ids {
-                    if let Some(tv) = terminals.get(id) {
+                for &ix in indices {
+                    if let Some(tv) = terminals.get(ix) {
                         pane.update(cx, |pane, cx| {
                             pane.add_item(
                                 Box::new(tv.clone()),
@@ -816,15 +1131,15 @@ impl TerminalListPanel {
                         });
                     }
                 }
-                if let Some(active_id) = active {
-                    let index = pane
-                        .read(cx)
-                        .items()
-                        .position(|item| item.item_id() == *active_id);
-                    if let Some(index) = index {
-                        pane.update(cx, |pane, cx| {
-                            pane.activate_item(index, true, true, window, cx);
-                        });
+                if let Some(active_ix) = active {
+                    if let Some(tv) = terminals.get(*active_ix) {
+                        let id = tv.entity_id();
+                        let index = pane.read(cx).items().position(|item| item.item_id() == id);
+                        if let Some(index) = index {
+                            pane.update(cx, |pane, cx| {
+                                pane.activate_item(index, true, true, window, cx);
+                            });
+                        }
                     }
                 }
                 (Member::Pane(pane.clone()), pane, *active)
@@ -850,12 +1165,14 @@ impl TerminalListPanel {
                     members.push(member);
                 }
                 let focus_pane = focus_pane
-                    .or_else(|| members.first().and_then(|m| match m {
-                        Member::Pane(p) => Some(p.clone()),
-                        _ => None,
-                    }))
+                    .or_else(|| {
+                        members.first().and_then(|m| match m {
+                            Member::Pane(p) => Some(p.clone()),
+                            _ => None,
+                        })
+                    })
                     .expect("split layout has children");
-                let axis = PaneAxis::load(*axis, members, Some(flexes.clone()));
+                let axis = PaneAxis::load((*axis).into(), members, Some(flexes.clone()));
                 (Member::Axis(axis), focus_pane, focus_terminal)
             }
         }
@@ -873,7 +1190,6 @@ impl TerminalListPanel {
 
         if terminals.is_empty() {
             self.clear_center_terminals(window, cx);
-            // Leave a single empty pane.
             let panes = workspace.read(cx).panes().to_vec();
             if let Some(keep) = panes.first().cloned() {
                 for pane in panes.into_iter().skip(1) {
@@ -887,17 +1203,12 @@ impl TerminalListPanel {
             return;
         }
 
-        let terminals_by_id: HashMap<EntityId, Entity<TerminalView>> = terminals
-            .iter()
-            .map(|tv| (tv.entity_id(), tv.clone()))
-            .collect();
-
         match layout {
             Some(layout) => {
                 self.clear_center_terminals(window, cx);
                 workspace.update(cx, |workspace, cx| {
                     let (root, focus_pane, _) =
-                        Self::build_layout_member(workspace, &layout, &terminals_by_id, window, cx);
+                        Self::build_layout_member(workspace, &layout, &terminals, window, cx);
                     let new_center = PaneGroup::with_root(root);
                     workspace.replace_center_layout(new_center, focus_pane.clone(), window, cx);
                 });
@@ -906,7 +1217,6 @@ impl TerminalListPanel {
                 self.sync_active_group_to_pane(window, cx);
             }
             None => {
-                // No saved splits — show all terminals as tabs in one pane.
                 self.sync_active_group_to_pane(window, cx);
             }
         }
@@ -927,28 +1237,43 @@ impl TerminalListPanel {
             return;
         }
 
-        // Persist the outgoing group's center layout before tearing it down.
-        if let Some(layout) = self.capture_active_group_layout(cx) {
-            if let Some(group) = self
-                .groups
-                .iter_mut()
-                .find(|g| g.id == self.active_group_id)
-            {
-                group.saved_layout = Some(layout);
-            }
-        }
-
+        let outgoing = self.active_group_id;
+        // Block sync until we have snapshotted `outgoing`'s live split layout.
+        // Otherwise a deferred sync (ItemAdded / spawn) clears those panes and
+        // the capture writes layout: null for every group except the last one.
+        self.pending_switch_from = Some(outgoing);
         self.active_group_id = group_id;
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
             group.collapsed = false;
         }
-
-        self.switching = true;
-        self.restore_active_group_layout(window, cx);
-        self.switching = false;
-
-        self.save_session(cx);
         cx.notify();
+
+        cx.defer_in(window, move |this, window, cx| {
+            // Snapshot this switch's outgoing group while sync is still blocked
+            // (pending_switch_from is Some), so its panes are intact.
+            if let Some(layout) = this.capture_group_layout(outgoing, cx) {
+                if let Some(group) = this.groups.iter_mut().find(|g| g.id == outgoing) {
+                    group.saved_layout = Some(layout);
+                }
+            }
+
+            // Only the switch that owns the current pending flag may clear it
+            // and perform the restore (handles rapid A→B→C switches).
+            if this.pending_switch_from == Some(outgoing) {
+                this.pending_switch_from = None;
+            }
+
+            if this.active_group_id != group_id || this.pending_switch_from.is_some() {
+                this.write_session_file(cx);
+                return;
+            }
+
+            this.switching = true;
+            this.restore_active_group_layout(window, cx);
+            this.switching = false;
+            this.write_session_file(cx);
+            cx.notify();
+        });
     }
 
     /// Activates a specific terminal's tab in whichever pane is showing it.
@@ -1054,7 +1379,7 @@ impl TerminalListPanel {
         // model too. During a group switch the removals are intentional, so we
         // must not treat them as user closes or the outgoing group's terminals
         // would be dropped from the model and vanish on switch.
-        if self.switching {
+        if self.switching || self.pending_switch_from.is_some() || self.session_restoring {
             cx.notify();
             return;
         }
@@ -1093,6 +1418,19 @@ impl TerminalListPanel {
                     self.defer_sync_active_group_to_pane(window, cx);
                 }
             }
+            // MovePane splits do not emit ItemAdded; still refresh layout.
+            workspace::Event::PaneAdded(_) | workspace::Event::PaneRemoved => {
+                cx.defer_in(window, |this, _window, cx| {
+                    if this.switching
+                        || this.pending_switch_from.is_some()
+                        || this.session_restoring
+                        || this.pending_layout_restore
+                    {
+                        return;
+                    }
+                    this.refresh_active_layout_and_save(cx);
+                });
+            }
             _ => {}
         }
         cx.notify();
@@ -1101,12 +1439,43 @@ impl TerminalListPanel {
     fn remove_terminal_by_id(&mut self, item_id: EntityId, cx: &App) {
         let mut changed = false;
         for group in &mut self.groups {
-            let before = group.terminals.len();
-            group.terminals.retain(|tv| tv.entity_id() != item_id);
-            changed |= group.terminals.len() != before;
+            if let Some(removed_ix) = group
+                .terminals
+                .iter()
+                .position(|tv| tv.entity_id() == item_id)
+            {
+                group.terminals.remove(removed_ix);
+                if let Some(layout) = group.saved_layout.as_mut() {
+                    Self::remap_layout_after_remove(layout, removed_ix);
+                }
+                changed = true;
+            }
         }
         if changed {
             self.save_session(cx);
+        }
+    }
+
+    fn remap_layout_after_remove(node: &mut GroupLayoutNode, removed: usize) {
+        match node {
+            GroupLayoutNode::Pane { terminals, active } => {
+                terminals.retain(|&i| i != removed);
+                for i in terminals.iter_mut() {
+                    if *i > removed {
+                        *i -= 1;
+                    }
+                }
+                match active {
+                    Some(a) if *a == removed => *active = None,
+                    Some(a) if *a > removed => *a -= 1,
+                    _ => {}
+                }
+            }
+            GroupLayoutNode::Split { children, .. } => {
+                for child in children {
+                    Self::remap_layout_after_remove(child, removed);
+                }
+            }
         }
     }
 }
