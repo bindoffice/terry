@@ -149,7 +149,7 @@
   "hover_popover_hiding_delay": 300,
   // Whether to confirm before quitting Zed.
   "confirm_quit": false,
-  // Whether to restore last closed project when fresh Zed instance is opened
+  // Whether to restore last closed project when fresh Terry instance is opened
   // May take 3 values:
   //  1. All workspaces open during last session
   //         "restore_on_startup": "last_session"
@@ -157,7 +157,9 @@
   //         "restore_on_startup": "last_workspace",
   //  3. Do not restore previous workspaces
   //         "restore_on_startup": "none",
-  "restore_on_startup": "last_session",
+  // Terry defaults to a single window — last_session would reopen every prior
+  // window and each would spawn its own terminal session.
+  "restore_on_startup": "last_workspace",
   // The default behavior when opening paths from the CLI without
   // an explicit `-e` (existing window) or `-n` (new window) flag.
   //

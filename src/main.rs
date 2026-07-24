@@ -260,9 +260,14 @@ fn main() {
         recent_projects::init(cx);
 
         // Enable vim mode by default for this app.
+        // Only restore the last workspace window — `last_session` reopens every
+        // prior window, and each one would spawn its own full terminal session
+        // (looks like multiple processes on launch).
         SettingsStore::update(cx, |store, cx| {
             store.update_default_settings(cx, |content| {
                 content.vim_mode = Some(true);
+                content.workspace.restore_on_startup =
+                    Some(RestoreOnStartupBehavior::LastWorkspace);
             });
         });
 
@@ -402,6 +407,13 @@ async fn restorable_workspace_locations(
             // previously frontmost window is opened last (and ends up focused).
             if ordered {
                 locations.reverse();
+            }
+            // Terry is a single-window-first app: restoring every prior window
+            // multiplies PTY processes. Keep only the frontmost workspace.
+            if locations.len() > 1 {
+                let frontmost = locations.pop().unwrap();
+                locations.clear();
+                locations.push(frontmost);
             }
             Some(locations)
         }
@@ -595,11 +607,13 @@ fn init_workspace(
     let terminal_panel = if has_terminal {
         workspace.panel::<TerminalListPanel>(cx).unwrap()
     } else {
+        let database_id = workspace.database_id();
         let panel = cx.new(|cx| {
             TerminalListPanel::new(
                 workspace_handle.clone(),
                 display_pane.clone(),
                 project.clone(),
+                database_id,
                 window,
                 cx,
             )
@@ -613,9 +627,13 @@ fn init_workspace(
             configure_terry_tab_bar(pane, window, cx);
         });
 
-        // Seed the terminal list panel with a default group holding one terminal.
-        terminal_panel.update(cx, |panel, cx| {
-            panel.create_default_group(window, cx);
+        // Defer session restore / first spawn — create_default_group and layout
+        // restore read Workspace, and init_workspace already holds that lease.
+        let panel = terminal_panel.clone();
+        window.defer(cx, move |window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.create_default_group(window, cx);
+            });
         });
     }
 

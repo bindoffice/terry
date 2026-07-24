@@ -53,6 +53,9 @@ fn release_session_claim(workspace_key: &str, owner: EntityId) {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct PersistedTerminal {
     cwd: Option<PathBuf>,
+    /// User-renamed tab/sidebar title. Optional for older session files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -159,6 +162,9 @@ struct TerminalGroup {
     saved_layout: Option<GroupLayoutNode>,
     /// How many terminals this group had in the session file (restore waits).
     session_terminal_count: Option<usize>,
+    /// Session restore slots keyed by persisted index so async spawn completion
+    /// order cannot scramble layout indices / titles.
+    restore_slots: Vec<Option<Entity<TerminalView>>>,
 }
 
 pub struct TerminalListPanel {
@@ -202,6 +208,12 @@ pub struct TerminalListPanel {
     session_file_stem: String,
     /// True when this panel owns the shared restore file for `session_workspace_key`.
     owns_workspace_session: bool,
+    /// Spawn-time / last-known cwd per terminal view. Filled with the directory
+    /// the shell was actually started in (after defaulting), and refreshed from
+    /// live process info so session writes don't permanently store `null`.
+    terminal_spawn_cwds: HashMap<EntityId, Option<PathBuf>>,
+    /// Keeps cwd-tracking subscriptions alive for each terminal.
+    _terminal_cwd_subscriptions: Vec<Subscription>,
     _session_release_subscription: Subscription,
     renaming_group_id: Option<GroupId>,
     rename_editor: Entity<Editor>,
@@ -212,6 +224,7 @@ impl TerminalListPanel {
         workspace: Entity<Workspace>,
         display_pane: Entity<Pane>,
         project: Entity<Project>,
+        database_id: Option<workspace::WorkspaceId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -244,7 +257,10 @@ impl TerminalListPanel {
         });
 
         let panel_id = cx.entity_id();
-        let session_workspace_key = Self::compute_workspace_session_key(&workspace, &project, cx);
+        // Must not `workspace.read(cx)` here — `new` often runs inside a
+        // Workspace update (observe_new / init_workspace).
+        let session_workspace_key =
+            Self::compute_workspace_session_key(&project, database_id, cx);
         let owns_workspace_session = try_claim_session(&session_workspace_key, panel_id);
         let session_file_stem = if owns_workspace_session {
             session_workspace_key.clone()
@@ -281,6 +297,8 @@ impl TerminalListPanel {
             session_workspace_key,
             session_file_stem,
             owns_workspace_session,
+            terminal_spawn_cwds: HashMap::default(),
+            _terminal_cwd_subscriptions: Vec::new(),
             _session_release_subscription,
             renaming_group_id: None,
             rename_editor,
@@ -290,8 +308,8 @@ impl TerminalListPanel {
     /// Creates the initial group (with one terminal) if none exists yet.
 
     fn compute_workspace_session_key(
-        workspace: &Entity<Workspace>,
         project: &Entity<Project>,
+        database_id: Option<workspace::WorkspaceId>,
         cx: &App,
     ) -> String {
         let mut roots: Vec<String> = project
@@ -307,7 +325,7 @@ impl TerminalListPanel {
         if roots.is_empty() {
             return "default".to_string();
         }
-        if let Some(id) = workspace.read(cx).database_id() {
+        if let Some(id) = database_id {
             return format!("ws-{}", i64::from(id));
         }
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -349,13 +367,25 @@ impl TerminalListPanel {
     fn session_spawns_complete(&self) -> bool {
         self.groups.iter().all(|group| match group.session_terminal_count {
             None => true,
-            Some(expected) => group.terminals.len() >= expected,
+            Some(expected) => {
+                let filled = if !group.restore_slots.is_empty() {
+                    group
+                        .restore_slots
+                        .iter()
+                        .filter(|slot| slot.is_some())
+                        .count()
+                } else {
+                    group.terminals.len()
+                };
+                filled >= expected
+            }
         })
     }
 
     fn clear_session_terminal_counts(&mut self) {
         for group in &mut self.groups {
             group.session_terminal_count = None;
+            group.restore_slots.clear();
         }
     }
 
@@ -446,7 +476,7 @@ impl TerminalListPanel {
         });
     }
 
-    fn write_session_file(&self, cx: &App) {
+    fn write_session_file(&mut self, cx: &App) {
         // Never persist a half-restored session: async spawns leave
         // `group.terminals` empty until complete, which used to wipe the file
         // to `terminals: []` and drop inactive-group layouts on the next load.
@@ -454,11 +484,36 @@ impl TerminalListPanel {
             return;
         }
 
+        // Preserve previously saved cwds when live process info is still empty,
+        // so a post-restore write cannot wipe paths we just loaded.
+        let previous_cwds = self.read_previous_session_cwds();
+
+        // Snapshot live cwds first so we can update `terminal_spawn_cwds`
+        // without holding a borrow on `groups`.
+        let mut live_cwds: Vec<(EntityId, Option<PathBuf>)> = Vec::new();
+        for group in &self.groups {
+            for view_ent in &group.terminals {
+                let terminal = view_ent.read(cx).terminal().read(cx);
+                let live = terminal
+                    .latest_working_directory()
+                    .or_else(|| terminal.working_directory())
+                    .filter(|cwd| !cwd.as_os_str().is_empty());
+                live_cwds.push((view_ent.entity_id(), live));
+            }
+        }
+        for (view_id, live) in &live_cwds {
+            if let Some(path) = live {
+                self.terminal_spawn_cwds
+                    .insert(*view_id, Some(path.clone()));
+            }
+        }
+
         let mut session = PersistedSession {
             groups: Vec::new(),
             active_group_index: 0,
         };
 
+        let mut live_ix = 0;
         for (i, group) in self.groups.iter().enumerate() {
             if group.id == self.active_group_id {
                 session.active_group_index = i;
@@ -471,9 +526,25 @@ impl TerminalListPanel {
                 layout: group.saved_layout.clone(),
             };
 
-            for view_ent in &group.terminals {
-                let cwd = view_ent.read(cx).terminal().read(cx).working_directory();
-                p_group.terminals.push(PersistedTerminal { cwd });
+            for (term_ix, view_ent) in group.terminals.iter().enumerate() {
+                let view_id = view_ent.entity_id();
+                let live = live_cwds.get(live_ix).and_then(|(_, cwd)| cwd.clone());
+                live_ix += 1;
+                let cwd = live
+                    .or_else(|| {
+                        self.terminal_spawn_cwds
+                            .get(&view_id)
+                            .cloned()
+                            .flatten()
+                    })
+                    .or_else(|| previous_cwds.get(&(i, term_ix)).cloned().flatten());
+                let title = view_ent
+                    .read(cx)
+                    .custom_title()
+                    .map(|title| title.trim())
+                    .filter(|title| !title.is_empty())
+                    .map(|title| title.to_string());
+                p_group.terminals.push(PersistedTerminal { cwd, title });
             }
 
             session.groups.push(p_group);
@@ -486,6 +557,24 @@ impl TerminalListPanel {
         if let Ok(json) = serde_json::to_string_pretty(&session) {
             let _ = std::fs::write(path, json);
         }
+    }
+
+    fn read_previous_session_cwds(&self) -> HashMap<(usize, usize), Option<PathBuf>> {
+        let Ok(data) = std::fs::read_to_string(self.session_file_path()) else {
+            return HashMap::default();
+        };
+        let Ok(session): Result<PersistedSession, _> = serde_json::from_str(&data) else {
+            return HashMap::default();
+        };
+        let mut out = HashMap::default();
+        for (group_ix, group) in session.groups.into_iter().enumerate() {
+            for (term_ix, term) in group.terminals.into_iter().enumerate() {
+                if term.cwd.is_some() {
+                    out.insert((group_ix, term_ix), term.cwd);
+                }
+            }
+        }
+        out
     }
 
     fn layout_referenced_indices(node: &GroupLayoutNode) -> std::collections::HashSet<usize> {
@@ -553,7 +642,7 @@ impl TerminalListPanel {
         // completes. Otherwise early groups match the constructor's GroupId(0)
         // and get added to the pane, while switch_group later no-ops because
         // active was already updated in the same loop.
-        let mut to_spawn: Vec<(GroupId, Option<PathBuf>)> = Vec::new();
+        let mut to_spawn: Vec<(GroupId, usize, PersistedTerminal)> = Vec::new();
         let mut active_has_layout = false;
         for (i, p_group) in session.groups.into_iter().enumerate() {
             let id = self.new_group_id();
@@ -607,14 +696,15 @@ impl TerminalListPanel {
                 has_unread: false,
                 saved_layout: layout,
                 session_terminal_count: Some(term_count),
+                restore_slots: vec![None; term_count],
             });
 
             if is_active {
                 self.active_group_id = id;
             }
 
-            for p_term in terminals {
-                to_spawn.push((id, p_term.cwd));
+            for (index, p_term) in terminals.into_iter().enumerate() {
+                to_spawn.push((id, index, p_term));
             }
         }
 
@@ -624,8 +714,17 @@ impl TerminalListPanel {
         self.session_reveal_scheduled = false;
         self.session_finish_scheduled = false;
 
-        for (id, cwd) in to_spawn {
-            self.spawn_terminal(id, cwd, None, None, window, cx);
+        for (id, index, p_term) in to_spawn {
+            self.spawn_terminal(
+                id,
+                p_term.cwd,
+                None,
+                None,
+                Some(index),
+                p_term.title,
+                window,
+                cx,
+            );
         }
 
         // Active group empty / already satisfied: show it immediately while
@@ -656,10 +755,11 @@ impl TerminalListPanel {
                 has_unread: false,
                 saved_layout: None,
                 session_terminal_count: None,
+                restore_slots: Vec::new(),
             });
             self.active_group_id = id;
             for cwd in project_dirs {
-                self.spawn_terminal(id, Some(cwd), None, None, window, cx);
+                self.spawn_terminal(id, Some(cwd), None, None, None, None, window, cx);
             }
             self.save_session(cx);
             return;
@@ -677,9 +777,10 @@ impl TerminalListPanel {
             has_unread: false,
             saved_layout: None,
             session_terminal_count: None,
+            restore_slots: Vec::new(),
         });
         self.active_group_id = id;
-        self.spawn_terminal(id, None, None, None, window, cx);
+        self.spawn_terminal(id, None, None, None, None, None, window, cx);
         self.save_session(cx);
     }
 
@@ -822,7 +923,7 @@ impl TerminalListPanel {
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
             group.collapsed = false;
         }
-        self.spawn_terminal(group_id, cwd, source, destination, window, cx);
+        self.spawn_terminal(group_id, cwd, source, destination, None, None, window, cx);
         self.save_session(cx);
     }
 
@@ -887,9 +988,10 @@ impl TerminalListPanel {
             has_unread: false,
             saved_layout: None,
             session_terminal_count: None,
+            restore_slots: Vec::new(),
         });
         self.switch_group(id, window, cx);
-        self.spawn_terminal(id, cwd, source, None, window, cx);
+        self.spawn_terminal(id, cwd, source, None, None, None, window, cx);
         self.save_session(cx);
     }
 
@@ -983,12 +1085,17 @@ impl TerminalListPanel {
     /// When `source` is set, clones that terminal (shell + env) into `cwd`.
     /// When `destination` is set, the new tab is added to that pane (the split
     /// whose "+" was clicked) instead of whatever happens to be active.
+    ///
+    /// `restore_index` / `restore_title` are used when rehydrating a session so
+    /// async completion order cannot scramble layout indices or drop renames.
     fn spawn_terminal(
         &mut self,
         group_id: GroupId,
         cwd: Option<std::path::PathBuf>,
         source: Option<Entity<TerminalView>>,
         destination: Option<Entity<Pane>>,
+        restore_index: Option<usize>,
+        restore_title: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1000,6 +1107,7 @@ impl TerminalListPanel {
             .or_else(|| self.pending_spawn_pane.take());
         // Clear pin so a later sync cannot steal a stale target.
         self.pending_spawn_pane = None;
+        let spawn_cwd = cwd.clone();
         cx.spawn_in(window, async move |this, cx| {
             let working_directory = cwd.or_else(|| {
                 workspace.upgrade().and_then(|workspace| {
@@ -1010,6 +1118,10 @@ impl TerminalListPanel {
                     .flatten()
                 })
             });
+            // Remember the directory the shell actually starts in (after
+            // defaulting), not the pre-default Option — otherwise session
+            // writes store null and wipe restore paths.
+            let remembered_cwd = working_directory.clone();
             let terminal = project
                 .update(cx, |project, cx| match source.as_ref() {
                     Some(view) => {
@@ -1038,7 +1150,23 @@ impl TerminalListPanel {
                     )
                 });
 
-                this.add_terminal_to_group(group_id, terminal_view.clone(), cx);
+                if let Some(title) = restore_title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                {
+                    terminal_view.update(cx, |view, cx| {
+                        view.set_custom_title(Some(title.to_string()), cx);
+                    });
+                }
+
+                this.add_terminal_to_group(
+                    group_id,
+                    terminal_view.clone(),
+                    restore_index,
+                    remembered_cwd.or(spawn_cwd),
+                    cx,
+                );
 
                 if this.session_restoring {
                     this.reveal_active_group_during_restore(window, cx);
@@ -1165,11 +1293,12 @@ impl TerminalListPanel {
                 has_unread: false,
                 saved_layout: None,
                 session_terminal_count: None,
+                restore_slots: Vec::new(),
             });
             self.active_group_id = id;
         }
         let group_id = self.active_group_id;
-        self.spawn_terminal(group_id, Some(cwd), None, None, window, cx);
+        self.spawn_terminal(group_id, Some(cwd), None, None, None, None, window, cx);
         self.save_session(cx);
     }
 
@@ -1177,10 +1306,56 @@ impl TerminalListPanel {
         &mut self,
         group_id: GroupId,
         terminal_view: Entity<TerminalView>,
+        restore_index: Option<usize>,
+        spawn_cwd: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        let view_id = terminal_view.entity_id();
+        self.terminal_spawn_cwds.insert(view_id, spawn_cwd);
+
+        // Keep remembered cwd in sync when the shell cds (TitleChanged).
+        let terminal = terminal_view.read(cx).terminal().clone();
+        self._terminal_cwd_subscriptions.push(cx.subscribe(
+            &terminal,
+            move |this, term, event, cx| {
+                if !matches!(
+                    event,
+                    terminal::Event::TitleChanged | terminal::Event::BreadcrumbsChanged
+                ) {
+                    return;
+                }
+                let cwd = term
+                    .read(cx)
+                    .latest_working_directory()
+                    .or_else(|| term.read(cx).working_directory())
+                    .filter(|cwd| !cwd.as_os_str().is_empty());
+                if let Some(cwd) = cwd {
+                    this.terminal_spawn_cwds.insert(view_id, Some(cwd));
+                }
+            },
+        ));
+
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
-            group.terminals.push(terminal_view);
+            if let Some(index) = restore_index {
+                if group.restore_slots.len() <= index {
+                    group.restore_slots.resize_with(index + 1, || None);
+                }
+                group.restore_slots[index] = Some(terminal_view);
+                if group
+                    .session_terminal_count
+                    .is_some_and(|expected| expected > 0)
+                    && group.restore_slots.len() >= group.session_terminal_count.unwrap_or(0)
+                    && group.restore_slots.iter().all(|slot| slot.is_some())
+                {
+                    group.terminals = group
+                        .restore_slots
+                        .drain(..)
+                        .map(|slot| slot.expect("checked all some"))
+                        .collect();
+                }
+            } else {
+                group.terminals.push(terminal_view);
+            }
         }
         cx.notify();
     }
@@ -1811,7 +1986,8 @@ impl TerminalListPanel {
                         // workspace.active_pane.
                         return;
                     }
-                    self.add_terminal_to_group(self.active_group_id, tv, cx);
+                    let spawn_cwd = tv.read(cx).terminal().read(cx).working_directory();
+                    self.add_terminal_to_group(self.active_group_id, tv, None, spawn_cwd, cx);
                     self.save_session(cx);
                     // ItemAdded is emitted while Workspace is updating the
                     // pane — sync must wait until that stack unwinds.
@@ -1853,6 +2029,7 @@ impl TerminalListPanel {
                 // Drop the Entity so Terminal::Drop kills the PTY. Pane refs
                 // should already be gone when this runs after ItemRemoved.
                 let _dropped = group.terminals.remove(removed_ix);
+                self.terminal_spawn_cwds.remove(&item_id);
                 if let Some(layout) = group.saved_layout.as_mut() {
                     Self::remap_layout_after_remove(layout, removed_ix);
                 }
