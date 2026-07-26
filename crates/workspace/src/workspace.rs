@@ -11627,14 +11627,24 @@ pub fn with_active_or_new_workspace(
     cx: &mut App,
     f: impl FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send + 'static,
 ) {
-    match cx
+    // Prefer the active MultiWorkspace; if focus is on a non-workspace window
+    // (e.g. Terry Settings), reuse any existing MultiWorkspace instead of
+    // spawning a brand-new app window via `open_new`.
+    let multi_workspace = cx
         .active_window()
         .and_then(|w| w.downcast::<MultiWorkspace>())
-    {
+        .or_else(|| {
+            cx.windows()
+                .into_iter()
+                .find_map(|w| w.downcast::<MultiWorkspace>())
+        });
+
+    match multi_workspace {
         Some(multi_workspace) => {
             cx.defer(move |cx| {
                 multi_workspace
                     .update(cx, |multi_workspace, window, cx| {
+                        window.activate_window();
                         let workspace = multi_workspace.workspace().clone();
                         workspace.update(cx, |workspace, cx| f(workspace, window, cx));
                     })

@@ -75,6 +75,20 @@ impl CommandPaletteFilter {
         self.hidden_namespaces.remove(namespace);
     }
 
+    /// Returns whether actions in the given namespace are hidden.
+    pub fn is_namespace_hidden(&self, namespace: &str) -> bool {
+        self.hidden_namespaces.contains(namespace)
+    }
+
+    /// Returns whether an action name (e.g. `editor::Undo`) is hidden by namespace.
+    pub fn is_action_name_hidden(&self, action_name: &str) -> bool {
+        let namespace = action_name
+            .split("::")
+            .next()
+            .unwrap_or("malformed action name");
+        self.is_namespace_hidden(namespace)
+    }
+
     /// Hides all actions with the given types.
     pub fn hide_action_types<'a>(&mut self, action_types: impl IntoIterator<Item = &'a TypeId>) {
         for action_type in action_types {

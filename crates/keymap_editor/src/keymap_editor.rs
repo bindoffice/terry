@@ -27,6 +27,7 @@ use language::{Language, LanguageConfig, ToOffset as _};
 
 use notifications::status_toast::StatusToast;
 use project::{CompletionDisplayOptions, Project};
+use command_palette_hooks::CommandPaletteFilter;
 use settings::{
     BaseKeymap, KeybindSource, KeymapFile, Settings as _, SettingsAssets, infer_json_indent_size,
 };
@@ -843,6 +844,12 @@ impl KeymapEditor {
                 continue;
             }
 
+            if CommandPaletteFilter::try_global(cx)
+                .is_some_and(|filter| filter.is_hidden(key_binding.action()))
+            {
+                continue;
+            }
+
             let source = key_binding
                 .meta()
                 .map(KeybindSource::from_meta)
@@ -894,6 +901,12 @@ impl KeymapEditor {
         }
 
         for action_name in unmapped_action_names.into_iter() {
+            if CommandPaletteFilter::try_global(cx)
+                .is_some_and(|filter| filter.is_action_name_hidden(action_name))
+            {
+                continue;
+            }
+
             let index = processed_bindings.len();
             let action_information = ActionInformation::new(
                 action_name,

@@ -7,6 +7,7 @@ mod llm_provider_settings;
 mod settings_window;
 mod status_bar_items;
 mod terminal_list_panel;
+mod terry_keymap;
 use std::sync::Arc;
 
 use assets::Assets;
@@ -225,6 +226,7 @@ fn main() {
         );
         language_models::init(app_state.user_store.clone(), client.clone(), cx);
         agent_settings::AgentSettings::register(cx);
+        command_palette_hooks::init(cx);
         terminal_list_panel::init(cx);
         agent_ui::init(
             app_state.fs.clone(),
@@ -235,7 +237,6 @@ fn main() {
         );
         file_list_panel::init(cx);
         app_title_bar::init(cx);
-        command_palette_hooks::init(cx);
         search::init(cx);
         cx.set_global(workspace::PaneSearchBarCallbacks {
             setup_search_bar: |languages, toolbar, window, cx| {
@@ -259,6 +260,7 @@ fn main() {
         markdown_preview::init(cx);
         image_viewer::init(cx);
         recent_projects::init(cx);
+        terry_keymap::apply_terry_action_filter(cx);
 
         // Enable vim mode by default for this app.
         // Only restore the last workspace window — `last_session` reopens every
@@ -737,6 +739,7 @@ fn reload_keymaps(cx: &mut gpui::App, mut user_key_bindings: Vec<gpui::KeyBindin
 fn load_default_keymap(cx: &mut gpui::App) {
     let mut key_bindings = KeymapFile::load_asset_allow_partial_failure(DEFAULT_KEYMAP_PATH, cx)
         .expect("failed to load default keymap");
+    key_bindings = terry_keymap::filter_terry_key_bindings(key_bindings);
     for key_binding in &mut key_bindings {
         key_binding.set_meta(KeybindSource::Default.meta());
     }
@@ -751,6 +754,7 @@ fn load_default_keymap(cx: &mut gpui::App) {
         let mut vim_key_bindings =
             KeymapFile::load_asset_allow_partial_failure(VIM_KEYMAP_PATH, cx)
                 .expect("failed to load vim keymap");
+        vim_key_bindings = terry_keymap::filter_terry_key_bindings(vim_key_bindings);
         for key_binding in &mut vim_key_bindings {
             key_binding.set_meta(KeybindSource::Vim.meta());
         }
