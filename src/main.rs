@@ -146,6 +146,7 @@ fn main() {
         i18n::init(cx);
         settings_window::init(cx);
         keymap_settings::init(cx);
+        keymap_editor::init(cx);
         llm_provider_settings::init(cx);
 
         let user_agent = format!(
@@ -730,6 +731,7 @@ fn reload_keymaps(cx: &mut gpui::App, mut user_key_bindings: Vec<gpui::KeyBindin
     }
     cx.bind_keys(user_key_bindings);
     cx.set_menus(app_menus::app_menus(cx));
+    keymap_editor::KeymapEventChannel::trigger_keymap_changed(cx);
 }
 
 fn load_default_keymap(cx: &mut gpui::App) {

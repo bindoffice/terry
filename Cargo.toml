@@ -42,6 +42,7 @@ gpui_tokio.workspace = true
 http_client.workspace = true
 i18n.workspace = true
 image_viewer.workspace = true
+keymap_editor.workspace = true
 language.workspace = true
 language_selector.workspace = true
 line_ending_selector.workspace = true
@@ -177,6 +178,7 @@ members = [
     "crates/icons",
     "crates/image_viewer",
     "crates/json_schema_store",
+    "crates/keymap_editor",
     "crates/language",
     "crates/language_core",
     "crates/language_extension",

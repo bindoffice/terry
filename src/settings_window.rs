@@ -209,9 +209,7 @@ impl Render for SettingsWindow {
                                     .size(ButtonSize::Medium)
                                     .on_click(|_, window, cx| {
                                         window.dispatch_action(
-                                            Box::new(
-                                                crate::keymap_settings::OpenKeymapSettings,
-                                            ),
+                                            zed_actions::OpenKeymap.boxed_clone(),
                                             cx,
                                         );
                                     }),
