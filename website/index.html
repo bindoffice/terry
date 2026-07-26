@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Terry — 终端优先的 AI 工作区</title>
+    <meta
+      name="description"
+      content="Terry 是以终端为中心的桌面工作区，内置 AI Agent。分组终端、文件面板与可配置 Agent，专注命令行与智能体工作流。"
+    />
+    <link rel="icon" href="assets/icon.png" type="image/png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+
+    <header class="site-header">
+      <a class="brand-mark" href="#top" data-i18n-aria="homeAria" aria-label="Terry 首页">
+        <img src="assets/icon.png" width="28" height="28" alt="" />
+        <span>Terry</span>
+      </a>
+      <div class="header-actions">
+        <nav class="site-nav" data-i18n-aria="navAria" aria-label="主导航">
+          <a href="#workspace" data-i18n="navWorkspace">Workspace</a>
+          <a href="#naming" data-i18n="navNaming">Naming</a>
+          <a href="#split" data-i18n="navSplit">Split</a>
+          <a href="#performance" data-i18n="navPerformance">Performance</a>
+          <a href="#themes" data-i18n="navThemes">Themes</a>
+          <a href="#agent" data-i18n="navAgent">Agent</a>
+          <a href="#download" data-i18n="navDownload">Download</a>
+          <a
+            class="nav-external"
+            href="https://bindoffice.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            data-i18n="navBindoffice"
+            >BindOffice</a
+          >
+          <a
+            class="nav-external"
+            href="https://github.com/bindoffice/terry"
+            target="_blank"
+            rel="noopener noreferrer"
+            >GitHub</a
+          >
+        </nav>
+        <div class="lang-switch" role="group" data-i18n-aria="langAria" aria-label="语言">
+          <button type="button" class="lang-btn" data-lang="zh" aria-pressed="true">中文</button>
+          <button type="button" class="lang-btn" data-lang="en" aria-pressed="false">EN</button>
+        </div>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="hero-copy">
+          <div class="brand-row">
+            <p class="brand-hero">Terry</p>
+            <span class="brand-rule" aria-hidden="true"></span>
+            <p class="brand-aside" data-i18n="brandAside">和 Tom &amp; Jerry 无关</p>
+          </div>
+          <h1 data-i18n="heroTitle">终端在前，Agent 在侧。</h1>
+          <p class="lede" data-i18n="heroLede">
+            以终端为中心的桌面工作区。分组会话、项目文件与可配置 AI
+            Agent，专注命令行与智能体工作流——不是又一个完整 IDE。
+          </p>
+          <div class="cta-row">
+            <a class="btn btn-primary" href="#download" data-i18n="ctaGet">获取 Terry</a>
+            <a
+              class="btn btn-ghost"
+              href="https://github.com/bindoffice/terry"
+              target="_blank"
+              rel="noopener noreferrer"
+              data-i18n="ctaSource"
+              >查看源码</a
+            >
+          </div>
+        </div>
+
+        <div class="hero-stage" aria-hidden="true">
+          <div class="product-shell">
+            <div class="product-chrome">
+              <span></span><span></span><span></span>
+              <p>~/dev/ship · terry</p>
+            </div>
+            <div class="product-body">
+              <aside class="product-rail">
+                <div class="rail-item is-active">main</div>
+                <div class="rail-item">build</div>
+                <div class="rail-item">logs</div>
+                <div class="rail-item">ssh</div>
+              </aside>
+              <div class="product-terminal">
+                <pre class="term-lines">
+<span class="prompt">❯</span> cargo build --release
+   Compiling terry v0.1.0
+    Finished release in 42.18s
+<span class="prompt">❯</span> ./target/release/terry
+<span class="cursor"></span>
+</pre>
+              </div>
+              <aside class="product-agent">
+                <p class="agent-label">Agent</p>
+                <p class="agent-bubble" data-i18n="heroBubble">
+                  检查 release 产物，确认 macOS / Linux / Windows 均已打包。
+                </p>
+                <p class="agent-meta">running · shell + files</p>
+              </aside>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id="workspace">
+        <div class="band-inner reveal">
+          <p class="eyebrow" data-i18n="workspaceEyebrow">Workspace</p>
+          <h2 data-i18n="workspaceTitle">终端分组，按目录开会话。</h2>
+          <p class="support" data-i18n="workspaceBody">
+            管理多终端标签与分组，在正确工作目录新建会话；旁侧文件面板让项目树始终在手边。
+          </p>
+        </div>
+        <div class="feature-visual reveal delay-1" aria-hidden="true">
+          <div class="grid-mock">
+            <div class="cell">
+              <span>group / api</span>
+              <code>cd services/api && cargo test</code>
+            </div>
+            <div class="cell">
+              <span>group / web</span>
+              <code>pnpm dev --host</code>
+            </div>
+            <div class="cell wide">
+              <span>files</span>
+              <code>crates/ · src/ · website/</code>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band-alt" id="naming">
+        <div class="band-inner reveal">
+          <p class="eyebrow" data-i18n="namingEyebrow">Naming</p>
+          <h2 data-i18n="namingTitle">支持修改分组名、终端名。</h2>
+          <p class="support" data-i18n="namingBody">
+            为分组和终端自定义名称，会话列表更清晰；改名结果会随工作区一起保存，下次打开仍在。
+          </p>
+        </div>
+        <div class="feature-visual reveal delay-1" aria-hidden="true">
+          <div class="naming-strip">
+            <div class="naming-item">
+              <span data-i18n="namingItem1Label">group</span>
+              <code>api → shipping</code>
+            </div>
+            <div class="naming-item">
+              <span data-i18n="namingItem2Label">terminal</span>
+              <code>bash → release-build</code>
+            </div>
+            <div class="naming-item">
+              <span data-i18n="namingItem3Label">persist</span>
+              <code data-i18n="namingItem3Value">saved with workspace</code>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id="split">
+        <div class="band-inner reveal">
+          <p class="eyebrow" data-i18n="splitEyebrow">Split</p>
+          <h2 data-i18n="splitTitle">上下左右分屏，多终端同屏协作。</h2>
+          <p class="support" data-i18n="splitBody">
+            将当前窗格向右、向左、向上或向下拆分，并排查看日志与命令、前后端会话或远程与本地终端。布局会随终端分组一并保存。
+          </p>
+        </div>
+        <div class="feature-visual reveal delay-1" aria-hidden="true">
+          <div class="split-mock">
+            <div class="split-pane">
+              <span>left · build</span>
+              <code>cargo test -p terminal</code>
+              <code class="dim">ok · 42 passed</code>
+            </div>
+            <div class="split-pane">
+              <span>right · logs</span>
+              <code>tail -f /tmp/terry.log</code>
+              <code class="dim">info · pane split restored</code>
+            </div>
+            <div class="split-pane bottom">
+              <span>bottom · ssh</span>
+              <code>ssh deploy@edge-01</code>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band-alt" id="performance">
+        <div class="band-inner reveal">
+          <p class="eyebrow" data-i18n="perfEyebrow">Performance</p>
+          <h2 data-i18n="perfTitle">原生性能，开箱即快。</h2>
+          <p class="support" data-i18n="perfBody">
+            基于 Rust 与 GPUI 构建，GPU 加速界面与高效终端渲染，启动快、滚动顺、多会话也不拖泥带水。
+          </p>
+        </div>
+        <div class="feature-visual reveal delay-1" aria-hidden="true">
+          <div class="perf-strip">
+            <div class="perf-item">
+              <span data-i18n="perfItem1Label">stack</span>
+              <code data-i18n="perfItem1Value">Rust · GPUI</code>
+            </div>
+            <div class="perf-item">
+              <span data-i18n="perfItem2Label">render</span>
+              <code data-i18n="perfItem2Value">GPU-accelerated UI</code>
+            </div>
+            <div class="perf-item">
+              <span data-i18n="perfItem3Label">feel</span>
+              <code data-i18n="perfItem3Value">snappy scroll · light memory</code>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id="themes">
+        <div class="band-inner reveal">
+          <p class="eyebrow" data-i18n="themesEyebrow">Themes</p>
+          <h2 data-i18n="themesTitle">多种主题，随心切换。</h2>
+          <p class="support" data-i18n="themesBody">
+            内置多套外观主题，覆盖明暗风格与配色偏好；界面与终端外观可一起调整，找到最适合长时间工作的视觉节奏。
+          </p>
+        </div>
+        <div class="feature-visual reveal delay-1" aria-hidden="true">
+          <div class="theme-swatches">
+            <div class="swatch swatch-ink">
+              <span>Ink</span>
+            </div>
+            <div class="swatch swatch-dawn">
+              <span>Dawn</span>
+            </div>
+            <div class="swatch swatch-forest">
+              <span>Forest</span>
+            </div>
+            <div class="swatch swatch-slate">
+              <span>Slate</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band-alt" id="agent">
+        <div class="band-inner reveal">
+          <p class="eyebrow" data-i18n="agentEyebrow">Agent</p>
+          <h2 data-i18n="agentTitle">侧栏对话，直接驱动命令与工具。</h2>
+          <p class="support" data-i18n="agentBody">
+            用可配置 Profile 连接大模型；通过 MCP 扩展能力，让 Agent 在终端上下文里读写与执行。
+          </p>
+        </div>
+        <div class="agent-strip reveal delay-1" aria-hidden="true">
+          <div class="strip-line"><span>profile</span> default · openai-compatible</div>
+          <div class="strip-line"><span>tools</span> shell · files · mcp</div>
+          <div class="strip-line"><span>context</span> active cwd · open panels</div>
+        </div>
+      </section>
+
+      <section class="download" id="download">
+        <div class="download-inner reveal">
+          <p class="eyebrow" data-i18n="downloadEyebrow">Download</p>
+          <h2 data-i18n="downloadTitle">macOS · Linux · Windows</h2>
+          <p class="support" data-i18n="downloadBody">
+            发布包由 GitHub Actions 构建。从 Releases 下载对应平台，或自行从源码编译。
+          </p>
+          <div class="cta-row">
+            <a
+              class="btn btn-primary"
+              href="https://github.com/bindoffice/terry/releases"
+              target="_blank"
+              rel="noopener noreferrer"
+              data-i18n="ctaReleases"
+              >打开 Releases</a
+            >
+            <a
+              class="btn btn-ghost"
+              href="https://github.com/bindoffice/terry"
+              target="_blank"
+              rel="noopener noreferrer"
+              >GitHub</a
+            >
+          </div>
+          <pre class="install-hint"><code>cargo run --release</code></pre>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="footer-brand">
+        <img src="assets/icon.png" width="22" height="22" alt="" />
+        <span>Terry</span>
+      </div>
+      <p data-i18n="footerNote">GPL-3.0-or-later · 基于 GPUI 技术栈</p>
+      <a href="https://github.com/bindoffice/terry" target="_blank" rel="noopener noreferrer"
+        >bindoffice/terry</a
+      >
+    </footer>
+
+    <script src="script.js"></script>
+  </body>
+</html>
