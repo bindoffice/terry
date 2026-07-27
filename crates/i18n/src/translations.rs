@@ -704,6 +704,58 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("close_window", "Close Window");
             m.insert("settings", "Ajustes");
             m.insert("open_recent_project", "Abrir proyecto reciente");
+            m.insert("appearance_description", "Tema, familia tipográfica y tamaño de la interfaz y el terminal.");
+            m.insert("font_family", "Fuente");
+            m.insert("font_size", "Tamaño");
+            m.insert("font_system", "Sistema");
+            m.insert("custom_shortcuts", "Atajos personalizados");
+            m.insert("keymap_settings", "Atajos de teclado");
+            m.insert("keymap_settings_description", "Ver y personalizar los atajos de teclado.");
+            m.insert("keymap_search_placeholder", "Buscar atajos…");
+            m.insert("keymap_bindings_count", "atajos");
+            m.insert("open_keymap_file", "Abrir archivo de atajos");
+            m.insert("vim_mode", "Modo Vim");
+            m.insert("llm_providers", "Proveedores LLM");
+            m.insert(
+                "llm_providers_description",
+                "Añade proveedores compatibles con OpenAI o Claude, con Base URL personalizada. Los modelos se obtienen de la API.",
+            );
+            m.insert("base_url", "Base URL");
+            m.insert("api_key", "API Key");
+            m.insert("provider_name", "Nombre del proveedor");
+            m.insert("provider_name_placeholder", "p. ej. my-proxy");
+            m.insert("add_openai_provider", "Añadir proveedor OpenAI");
+            m.insert("add_claude_provider", "Añadir proveedor Claude");
+            m.insert("add_provider_title", "Añadir proveedor {kind}");
+            m.insert("no_providers_yet", "Aún no hay proveedores. Añade un endpoint compatible con OpenAI o Claude.");
+            m.insert("save_and_fetch_models", "Guardar y obtener modelos");
+            m.insert("cancel", "Cancelar");
+            m.insert("fetching_models", "Obteniendo modelos…");
+            m.insert("no_models_found", "Este endpoint no devolvió modelos.");
+            m.insert("provider_name_required", "El nombre del proveedor es obligatorio.");
+            m.insert("base_url_required", "La Base URL es obligatoria.");
+            m.insert("api_key_required", "La API key es obligatoria.");
+            m.insert(
+                "api_key_required_for_refresh",
+                "No se encontró la API key. Vuelve a añadir el proveedor o pega una key antes de actualizar.",
+            );
+            m.insert("provider_name_taken", "Ya existe un proveedor con este nombre.");
+            m.insert("provider_added_with_models", "Proveedor añadido con {count} modelos.");
+            m.insert("models_refreshed", "Se actualizaron {count} modelos.");
+            m.insert("provider_removed", "Proveedor eliminado.");
+            m.insert("refresh_models", "Actualizar modelos");
+            m.insert("remove_provider", "Eliminar proveedor");
+            m.insert("model_count", "{count} modelos");
+            m.insert("models_fetched_on_save", "Los modelos se obtendrán de la Base URL al guardar.");
+            m.insert("save", "Guardar");
+            m.insert("reset_key", "Restablecer clave");
+            m.insert("api_key_set_in_env", "API key definida en variable de entorno");
+            m.insert("api_key_configured", "API key configurada");
+            m.insert("reset_api_key_env_hint", "Para restablecer la API key, elimina la variable de entorno {env_var}.");
+            m.insert("paste_api_key", "Pega tu API key…");
+            m.insert("open_settings", "Abrir ajustes");
+            m.insert("customize_keymaps", "Personalizar atajos");
+
             m
         });
         locales.insert("fr", {
@@ -732,6 +784,61 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("close_window", "Close Window");
             m.insert("settings", "Réglages");
             m.insert("open_recent_project", "Ouvrir un projet récent");
+            m.insert("appearance_description", "Thème, police et taille pour l’interface et le terminal.");
+            m.insert("font_family", "Police");
+            m.insert("font_size", "Taille");
+            m.insert("font_system", "Système");
+            m.insert("custom_shortcuts", "Raccourcis personnalisés");
+            m.insert("keymap_settings", "Raccourcis clavier");
+            m.insert("keymap_settings_description", "Afficher et personnaliser les raccourcis clavier.");
+            m.insert("keymap_search_placeholder", "Rechercher des raccourcis…");
+            m.insert("keymap_bindings_count", "raccourcis");
+            m.insert("open_keymap_file", "Ouvrir le fichier de raccourcis");
+            m.insert("vim_mode", "Mode Vim");
+            m.insert("llm_providers", "Fournisseurs LLM");
+            m.insert(
+                "llm_providers_description",
+                "Ajoutez des fournisseurs compatibles OpenAI ou Claude avec une Base URL personnalisée. Les modèles sont récupérés via l’API.",
+            );
+            m.insert("base_url", "Base URL");
+            m.insert("api_key", "API Key");
+            m.insert("provider_name", "Nom du fournisseur");
+            m.insert("provider_name_placeholder", "ex. my-proxy");
+            m.insert("add_openai_provider", "Ajouter un fournisseur OpenAI");
+            m.insert("add_claude_provider", "Ajouter un fournisseur Claude");
+            m.insert("add_provider_title", "Ajouter le fournisseur {kind}");
+            m.insert(
+                "no_providers_yet",
+                "Aucun fournisseur pour l’instant. Ajoutez un endpoint compatible OpenAI ou Claude.",
+            );
+            m.insert("save_and_fetch_models", "Enregistrer et récupérer les modèles");
+            m.insert("cancel", "Annuler");
+            m.insert("fetching_models", "Récupération des modèles…");
+            m.insert("no_models_found", "Aucun modèle renvoyé par cet endpoint.");
+            m.insert("provider_name_required", "Le nom du fournisseur est requis.");
+            m.insert("base_url_required", "La Base URL est requise.");
+            m.insert("api_key_required", "La clé API est requise.");
+            m.insert(
+                "api_key_required_for_refresh",
+                "Clé API introuvable. Réajoutez le fournisseur ou collez une clé avant d’actualiser.",
+            );
+            m.insert("provider_name_taken", "Un fournisseur avec ce nom existe déjà.");
+            m.insert("provider_added_with_models", "Fournisseur ajouté avec {count} modèles.");
+            m.insert("models_refreshed", "{count} modèles actualisés.");
+            m.insert("provider_removed", "Fournisseur supprimé.");
+            m.insert("refresh_models", "Actualiser les modèles");
+            m.insert("remove_provider", "Supprimer le fournisseur");
+            m.insert("model_count", "{count} modèles");
+            m.insert("models_fetched_on_save", "Les modèles seront récupérés depuis la Base URL à l’enregistrement.");
+            m.insert("save", "Enregistrer");
+            m.insert("reset_key", "Réinitialiser la clé");
+            m.insert("api_key_set_in_env", "Clé API définie via une variable d’environnement");
+            m.insert("api_key_configured", "Clé API configurée");
+            m.insert("reset_api_key_env_hint", "Pour réinitialiser la clé API, supprimez la variable d’environnement {env_var}.");
+            m.insert("paste_api_key", "Collez votre clé API…");
+            m.insert("open_settings", "Ouvrir les réglages");
+            m.insert("customize_keymaps", "Personnaliser les raccourcis");
+
             m
         });
         locales.insert("de", {
@@ -760,6 +867,61 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("close_window", "Close Window");
             m.insert("settings", "Einstellungen");
             m.insert("open_recent_project", "Zuletzt verwendetes Projekt öffnen");
+            m.insert("appearance_description", "Design, Schriftart und Größe für Oberfläche und Terminal.");
+            m.insert("font_family", "Schriftart");
+            m.insert("font_size", "Größe");
+            m.insert("font_system", "System");
+            m.insert("custom_shortcuts", "Eigene Tastenkürzel");
+            m.insert("keymap_settings", "Tastenkürzel");
+            m.insert("keymap_settings_description", "Tastenkürzel anzeigen und anpassen.");
+            m.insert("keymap_search_placeholder", "Tastenkürzel suchen…");
+            m.insert("keymap_bindings_count", "Tastenkürzel");
+            m.insert("open_keymap_file", "Tastenkürzel-Datei öffnen");
+            m.insert("vim_mode", "Vim-Modus");
+            m.insert("llm_providers", "LLM-Anbieter");
+            m.insert(
+                "llm_providers_description",
+                "OpenAI- oder Claude-kompatible Anbieter mit eigener Base URL hinzufügen. Modelle werden über die API geladen.",
+            );
+            m.insert("base_url", "Base URL");
+            m.insert("api_key", "API Key");
+            m.insert("provider_name", "Anbietername");
+            m.insert("provider_name_placeholder", "z. B. my-proxy");
+            m.insert("add_openai_provider", "OpenAI-Anbieter hinzufügen");
+            m.insert("add_claude_provider", "Claude-Anbieter hinzufügen");
+            m.insert("add_provider_title", "{kind}-Anbieter hinzufügen");
+            m.insert(
+                "no_providers_yet",
+                "Noch keine Anbieter. Fügen Sie einen OpenAI- oder Claude-kompatiblen Endpunkt hinzu.",
+            );
+            m.insert("save_and_fetch_models", "Speichern und Modelle laden");
+            m.insert("cancel", "Abbrechen");
+            m.insert("fetching_models", "Modelle werden geladen…");
+            m.insert("no_models_found", "Dieser Endpunkt hat keine Modelle zurückgegeben.");
+            m.insert("provider_name_required", "Anbietername ist erforderlich.");
+            m.insert("base_url_required", "Base URL ist erforderlich.");
+            m.insert("api_key_required", "API-Key ist erforderlich.");
+            m.insert(
+                "api_key_required_for_refresh",
+                "API-Key nicht gefunden. Anbieter erneut hinzufügen oder vor dem Aktualisieren einen Key einfügen.",
+            );
+            m.insert("provider_name_taken", "Ein Anbieter mit diesem Namen existiert bereits.");
+            m.insert("provider_added_with_models", "Anbieter mit {count} Modellen hinzugefügt.");
+            m.insert("models_refreshed", "{count} Modelle aktualisiert.");
+            m.insert("provider_removed", "Anbieter entfernt.");
+            m.insert("refresh_models", "Modelle aktualisieren");
+            m.insert("remove_provider", "Anbieter entfernen");
+            m.insert("model_count", "{count} Modelle");
+            m.insert("models_fetched_on_save", "Beim Speichern werden Modelle von der Base URL geladen.");
+            m.insert("save", "Speichern");
+            m.insert("reset_key", "Key zurücksetzen");
+            m.insert("api_key_set_in_env", "API-Key über Umgebungsvariable gesetzt");
+            m.insert("api_key_configured", "API-Key konfiguriert");
+            m.insert("reset_api_key_env_hint", "Zum Zurücksetzen die Umgebungsvariable {env_var} entfernen.");
+            m.insert("paste_api_key", "API-Key einfügen…");
+            m.insert("open_settings", "Einstellungen öffnen");
+            m.insert("customize_keymaps", "Tastenkürzel anpassen");
+
             m
         });
         locales.insert("pt-BR", {
@@ -788,6 +950,58 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("close_window", "Close Window");
             m.insert("settings", "Configurações");
             m.insert("open_recent_project", "Abrir projeto recente");
+            m.insert("appearance_description", "Tema, família tipográfica e tamanho da interface e do terminal.");
+            m.insert("font_family", "Fonte");
+            m.insert("font_size", "Tamanho");
+            m.insert("font_system", "Sistema");
+            m.insert("custom_shortcuts", "Atalhos personalizados");
+            m.insert("keymap_settings", "Atalhos do teclado");
+            m.insert("keymap_settings_description", "Ver e personalizar atalhos do teclado.");
+            m.insert("keymap_search_placeholder", "Pesquisar atalhos…");
+            m.insert("keymap_bindings_count", "atalhos");
+            m.insert("open_keymap_file", "Abrir arquivo de atalhos");
+            m.insert("vim_mode", "Modo Vim");
+            m.insert("llm_providers", "Provedores LLM");
+            m.insert(
+                "llm_providers_description",
+                "Adicione provedores compatíveis com OpenAI ou Claude com Base URL personalizada. Os modelos são obtidos da API.",
+            );
+            m.insert("base_url", "Base URL");
+            m.insert("api_key", "API Key");
+            m.insert("provider_name", "Nome do provedor");
+            m.insert("provider_name_placeholder", "ex.: my-proxy");
+            m.insert("add_openai_provider", "Adicionar provedor OpenAI");
+            m.insert("add_claude_provider", "Adicionar provedor Claude");
+            m.insert("add_provider_title", "Adicionar provedor {kind}");
+            m.insert("no_providers_yet", "Ainda não há provedores. Adicione um endpoint compatível com OpenAI ou Claude.");
+            m.insert("save_and_fetch_models", "Salvar e buscar modelos");
+            m.insert("cancel", "Cancelar");
+            m.insert("fetching_models", "Buscando modelos…");
+            m.insert("no_models_found", "Nenhum modelo retornado por este endpoint.");
+            m.insert("provider_name_required", "O nome do provedor é obrigatório.");
+            m.insert("base_url_required", "A Base URL é obrigatória.");
+            m.insert("api_key_required", "A API key é obrigatória.");
+            m.insert(
+                "api_key_required_for_refresh",
+                "API key não encontrada. Adicione o provedor novamente ou cole uma key antes de atualizar.",
+            );
+            m.insert("provider_name_taken", "Já existe um provedor com este nome.");
+            m.insert("provider_added_with_models", "Provedor adicionado com {count} modelos.");
+            m.insert("models_refreshed", "{count} modelos atualizados.");
+            m.insert("provider_removed", "Provedor removido.");
+            m.insert("refresh_models", "Atualizar modelos");
+            m.insert("remove_provider", "Remover provedor");
+            m.insert("model_count", "{count} modelos");
+            m.insert("models_fetched_on_save", "Os modelos serão obtidos da Base URL ao salvar.");
+            m.insert("save", "Salvar");
+            m.insert("reset_key", "Redefinir chave");
+            m.insert("api_key_set_in_env", "API key definida na variável de ambiente");
+            m.insert("api_key_configured", "API key configurada");
+            m.insert("reset_api_key_env_hint", "Para redefinir a API key, remova a variável de ambiente {env_var}.");
+            m.insert("paste_api_key", "Cole sua API key…");
+            m.insert("open_settings", "Abrir configurações");
+            m.insert("customize_keymaps", "Personalizar atalhos");
+
             m
         });
         locales.insert("ru", {
@@ -816,6 +1030,55 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("close_window", "Close Window");
             m.insert("settings", "Настройки");
             m.insert("open_recent_project", "Открыть недавний проект");
+            m.insert("appearance_description", "Тема, шрифт и размер для интерфейса и терминала.");
+            m.insert("font_family", "Шрифт");
+            m.insert("font_size", "Размер");
+            m.insert("font_system", "Системный");
+            m.insert("custom_shortcuts", "Свои сочетания клавиш");
+            m.insert("keymap_settings", "Сочетания клавиш");
+            m.insert("keymap_settings_description", "Просмотр и настройка сочетаний клавиш.");
+            m.insert("keymap_search_placeholder", "Поиск сочетаний…");
+            m.insert("keymap_bindings_count", "сочетаний");
+            m.insert("open_keymap_file", "Открыть файл сочетаний");
+            m.insert("vim_mode", "Режим Vim");
+            m.insert("llm_providers", "Провайдеры LLM");
+            m.insert(
+                "llm_providers_description",
+                "Добавляйте OpenAI- или Claude-совместимых провайдеров с своим Base URL. Модели загружаются из API.",
+            );
+            m.insert("base_url", "Base URL");
+            m.insert("api_key", "API Key");
+            m.insert("provider_name", "Имя провайдера");
+            m.insert("provider_name_placeholder", "напр. my-proxy");
+            m.insert("add_openai_provider", "Добавить провайдера OpenAI");
+            m.insert("add_claude_provider", "Добавить провайдера Claude");
+            m.insert("add_provider_title", "Добавить провайдера {kind}");
+            m.insert("no_providers_yet", "Пока нет провайдеров. Добавьте OpenAI- или Claude-совместимый endpoint.");
+            m.insert("save_and_fetch_models", "Сохранить и загрузить модели");
+            m.insert("cancel", "Отмена");
+            m.insert("fetching_models", "Загрузка моделей…");
+            m.insert("no_models_found", "Этот endpoint не вернул модели.");
+            m.insert("provider_name_required", "Укажите имя провайдера.");
+            m.insert("base_url_required", "Укажите Base URL.");
+            m.insert("api_key_required", "Укажите API key.");
+            m.insert("api_key_required_for_refresh", "API key не найден. Добавьте провайдера снова или вставьте key перед обновлением.");
+            m.insert("provider_name_taken", "Провайдер с таким именем уже существует.");
+            m.insert("provider_added_with_models", "Провайдер добавлен, моделей: {count}.");
+            m.insert("models_refreshed", "Обновлено моделей: {count}.");
+            m.insert("provider_removed", "Провайдер удалён.");
+            m.insert("refresh_models", "Обновить модели");
+            m.insert("remove_provider", "Удалить провайдера");
+            m.insert("model_count", "{count} моделей");
+            m.insert("models_fetched_on_save", "Модели будут загружены с Base URL при сохранении.");
+            m.insert("save", "Сохранить");
+            m.insert("reset_key", "Сбросить ключ");
+            m.insert("api_key_set_in_env", "API key задан через переменную окружения");
+            m.insert("api_key_configured", "API key настроен");
+            m.insert("reset_api_key_env_hint", "Чтобы сбросить API key, удалите переменную окружения {env_var}.");
+            m.insert("paste_api_key", "Вставьте API key…");
+            m.insert("open_settings", "Открыть настройки");
+            m.insert("customize_keymaps", "Настроить сочетания");
+
             m
         });
         locales.insert("ar", {
@@ -844,6 +1107,19 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("close_window", "Close Window");
             m.insert("settings", "الإعدادات");
             m.insert("open_recent_project", "فتح مشروع حديث");
+            m.insert("appearance_description", "السمة والخط والحجم للواجهة والطرفية.");
+            m.insert("font_family", "الخط");
+            m.insert("font_size", "الحجم");
+            m.insert("font_system", "النظام");
+            m.insert("custom_shortcuts", "اختصارات مخصصة");
+            m.insert("keymap_settings", "اختصارات لوحة المفاتيح");
+            m.insert("keymap_settings_description", "عرض اختصارات لوحة المفاتيح وتخصيصها.");
+            m.insert("llm_providers", "مزودو LLM");
+            m.insert("llm_providers_description", "أضف مزودين متوافقين مع OpenAI أو Claude مع Base URL مخصص. تُجلب النماذج من واجهة البرمجة.");
+            m.insert("save", "حفظ");
+            m.insert("cancel", "إلغاء");
+            m.insert("open_settings", "فتح الإعدادات");
+
             m
         });
         locales.insert("hi", {
@@ -872,6 +1148,19 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("close_window", "Close Window");
             m.insert("settings", "सेटिंग्स");
             m.insert("open_recent_project", "हालिया प्रोजेक्ट खोलें");
+            m.insert("appearance_description", "इंटरफ़ेस और टर्मिनल के लिए थीम, फ़ॉन्ट और आकार।");
+            m.insert("font_family", "फ़ॉन्ट");
+            m.insert("font_size", "आकार");
+            m.insert("font_system", "सिस्टम");
+            m.insert("custom_shortcuts", "कस्टम शॉर्टकट");
+            m.insert("keymap_settings", "कीबोर्ड शॉर्टकट");
+            m.insert("keymap_settings_description", "कीबोर्ड शॉर्टकट देखें और अनुकूलित करें।");
+            m.insert("llm_providers", "LLM प्रदाता");
+            m.insert("llm_providers_description", "कस्टम Base URL के साथ OpenAI या Claude संगत प्रदाता जोड़ें। मॉडल API से लाए जाते हैं।");
+            m.insert("save", "सहेजें");
+            m.insert("cancel", "रद्द करें");
+            m.insert("open_settings", "सेटिंग्स खोलें");
+
             m
         });
         locales.insert("it", {
@@ -900,6 +1189,19 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("close_window", "Close Window");
             m.insert("settings", "Impostazioni");
             m.insert("open_recent_project", "Apri progetto recente");
+            m.insert("appearance_description", "Tema, carattere e dimensione per l’interfaccia e il terminale.");
+            m.insert("font_family", "Carattere");
+            m.insert("font_size", "Dimensione");
+            m.insert("font_system", "Sistema");
+            m.insert("custom_shortcuts", "Scorciatoie personalizzate");
+            m.insert("keymap_settings", "Scorciatoie da tastiera");
+            m.insert("keymap_settings_description", "Visualizza e personalizza le scorciatoie da tastiera.");
+            m.insert("llm_providers", "Provider LLM");
+            m.insert("llm_providers_description", "Aggiungi provider compatibili con OpenAI o Claude con Base URL personalizzato. I modelli vengono recuperati dall’API.");
+            m.insert("save", "Salva");
+            m.insert("cancel", "Annulla");
+            m.insert("open_settings", "Apri impostazioni");
+
             m
         });
         locales.insert("nl", {
@@ -928,6 +1230,19 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("close_window", "Close Window");
             m.insert("settings", "Instellingen");
             m.insert("open_recent_project", "Recent project openen");
+            m.insert("appearance_description", "Thema, lettertype en grootte voor de interface en terminal.");
+            m.insert("font_family", "Lettertype");
+            m.insert("font_size", "Grootte");
+            m.insert("font_system", "Systeem");
+            m.insert("custom_shortcuts", "Aangepaste sneltoetsen");
+            m.insert("keymap_settings", "Sneltoetsen");
+            m.insert("keymap_settings_description", "Bekijk en pas sneltoetsen aan.");
+            m.insert("llm_providers", "LLM-providers");
+            m.insert("llm_providers_description", "Voeg OpenAI- of Claude-compatibele providers toe met een aangepaste Base URL. Modellen worden via de API opgehaald.");
+            m.insert("save", "Opslaan");
+            m.insert("cancel", "Annuleren");
+            m.insert("open_settings", "Instellingen openen");
+
             m
         });
         locales.insert("tr", {
@@ -956,6 +1271,19 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("close_window", "Close Window");
             m.insert("settings", "Ayarlar");
             m.insert("open_recent_project", "Son projeyi aç");
+            m.insert("appearance_description", "Arayüz ve terminal için tema, yazı tipi ve boyut.");
+            m.insert("font_family", "Yazı tipi");
+            m.insert("font_size", "Boyut");
+            m.insert("font_system", "Sistem");
+            m.insert("custom_shortcuts", "Özel kısayollar");
+            m.insert("keymap_settings", "Klavye kısayolları");
+            m.insert("keymap_settings_description", "Klavye kısayollarını görüntüle ve özelleştir.");
+            m.insert("llm_providers", "LLM sağlayıcıları");
+            m.insert("llm_providers_description", "Özel Base URL ile OpenAI veya Claude uyumlu sağlayıcılar ekleyin. Modeller API’den alınır.");
+            m.insert("save", "Kaydet");
+            m.insert("cancel", "İptal");
+            m.insert("open_settings", "Ayarları aç");
+
             m
         });
         locales.insert("pl", {
@@ -984,6 +1312,19 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("close_window", "Close Window");
             m.insert("settings", "Ustawienia");
             m.insert("open_recent_project", "Otwórz ostatni projekt");
+            m.insert("appearance_description", "Motyw, czcionka i rozmiar interfejsu oraz terminala.");
+            m.insert("font_family", "Czcionka");
+            m.insert("font_size", "Rozmiar");
+            m.insert("font_system", "Systemowa");
+            m.insert("custom_shortcuts", "Własne skróty");
+            m.insert("keymap_settings", "Skróty klawiszowe");
+            m.insert("keymap_settings_description", "Przeglądaj i dostosuj skróty klawiszowe.");
+            m.insert("llm_providers", "Dostawcy LLM");
+            m.insert("llm_providers_description", "Dodawaj dostawców zgodnych z OpenAI lub Claude z własnym Base URL. Modele są pobierane z API.");
+            m.insert("save", "Zapisz");
+            m.insert("cancel", "Anuluj");
+            m.insert("open_settings", "Otwórz ustawienia");
+
             m
         });
         locales.insert("vi", {
@@ -1012,6 +1353,19 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("close_window", "Close Window");
             m.insert("settings", "Cài đặt");
             m.insert("open_recent_project", "Mở dự án gần đây");
+            m.insert("appearance_description", "Chủ đề, phông chữ và kích thước cho giao diện và terminal.");
+            m.insert("font_family", "Phông chữ");
+            m.insert("font_size", "Cỡ chữ");
+            m.insert("font_system", "Hệ thống");
+            m.insert("custom_shortcuts", "Phím tắt tùy chỉnh");
+            m.insert("keymap_settings", "Phím tắt bàn phím");
+            m.insert("keymap_settings_description", "Xem và tùy chỉnh phím tắt bàn phím.");
+            m.insert("llm_providers", "Nhà cung cấp LLM");
+            m.insert("llm_providers_description", "Thêm nhà cung cấp tương thích OpenAI hoặc Claude với Base URL tùy chỉnh. Mô hình được lấy từ API.");
+            m.insert("save", "Lưu");
+            m.insert("cancel", "Hủy");
+            m.insert("open_settings", "Mở cài đặt");
+
             m
         });
         locales.insert("th", {
@@ -1040,6 +1394,19 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("close_window", "Close Window");
             m.insert("settings", "การตั้งค่า");
             m.insert("open_recent_project", "เปิดโปรเจกต์ล่าสุด");
+            m.insert("appearance_description", "ธีม แบบอักษร และขนาดสำหรับอินเทอร์เฟซและเทอร์มินัล");
+            m.insert("font_family", "แบบอักษร");
+            m.insert("font_size", "ขนาด");
+            m.insert("font_system", "ระบบ");
+            m.insert("custom_shortcuts", "ทางลัดที่กำหนดเอง");
+            m.insert("keymap_settings", "ทางลัดแป้นพิมพ์");
+            m.insert("keymap_settings_description", "ดูและปรับแต่งทางลัดแป้นพิมพ์");
+            m.insert("llm_providers", "ผู้ให้บริการ LLM");
+            m.insert("llm_providers_description", "เพิ่มผู้ให้บริการที่เข้ากันได้กับ OpenAI หรือ Claude พร้อม Base URL ที่กำหนดเอง โมเดลจะดึงจาก API");
+            m.insert("save", "บันทึก");
+            m.insert("cancel", "ยกเลิก");
+            m.insert("open_settings", "เปิดการตั้งค่า");
+
             m
         });
         locales.insert("id", {
@@ -1068,6 +1435,19 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("close_window", "Close Window");
             m.insert("settings", "Pengaturan");
             m.insert("open_recent_project", "Buka proyek terbaru");
+            m.insert("appearance_description", "Tema, font, dan ukuran untuk antarmuka serta terminal.");
+            m.insert("font_family", "Font");
+            m.insert("font_size", "Ukuran");
+            m.insert("font_system", "Sistem");
+            m.insert("custom_shortcuts", "Pintasan kustom");
+            m.insert("keymap_settings", "Pintasan keyboard");
+            m.insert("keymap_settings_description", "Lihat dan sesuaikan pintasan keyboard.");
+            m.insert("llm_providers", "Penyedia LLM");
+            m.insert("llm_providers_description", "Tambahkan penyedia kompatibel OpenAI atau Claude dengan Base URL khusus. Model diambil dari API.");
+            m.insert("save", "Simpan");
+            m.insert("cancel", "Batal");
+            m.insert("open_settings", "Buka pengaturan");
+
             m
         });
         locales.insert("uk", {
@@ -1096,6 +1476,19 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("close_window", "Close Window");
             m.insert("settings", "Налаштування");
             m.insert("open_recent_project", "Відкрити недавній проєкт");
+            m.insert("appearance_description", "Тема, шрифт і розмір для інтерфейсу та термінала.");
+            m.insert("font_family", "Шрифт");
+            m.insert("font_size", "Розмір");
+            m.insert("font_system", "Системний");
+            m.insert("custom_shortcuts", "Власні скорочення");
+            m.insert("keymap_settings", "Сполучення клавіш");
+            m.insert("keymap_settings_description", "Перегляд і налаштування сполучень клавіш.");
+            m.insert("llm_providers", "Провайдери LLM");
+            m.insert("llm_providers_description", "Додавайте OpenAI- або Claude-сумісних провайдерів із власним Base URL. Моделі завантажуються з API.");
+            m.insert("save", "Зберегти");
+            m.insert("cancel", "Скасувати");
+            m.insert("open_settings", "Відкрити налаштування");
+
             m
         });
         locales
