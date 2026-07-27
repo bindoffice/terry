@@ -106,10 +106,15 @@ impl Render for SettingsWindow {
 
         let language_label = Self::current_language_label(cx);
         let current_font_size = theme_settings::ThemeSettings::get_global(cx).buffer_font_size(cx);
-        let current_font_family = theme_settings::ThemeSettings::get_global(cx)
+        let current_font_family_raw = theme_settings::ThemeSettings::get_global(cx)
             .buffer_font
             .family
             .clone();
+        let current_font_family = if current_font_family_raw.as_ref() == ".SystemUIFont" {
+            SharedString::from(i18n::t("font_system"))
+        } else {
+            current_font_family_raw
+        };
 
         div()
             .id("terry-settings")
@@ -158,26 +163,49 @@ impl Render for SettingsWindow {
                             .gap_1()
                             .child(Label::new(i18n::t("appearance")))
                             .child(
+                                Label::new(i18n::t("appearance_description"))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(
                                 h_flex()
                                     .gap_2()
                                     .child(
-                                        DropdownMenu::new(
-                                            "ui-font-family",
-                                            current_font_family.clone(),
-                                            self.font_family_menu.clone(),
-                                        )
-                                        .style(ui::DropdownStyle::Outlined)
-                                        .trigger_size(ButtonSize::Medium),
+                                        v_flex()
+                                            .gap_1()
+                                            .child(
+                                                Label::new(i18n::t("font_family"))
+                                                    .size(LabelSize::Small)
+                                                    .color(Color::Muted),
+                                            )
+                                            .child(
+                                                DropdownMenu::new(
+                                                    "ui-font-family",
+                                                    current_font_family.clone(),
+                                                    self.font_family_menu.clone(),
+                                                )
+                                                .style(ui::DropdownStyle::Outlined)
+                                                .trigger_size(ButtonSize::Medium),
+                                            ),
                                     )
                                     .child(
-                                        DropdownMenu::new(
-                                            "ui-font-size",
-                                            format!("{}px", f32::from(current_font_size)),
-                                            self.font_size_menu.clone(),
-                                        )
-                                        .style(ui::DropdownStyle::Outlined)
-                                        .trigger_size(ButtonSize::Medium),
-                                    )
+                                        v_flex()
+                                            .gap_1()
+                                            .child(
+                                                Label::new(i18n::t("font_size"))
+                                                    .size(LabelSize::Small)
+                                                    .color(Color::Muted),
+                                            )
+                                            .child(
+                                                DropdownMenu::new(
+                                                    "ui-font-size",
+                                                    format!("{}px", f32::from(current_font_size)),
+                                                    self.font_size_menu.clone(),
+                                                )
+                                                .style(ui::DropdownStyle::Outlined)
+                                                .trigger_size(ButtonSize::Medium),
+                                            ),
+                                    ),
                             )
                             .child(
                                 Button::new("select-theme", i18n::t("select_theme"))
@@ -316,11 +344,11 @@ fn build_font_family_menu(window: &mut Window, cx: &mut App) -> Entity<ContextMe
         ] {
             let family_str = family.to_string();
             let label = if family == ".SystemUIFont" {
-                "System"
+                i18n::t("font_system")
             } else {
-                family
+                family.to_string()
             };
-            menu = menu.entry(label.to_string(), None, move |_window, cx| {
+            menu = menu.entry(label, None, move |_window, cx| {
                 let fs = <dyn Fs>::global(cx);
                 let font_family = family_str.clone();
                 update_settings_file(fs, cx, move |content, _| {

@@ -1,29 +1,85 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
+use anthropic::AnthropicModelMode;
+use client::Client;
 use editor::Editor;
+use fs::Fs;
+use futures::AsyncReadExt as _;
 use gpui::{
-    AnyView, App, AppContext as _, Context, Entity, FocusHandle, Focusable, Render, Subscription,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable, Render, Subscription,
     TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, px,
 };
+use http_client::{AsyncBody, CustomHeaders, HttpClient, Method, Request as HttpRequest};
 use language_model::{
-    CreateProviderSettingsView, IconOrSvg, InlineDescription, LanguageModelProvider,
-    LanguageModelProviderId, LanguageModelRegistry, ProviderSettingsView,
+    Event as LanguageModelRegistryEvent, LanguageModelProviderId, LanguageModelRegistry,
+};
+use language_models::AllLanguageModelSettings;
+use serde::Deserialize;
+use settings::{
+    AnthropicCompatibleAvailableModel, AnthropicCompatibleModelCapabilities,
+    AnthropicCompatibleSettingsContent, ModelMode, OpenAiCompatibleAvailableModel,
+    OpenAiCompatibleModelCapabilities, OpenAiCompatibleSettingsContent, Settings, SettingsStore,
+    update_settings_file, update_settings_file_with_completion,
 };
 use theme::ActiveTheme;
 use ui::{
-    Button, ButtonLink, ButtonSize, ButtonStyle, Color, ConfiguredApiCard, Icon, Label, LabelSize,
-    prelude::*,
+    Button, ButtonSize, ButtonStyle, Color, Icon, IconButton, IconName, IconSize, Label, LabelSize,
+    Tooltip, prelude::*,
 };
 use util::ResultExt;
 
 actions!(llm_provider_settings, [OpenLlmProviderSettings]);
 
+const OPENAI_DEFAULT_URL: &str = "https://api.openai.com/v1";
+const CLAUDE_DEFAULT_URL: &str = "https://api.anthropic.com";
+const DEFAULT_OPENAI_MAX_TOKENS: u64 = 128_000;
+const DEFAULT_OPENAI_MAX_OUTPUT_TOKENS: u64 = 16_384;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProviderKind {
+    OpenAi,
+    Claude,
+}
+
+impl ProviderKind {
+    fn label(self) -> SharedString {
+        match self {
+            Self::OpenAi => SharedString::from("OpenAI"),
+            Self::Claude => SharedString::from("Claude"),
+        }
+    }
+
+    fn icon(self) -> IconName {
+        match self {
+            Self::OpenAi => IconName::AiOpenAi,
+            Self::Claude => IconName::AiClaude,
+        }
+    }
+
+    fn default_url(self) -> &'static str {
+        match self {
+            Self::OpenAi => OPENAI_DEFAULT_URL,
+            Self::Claude => CLAUDE_DEFAULT_URL,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ListedProvider {
+    kind: ProviderKind,
+    name: Arc<str>,
+    api_url: String,
+    model_count: usize,
+}
+
+enum Page {
+    List,
+    Add,
+}
+
 pub fn init(cx: &mut App) {
     cx.on_action(|_: &OpenLlmProviderSettings, cx| open_llm_provider_settings(cx));
 
-    // Route Zed-style "open the AI settings page" requests to our window so
-    // existing call sites (e.g. the agent panel) keep working.
     cx.on_action(|action: &zed_actions::OpenSettingsPage, cx| {
         if action.page.eq_ignore_ascii_case("AI")
             || action.page.eq_ignore_ascii_case("LLM Providers")
@@ -73,61 +129,384 @@ fn open_llm_provider_settings(cx: &mut App) {
 
 pub struct LlmProviderSettingsWindow {
     focus_handle: FocusHandle,
-    _registry_subscription: Subscription,
-    /// Cached configuration views for `Inline`/`SubPage` providers, keyed by
-    /// provider id so they survive re-renders.
-    provider_views: HashMap<LanguageModelProviderId, AnyView>,
-    /// Single-line editors used to type API keys for `ApiKey` providers.
-    api_key_editors: HashMap<LanguageModelProviderId, Entity<Editor>>,
+    page: Page,
+    add_kind: ProviderKind,
+    name_editor: Entity<Editor>,
+    base_url_editor: Entity<Editor>,
+    api_key_editor: Entity<Editor>,
+    status: Option<SharedString>,
+    error: Option<SharedString>,
+    busy: bool,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl LlmProviderSettingsWindow {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let registry = LanguageModelRegistry::global(cx);
-        let _registry_subscription = cx.observe(&registry, |_, _, cx| cx.notify());
-        let _ = window;
+
+        let subscriptions = vec![
+            cx.observe(&registry, |_, _, cx| cx.notify()),
+            cx.subscribe(&registry, |_, _, event, cx| {
+                if matches!(
+                    event,
+                    LanguageModelRegistryEvent::ProviderStateChanged(_)
+                        | LanguageModelRegistryEvent::ProvidersChanged
+                        | LanguageModelRegistryEvent::AddedProvider(_)
+                        | LanguageModelRegistryEvent::RemovedProvider(_)
+                ) {
+                    cx.notify();
+                }
+            }),
+            cx.observe_global::<SettingsStore>(|_, cx| cx.notify()),
+        ];
+
+        let name_editor = new_single_line_editor(i18n::t("provider_name_placeholder").as_str(), "", window, cx);
+        let base_url_editor =
+            new_single_line_editor(OPENAI_DEFAULT_URL, OPENAI_DEFAULT_URL, window, cx);
+        let api_key_editor =
+            new_single_line_editor(i18n::t("paste_api_key").as_str(), "", window, cx);
+
         Self {
             focus_handle,
-            _registry_subscription,
-            provider_views: HashMap::default(),
-            api_key_editors: HashMap::default(),
+            page: Page::List,
+            add_kind: ProviderKind::OpenAi,
+            name_editor,
+            base_url_editor,
+            api_key_editor,
+            status: None,
+            error: None,
+            busy: false,
+            _subscriptions: subscriptions,
         }
     }
 
-    fn api_key_editor(
-        &mut self,
-        provider_id: &LanguageModelProviderId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<Editor> {
-        if let Some(editor) = self.api_key_editors.get(provider_id) {
-            return editor.clone();
+    fn listed_providers(&self, cx: &App) -> Vec<ListedProvider> {
+        let settings = AllLanguageModelSettings::get_global(cx);
+        let mut providers = Vec::new();
+
+        for (name, config) in &settings.openai_compatible {
+            providers.push(ListedProvider {
+                kind: ProviderKind::OpenAi,
+                name: name.clone(),
+                api_url: config.api_url.clone(),
+                model_count: config.available_models.len(),
+            });
         }
-        let editor = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text(i18n::t("paste_api_key").as_str(), window, cx);
-            editor
+        for (name, config) in &settings.anthropic_compatible {
+            if settings.openai_compatible.contains_key(name) {
+                continue;
+            }
+            providers.push(ListedProvider {
+                kind: ProviderKind::Claude,
+                name: name.clone(),
+                api_url: config.api_url.clone(),
+                model_count: config.available_models.len(),
+            });
+        }
+
+        providers.sort_by(|a, b| a.name.cmp(&b.name));
+        providers
+    }
+
+    fn show_add_form(&mut self, kind: ProviderKind, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = Page::Add;
+        self.add_kind = kind;
+        self.error = None;
+        self.status = None;
+        self.name_editor.update(cx, |editor, cx| {
+            editor.set_text("", window, cx);
         });
-        self.api_key_editors
-            .insert(provider_id.clone(), editor.clone());
-        editor
+        self.base_url_editor.update(cx, |editor, cx| {
+            editor.set_placeholder_text(kind.default_url(), window, cx);
+            editor.set_text(kind.default_url(), window, cx);
+        });
+        self.api_key_editor.update(cx, |editor, cx| {
+            editor.set_text("", window, cx);
+        });
+        cx.notify();
     }
 
-    fn provider_config_view(
+    fn cancel_add(&mut self, cx: &mut Context<Self>) {
+        self.page = Page::List;
+        self.error = None;
+        self.status = None;
+        self.busy = false;
+        cx.notify();
+    }
+
+    fn save_new_provider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+
+        let kind = self.add_kind;
+        let name = self.name_editor.read(cx).text(cx).trim().to_string();
+        let api_url = self.base_url_editor.read(cx).text(cx).trim().to_string();
+        let api_key = self.api_key_editor.read(cx).text(cx).trim().to_string();
+
+        if name.is_empty() {
+            self.error = Some(i18n::t("provider_name_required").into());
+            cx.notify();
+            return;
+        }
+        if api_url.is_empty() {
+            self.error = Some(i18n::t("base_url_required").into());
+            cx.notify();
+            return;
+        }
+        if api_key.is_empty() {
+            self.error = Some(i18n::t("api_key_required").into());
+            cx.notify();
+            return;
+        }
+
+        let registry = LanguageModelRegistry::read_global(cx);
+        let provider_id = LanguageModelProviderId(name.clone().into());
+        if registry.provider(&provider_id).is_some() {
+            self.error = Some(i18n::t("provider_name_taken").into());
+            cx.notify();
+            return;
+        }
+
+        self.busy = true;
+        self.error = None;
+        self.status = Some(i18n::t("fetching_models").into());
+        cx.notify();
+
+        let http = cx.http_client();
+        let fs = <dyn Fs>::global(cx);
+
+        cx.spawn_in(window, async move |this, cx| {
+            let fetch_result = match kind {
+                ProviderKind::OpenAi => fetch_openai_models(http.as_ref(), &api_url, &api_key)
+                    .await
+                    .map(FetchedModels::OpenAi),
+                ProviderKind::Claude => fetch_claude_models(http.as_ref(), &api_url, &api_key)
+                    .await
+                    .map(FetchedModels::Claude),
+            };
+
+            let models = match fetch_result {
+                Ok(models) if models.is_empty() => {
+                    this.update(cx, |this, cx| {
+                        this.busy = false;
+                        this.status = None;
+                        this.error = Some(i18n::t("no_models_found").into());
+                        cx.notify();
+                    })?;
+                    return anyhow::Ok(());
+                }
+                Ok(models) => models,
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.busy = false;
+                        this.status = None;
+                        this.error = Some(error.to_string().into());
+                        cx.notify();
+                    })?;
+                    return anyhow::Ok(());
+                }
+            };
+
+            let model_count = models.len();
+            let provider_name = name.clone();
+            let settings_update = cx.update(|_window, cx| {
+                update_settings_file_with_completion(fs, cx, move |settings, _cx| {
+                    let language_models = settings.language_models.get_or_insert_default();
+                    match models {
+                        FetchedModels::OpenAi(available_models) => {
+                            language_models
+                                .openai_compatible
+                                .get_or_insert_default()
+                                .insert(
+                                    Arc::from(provider_name.as_str()),
+                                    OpenAiCompatibleSettingsContent {
+                                        api_url: api_url.clone(),
+                                        available_models,
+                                        custom_headers: None,
+                                    },
+                                );
+                        }
+                        FetchedModels::Claude(available_models) => {
+                            language_models
+                                .anthropic_compatible
+                                .get_or_insert_default()
+                                .insert(
+                                    Arc::from(provider_name.as_str()),
+                                    AnthropicCompatibleSettingsContent {
+                                        api_url: api_url.clone(),
+                                        available_models,
+                                        custom_headers: None,
+                                    },
+                                );
+                        }
+                    }
+                })
+            })?;
+
+            settings_update
+                .await
+                .map_err(|_| anyhow::anyhow!("Settings update was canceled"))??;
+
+            let provider_id = LanguageModelProviderId(name.into());
+            let set_key = cx.update(|_window, cx| {
+                let provider = LanguageModelRegistry::read_global(cx)
+                    .provider(&provider_id)
+                    .ok_or_else(|| anyhow::anyhow!("Provider was not registered"))?;
+                anyhow::Ok(provider.set_api_key(Some(api_key), cx))
+            })??;
+            set_key.await?;
+
+            this.update(cx, |this, cx| {
+                this.busy = false;
+                this.status = None;
+                this.error = None;
+                this.page = Page::List;
+                this.status = Some(
+                    i18n::t("provider_added_with_models")
+                        .replace("{count}", &model_count.to_string())
+                        .into(),
+                );
+                cx.notify();
+            })?;
+
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn refresh_models(
         &mut self,
-        provider_id: &LanguageModelProviderId,
-        create_view: &CreateProviderSettingsView,
+        provider: ListedProvider,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyView {
-        if let Some(view) = self.provider_views.get(provider_id) {
-            return view.clone();
+    ) {
+        if self.busy {
+            return;
         }
-        let view = create_view(window, cx);
-        self.provider_views
-            .insert(provider_id.clone(), view.clone());
-        view
+
+        self.busy = true;
+        self.error = None;
+        self.status = Some(i18n::t("fetching_models").into());
+        cx.notify();
+
+        let http = cx.http_client();
+        let fs = <dyn Fs>::global(cx);
+        let typed_key = self.api_key_editor.read(cx).text(cx).trim().to_string();
+        let kind = provider.kind;
+        let name = provider.name.clone();
+        let api_url = provider.api_url.clone();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let api_key = match resolve_api_key(&api_url, &typed_key, cx).await {
+                Ok(key) => key,
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.busy = false;
+                        this.status = None;
+                        this.error = Some(error.to_string().into());
+                        cx.notify();
+                    })?;
+                    return anyhow::Ok(());
+                }
+            };
+
+            let fetch_result = match kind {
+                ProviderKind::OpenAi => fetch_openai_models(http.as_ref(), &api_url, &api_key)
+                    .await
+                    .map(FetchedModels::OpenAi),
+                ProviderKind::Claude => fetch_claude_models(http.as_ref(), &api_url, &api_key)
+                    .await
+                    .map(FetchedModels::Claude),
+            };
+
+            let models = match fetch_result {
+                Ok(models) if models.is_empty() => {
+                    this.update(cx, |this, cx| {
+                        this.busy = false;
+                        this.status = None;
+                        this.error = Some(i18n::t("no_models_found").into());
+                        cx.notify();
+                    })?;
+                    return anyhow::Ok(());
+                }
+                Ok(models) => models,
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.busy = false;
+                        this.status = None;
+                        this.error = Some(error.to_string().into());
+                        cx.notify();
+                    })?;
+                    return anyhow::Ok(());
+                }
+            };
+
+            let model_count = models.len();
+            let settings_update = cx.update(|_window, cx| {
+                update_settings_file_with_completion(fs, cx, move |settings, _cx| {
+                    let language_models = settings.language_models.get_or_insert_default();
+                    match models {
+                        FetchedModels::OpenAi(available_models) => {
+                            if let Some(entry) = language_models
+                                .openai_compatible
+                                .get_or_insert_default()
+                                .get_mut(name.as_ref())
+                            {
+                                entry.available_models = available_models;
+                            }
+                        }
+                        FetchedModels::Claude(available_models) => {
+                            if let Some(entry) = language_models
+                                .anthropic_compatible
+                                .get_or_insert_default()
+                                .get_mut(name.as_ref())
+                            {
+                                entry.available_models = available_models;
+                            }
+                        }
+                    }
+                })
+            })?;
+
+            settings_update
+                .await
+                .map_err(|_| anyhow::anyhow!("Settings update was canceled"))??;
+
+            this.update(cx, |this, cx| {
+                this.busy = false;
+                this.error = None;
+                this.status = Some(
+                    i18n::t("models_refreshed")
+                        .replace("{count}", &model_count.to_string())
+                        .into(),
+                );
+                cx.notify();
+            })?;
+
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn remove_provider(&mut self, provider: ListedProvider, cx: &mut Context<Self>) {
+        let fs = <dyn Fs>::global(cx);
+        let name = provider.name.clone();
+        update_settings_file(fs, cx, move |settings, _| {
+            let Some(language_models) = settings.language_models.as_mut() else {
+                return;
+            };
+            if let Some(providers) = language_models.openai_compatible.as_mut() {
+                providers.remove(name.as_ref());
+            }
+            if let Some(providers) = language_models.anthropic_compatible.as_mut() {
+                providers.remove(name.as_ref());
+            }
+        });
+        self.status = Some(i18n::t("provider_removed").into());
+        self.error = None;
+        cx.notify();
     }
 }
 
@@ -139,13 +518,6 @@ impl Focusable for LlmProviderSettingsWindow {
 
 impl Render for LlmProviderSettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let providers = LanguageModelRegistry::read_global(cx).visible_providers();
-
-        let mut sections = Vec::new();
-        for provider in providers {
-            sections.push(self.render_provider_section(provider, window, cx));
-        }
-
         div()
             .id("terry-llm-provider-settings")
             .key_context("LlmProviderSettings")
@@ -165,6 +537,7 @@ impl Render for LlmProviderSettingsWindow {
                     .child(
                         v_flex()
                             .w_full()
+                            .gap_4()
                             .child(
                                 v_flex()
                                     .pt_4()
@@ -179,243 +552,390 @@ impl Render for LlmProviderSettingsWindow {
                                             .color(Color::Muted),
                                     ),
                             )
-                            .children(sections),
+                            .children(self.status.clone().map(|status| {
+                                Label::new(status).size(LabelSize::Small).color(Color::Success)
+                            }))
+                            .children(self.error.clone().map(|error| {
+                                Label::new(error).size(LabelSize::Small).color(Color::Error)
+                            }))
+                            .child(match self.page {
+                                Page::List => self.render_list(window, cx),
+                                Page::Add => self.render_add_form(cx),
+                            }),
                     ),
             )
     }
 }
 
 impl LlmProviderSettingsWindow {
-    fn render_provider_section(
-        &mut self,
-        provider: Arc<dyn LanguageModelProvider>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let provider_id = provider.id();
-        let provider_name = provider.name().0.clone();
-
-        let body = match provider.settings_view(cx) {
-            Some(ProviderSettingsView::ApiKey(config)) => {
-                self.render_api_key_body(&provider, config, window, cx)
-            }
-            Some(ProviderSettingsView::Inline(settings)) => {
-                let view =
-                    self.provider_config_view(&provider_id, &settings.create_view, window, cx);
-                render_inline_body(
-                    provider_name.clone(),
-                    settings.title,
-                    settings.description,
-                    view,
-                )
-            }
-            Some(ProviderSettingsView::SubPage(settings)) => {
-                let view =
-                    self.provider_config_view(&provider_id, &settings.create_view, window, cx);
-                render_inline_body(provider_name.clone(), None, settings.description, view)
-            }
-            None => div().into_any_element(),
-        };
+    fn render_list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let providers = self.listed_providers(cx);
+        let busy = self.busy;
 
         v_flex()
-            .min_w_0()
             .w_full()
-            .pt_4()
-            .gap_1p5()
-            .child(render_provider_header(provider_name, provider.icon(), cx))
-            .child(body)
-            .into_any_element()
-    }
-
-    fn render_api_key_body(
-        &mut self,
-        provider: &Arc<dyn LanguageModelProvider>,
-        config: language_model::ApiKeyConfiguration,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let provider_id = provider.id();
-        let provider_name = provider.name().0.clone();
-        let has_key = config.has_key;
-        let is_from_env_var = config.is_from_env_var;
-        let env_var_name = config.env_var_name;
-        let api_key_url = config.api_key_url;
-
-        if has_key {
-            let configured_label = if is_from_env_var {
-                i18n::t("api_key_set_in_env")
-            } else {
-                i18n::t("api_key_configured")
-            };
-            let card = ConfiguredApiCard::new(
-                SharedString::from(format!("reset-api-key-{}", provider_id.0)),
-                configured_label,
-            )
-            .button_label(i18n::t("reset_key"))
-            .disabled(is_from_env_var)
-            .when(is_from_env_var, |this| {
-                this.tooltip_label(
-                    i18n::t("reset_api_key_env_hint").replace("{env_var}", env_var_name.as_ref()),
-                )
-            })
-            .on_click({
-                let provider = provider.clone();
-                move |_, _, cx| {
-                    provider.set_api_key(None, cx).detach_and_log_err(cx);
-                }
-            })
-            .into_any_element();
-
-            return v_flex().gap_2().child(card).into_any_element();
-        }
-
-        let editor = self.api_key_editor(&provider_id, window, cx);
-
-        v_flex()
-            .gap_2()
-            .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .flex_wrap()
-                    .gap_0p5()
-                    .child(Label::new(i18n::t("visit_the")).size(LabelSize::Small).color(Color::Muted))
-                    .child(
-                        ButtonLink::new(
-                            SharedString::from(
-                                i18n::t("provider_dashboard")
-                                    .replace("{provider}", provider_name.as_ref()),
-                            ),
-                            api_key_url.to_string(),
-                        )
-                        .no_icon(true)
-                        .label_size(LabelSize::Small)
-                        .label_color(Color::Muted),
-                    )
-                    .child(
-                        Label::new(i18n::t("to_generate_api_key"))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    ),
-            )
-            .child(
-                Label::new(
-                    i18n::t("or_set_env_var").replace("{env_var}", env_var_name.as_ref()),
-                )
-                .size(LabelSize::XSmall)
-                .color(Color::Muted),
-            )
+            .gap_3()
             .child(
                 h_flex()
                     .w_full()
                     .gap_2()
                     .child(
-                        div()
-                            .flex_1()
-                            .h_5()
-                            .px_1()
-                            .rounded_md()
-                            .bg(cx.theme().colors().editor_background)
-                            .border_1()
-                            .border_color(cx.theme().colors().border)
-                            .on_action({
-                                let provider = provider.clone();
-                                let editor = editor.clone();
-                                move |_: &menu::Confirm, _window, cx| {
-                                    let key = editor.read(cx).text(cx);
-                                    if !key.trim().is_empty() {
-                                        provider
-                                            .set_api_key(Some(key), cx)
-                                            .detach_and_log_err(cx);
-                                    }
-                                }
-                            })
-                            .child(editor.clone()),
+                        Button::new("add-openai-provider", i18n::t("add_openai_provider"))
+                            .style(ButtonStyle::Filled)
+                            .size(ButtonSize::Medium)
+                            .start_icon(Icon::new(IconName::AiOpenAi).size(IconSize::Small))
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_add_form(ProviderKind::OpenAi, window, cx);
+                            })),
                     )
                     .child(
-                        Button::new(
-                            SharedString::from(format!("save-api-key-{}", provider_id.0)),
-                            i18n::t("save"),
-                        )
-                        .style(ButtonStyle::Filled)
-                        .size(ButtonSize::Medium)
-                        .on_click({
-                            let provider = provider.clone();
-                            let editor = editor.clone();
-                            move |_, _window, cx| {
-                                let key = editor.read(cx).text(cx);
-                                if !key.trim().is_empty() {
-                                    provider
-                                        .set_api_key(Some(key), cx)
-                                        .detach_and_log_err(cx);
-                                }
-                            }
-                        }),
+                        Button::new("add-claude-provider", i18n::t("add_claude_provider"))
+                            .style(ButtonStyle::Outlined)
+                            .size(ButtonSize::Medium)
+                            .start_icon(Icon::new(IconName::AiClaude).size(IconSize::Small))
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_add_form(ProviderKind::Claude, window, cx);
+                            })),
+                    ),
+            )
+            .when(providers.is_empty(), |this| {
+                this.child(
+                    Label::new(i18n::t("no_providers_yet"))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+            })
+            .children(providers.into_iter().map(|provider| {
+                self.render_provider_card(provider, busy, window, cx)
+            }))
+            .into_any_element()
+    }
+
+    fn render_provider_card(
+        &mut self,
+        provider: ListedProvider,
+        busy: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let name = provider.name.clone();
+        let kind = provider.kind;
+        let api_url = provider.api_url.clone();
+        let model_count = provider.model_count;
+
+        v_flex()
+            .w_full()
+            .gap_2()
+            .p_3()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .min_w_0()
+                            .child(Icon::new(kind.icon()).color(Color::Muted))
+                            .child(
+                                v_flex()
+                                    .min_w_0()
+                                    .child(Label::new(name.to_string()))
+                                    .child(
+                                        Label::new(kind.label())
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                IconButton::new(
+                                    SharedString::from(format!("refresh-{}", name)),
+                                    IconName::RotateCw,
+                                )
+                                .tooltip(Tooltip::text(i18n::t("refresh_models")))
+                                .disabled(busy)
+                                .on_click({
+                                    let provider = provider.clone();
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.refresh_models(provider.clone(), window, cx);
+                                    })
+                                }),
+                            )
+                            .child(
+                                IconButton::new(
+                                    SharedString::from(format!("remove-{}", name)),
+                                    IconName::Trash,
+                                )
+                                .tooltip(Tooltip::text(i18n::t("remove_provider")))
+                                .disabled(busy)
+                                .on_click({
+                                    let provider = provider.clone();
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.remove_provider(provider.clone(), cx);
+                                    })
+                                }),
+                            ),
+                    ),
+            )
+            .child(
+                Label::new(api_url)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new(
+                    i18n::t("model_count").replace("{count}", &model_count.to_string()),
+                )
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+            )
+            .into_any_element()
+    }
+
+    fn render_add_form(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let kind = self.add_kind;
+        let busy = self.busy;
+
+        v_flex()
+            .w_full()
+            .gap_3()
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .child(Icon::new(kind.icon()).color(Color::Muted))
+                    .child(Label::new(
+                        i18n::t("add_provider_title").replace("{kind}", kind.label().as_ref()),
+                    )),
+            )
+            .child(div().h_px().w_full().bg(cx.theme().colors().border_variant))
+            .child(self.render_field(
+                SharedString::from(i18n::t("provider_name")),
+                self.name_editor.clone(),
+                cx,
+            ))
+            .child(self.render_field(
+                SharedString::from(i18n::t("base_url")),
+                self.base_url_editor.clone(),
+                cx,
+            ))
+            .child(self.render_field(
+                SharedString::from(i18n::t("api_key")),
+                self.api_key_editor.clone(),
+                cx,
+            ))
+            .child(
+                Label::new(i18n::t("models_fetched_on_save"))
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("cancel-add-provider", i18n::t("cancel"))
+                            .style(ButtonStyle::Outlined)
+                            .size(ButtonSize::Medium)
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.cancel_add(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("save-add-provider", i18n::t("save_and_fetch_models"))
+                            .style(ButtonStyle::Filled)
+                            .size(ButtonSize::Medium)
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.save_new_provider(window, cx);
+                            })),
                     ),
             )
             .into_any_element()
     }
+
+    fn render_field(
+        &self,
+        label: SharedString,
+        editor: Entity<Editor>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        v_flex()
+            .gap_1()
+            .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
+            .child(
+                div()
+                    .w_full()
+                    .h_5()
+                    .px_1()
+                    .rounded_md()
+                    .bg(cx.theme().colors().editor_background)
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(editor),
+            )
+    }
 }
 
-fn render_provider_header(
-    provider_name: SharedString,
-    icon: IconOrSvg,
+fn new_single_line_editor(
+    placeholder: &str,
+    text: &str,
+    window: &mut Window,
     cx: &mut Context<LlmProviderSettingsWindow>,
-) -> impl IntoElement {
-    let icon = match icon {
-        IconOrSvg::Svg(path) => Icon::from_external_svg(path),
-        IconOrSvg::Icon(name) => Icon::new(name),
-    }
-    .color(Color::Muted);
-
-    v_flex()
-        .w_full()
-        .gap_1p5()
-        .child(
-            h_flex()
-                .gap_1p5()
-                .child(icon)
-                .child(Label::new(provider_name).size(LabelSize::Default)),
-        )
-        .child(div().h_px().w_full().bg(cx.theme().colors().border_variant))
+) -> Entity<Editor> {
+    let placeholder = placeholder.to_string();
+    let text = text.to_string();
+    cx.new(|cx| {
+        let mut editor = Editor::single_line(window, cx);
+        editor.set_placeholder_text(placeholder.as_str(), window, cx);
+        if !text.is_empty() {
+            editor.set_text(text, window, cx);
+        }
+        editor
+    })
 }
 
-fn render_inline_body(
-    _provider_name: SharedString,
-    title: Option<SharedString>,
-    description: Option<InlineDescription>,
-    view: AnyView,
-) -> AnyElement {
-    v_flex()
-        .pt_1()
-        .w_full()
-        .min_w_0()
-        .gap_2()
-        .when_some(title, |this, title| this.child(Label::new(title)))
-        .when_some(description, |this, description| {
-            this.child(render_inline_description(description))
+enum FetchedModels {
+    OpenAi(Vec<OpenAiCompatibleAvailableModel>),
+    Claude(Vec<AnthropicCompatibleAvailableModel>),
+}
+
+impl FetchedModels {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::OpenAi(models) => models.is_empty(),
+            Self::Claude(models) => models.is_empty(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::OpenAi(models) => models.len(),
+            Self::Claude(models) => models.len(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiListModelsResponse {
+    #[serde(default)]
+    data: Vec<OpenAiModelEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModelEntry {
+    id: String,
+}
+
+async fn fetch_openai_models(
+    client: &dyn HttpClient,
+    api_url: &str,
+    api_key: &str,
+) -> anyhow::Result<Vec<OpenAiCompatibleAvailableModel>> {
+    let api_url = api_url.trim_end_matches('/');
+    let uri = format!("{api_url}/models");
+    let request = HttpRequest::builder()
+        .method(Method::GET)
+        .uri(&uri)
+        .header("Accept", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .body(AsyncBody::default())?;
+
+    let mut response = client.send(request).await?;
+    let mut body = String::new();
+    response.body_mut().read_to_string(&mut body).await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "failed to list OpenAI models: {} {}",
+        response.status(),
+        body,
+    );
+
+    let parsed: OpenAiListModelsResponse = serde_json::from_str(&body)?;
+    Ok(parsed
+        .data
+        .into_iter()
+        .filter(|entry| !entry.id.trim().is_empty())
+        .map(|entry| OpenAiCompatibleAvailableModel {
+            name: entry.id,
+            display_name: None,
+            max_tokens: DEFAULT_OPENAI_MAX_TOKENS,
+            max_output_tokens: Some(DEFAULT_OPENAI_MAX_OUTPUT_TOKENS),
+            max_completion_tokens: Some(DEFAULT_OPENAI_MAX_OUTPUT_TOKENS),
+            reasoning_effort: None,
+            capabilities: OpenAiCompatibleModelCapabilities::default(),
         })
-        .child(view)
-        .into_any_element()
+        .collect())
 }
 
-fn render_inline_description(description: InlineDescription) -> AnyElement {
-    match description {
-        InlineDescription::ApiKeyUrl(url) => h_flex()
-            .gap_0p5()
-            .child(
-                Label::new(i18n::t("to_find_api_key"))
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            )
-            .child(
-                ButtonLink::new(SharedString::from(i18n::t("provider_dashboard_dot")), url.to_string())
-                    .label_size(LabelSize::Small),
-            )
-            .into_any_element(),
-        InlineDescription::Text(text) => Label::new(text)
-            .size(LabelSize::Small)
-            .color(Color::Muted)
-            .into_any_element(),
+async fn fetch_claude_models(
+    client: &dyn HttpClient,
+    api_url: &str,
+    api_key: &str,
+) -> anyhow::Result<Vec<AnthropicCompatibleAvailableModel>> {
+    let models = anthropic::list_models(
+        client,
+        api_url.trim_end_matches('/'),
+        api_key,
+        &CustomHeaders::default(),
+    )
+    .await?;
+
+    Ok(models
+        .into_iter()
+        .map(|model| AnthropicCompatibleAvailableModel {
+            name: model.id,
+            display_name: Some(model.display_name),
+            max_tokens: model.max_input_tokens,
+            tool_override: model.tool_override,
+            max_output_tokens: Some(model.max_output_tokens),
+            default_temperature: Some(model.default_temperature),
+            extra_beta_headers: model.extra_beta_headers,
+            mode: Some(match model.mode {
+                AnthropicModelMode::Default => ModelMode::Default,
+                AnthropicModelMode::Thinking { budget_tokens } => {
+                    ModelMode::Thinking { budget_tokens }
+                }
+                AnthropicModelMode::AdaptiveThinking => ModelMode::Adaptive,
+            }),
+            capabilities: AnthropicCompatibleModelCapabilities {
+                tools: true,
+                images: model.supports_images,
+                prompt_caching: false,
+            },
+        })
+        .collect())
+}
+
+async fn resolve_api_key(
+    api_url: &str,
+    typed_key: &str,
+    cx: &mut gpui::AsyncWindowContext,
+) -> anyhow::Result<String> {
+    if !typed_key.is_empty() {
+        return Ok(typed_key.to_string());
     }
+
+    let credentials_provider =
+        cx.update(|_window, cx| Client::global(cx).credentials_provider())?;
+    let credentials = credentials_provider
+        .read_credentials(api_url, cx)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!(i18n::t("api_key_required_for_refresh")))?;
+    let key = String::from_utf8(credentials.1)
+        .map_err(|_| anyhow::anyhow!(i18n::t("api_key_required_for_refresh")))?;
+    if key.trim().is_empty() {
+        anyhow::bail!(i18n::t("api_key_required_for_refresh"));
+    }
+    Ok(key)
 }

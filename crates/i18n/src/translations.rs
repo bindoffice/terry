@@ -34,6 +34,13 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             );
             m.insert("language_system", "System");
             m.insert("appearance", "Appearance");
+            m.insert(
+                "appearance_description",
+                "Theme, font family, and font size for the interface and terminal.",
+            );
+            m.insert("font_family", "Font");
+            m.insert("font_size", "Size");
+            m.insert("font_system", "System");
             m.insert("select_theme", "Select Theme…");
             m.insert("custom_shortcuts", "Custom Shortcuts");
             m.insert("keymap_settings", "Keyboard Shortcuts");
@@ -57,8 +64,32 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("llm_providers", "LLM Providers");
             m.insert(
                 "llm_providers_description",
-                "Configure API keys and settings for your AI providers.",
+                "Add OpenAI- or Claude-compatible providers with a custom Base URL. Models are fetched from the API.",
             );
+            m.insert("base_url", "Base URL");
+            m.insert("api_key", "API Key");
+            m.insert("provider_name", "Provider Name");
+            m.insert("provider_name_placeholder", "e.g. my-proxy");
+            m.insert("add_openai_provider", "Add OpenAI Provider");
+            m.insert("add_claude_provider", "Add Claude Provider");
+            m.insert("add_provider_title", "Add {kind} Provider");
+            m.insert("no_providers_yet", "No providers yet. Add an OpenAI or Claude compatible endpoint.");
+            m.insert("save_and_fetch_models", "Save & Fetch Models");
+            m.insert("cancel", "Cancel");
+            m.insert("fetching_models", "Fetching models…");
+            m.insert("no_models_found", "No models returned by this endpoint.");
+            m.insert("provider_name_required", "Provider name is required.");
+            m.insert("base_url_required", "Base URL is required.");
+            m.insert("api_key_required", "API key is required.");
+            m.insert("api_key_required_for_refresh", "API key not found. Re-add the provider or paste a key before refreshing.");
+            m.insert("provider_name_taken", "A provider with this name already exists.");
+            m.insert("provider_added_with_models", "Provider added with {count} models.");
+            m.insert("models_refreshed", "Refreshed {count} models.");
+            m.insert("provider_removed", "Provider removed.");
+            m.insert("refresh_models", "Refresh models");
+            m.insert("remove_provider", "Remove provider");
+            m.insert("model_count", "{count} models");
+            m.insert("models_fetched_on_save", "Models will be fetched from the Base URL when you save.");
             m.insert("agent", "Agent");
             m.insert("split_pane", "Split Pane");
             m.insert("split_right", "Split Right");
@@ -161,6 +192,13 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("ui_language_description", "界面语言。默认跟随系统语言。");
             m.insert("language_system", "跟随系统");
             m.insert("appearance", "外观");
+            m.insert(
+                "appearance_description",
+                "界面与终端的主题、字体和字号。",
+            );
+            m.insert("font_family", "字体");
+            m.insert("font_size", "字号");
+            m.insert("font_system", "系统字体");
             m.insert("select_theme", "选择主题…");
             m.insert("custom_shortcuts", "自定义快捷键");
             m.insert("keymap_settings", "键盘快捷键");
@@ -181,8 +219,32 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("llm_providers", "大模型服务商");
             m.insert(
                 "llm_providers_description",
-                "配置 AI 服务商的 API Key 和相关设置。",
+                "可添加多个兼容 OpenAI 或 Claude 的服务商，自定义 Base URL，并从接口拉取模型列表。",
             );
+            m.insert("base_url", "Base URL");
+            m.insert("api_key", "API Key");
+            m.insert("provider_name", "服务商名称");
+            m.insert("provider_name_placeholder", "例如 my-proxy");
+            m.insert("add_openai_provider", "添加 OpenAI 服务商");
+            m.insert("add_claude_provider", "添加 Claude 服务商");
+            m.insert("add_provider_title", "添加 {kind} 服务商");
+            m.insert("no_providers_yet", "还没有服务商。请添加兼容 OpenAI 或 Claude 的接口。");
+            m.insert("save_and_fetch_models", "保存并拉取模型");
+            m.insert("cancel", "取消");
+            m.insert("fetching_models", "正在拉取模型…");
+            m.insert("no_models_found", "该接口未返回任何模型。");
+            m.insert("provider_name_required", "请填写服务商名称。");
+            m.insert("base_url_required", "请填写 Base URL。");
+            m.insert("api_key_required", "请填写 API Key。");
+            m.insert("api_key_required_for_refresh", "未找到 API Key。请重新添加服务商，或在刷新前粘贴 Key。");
+            m.insert("provider_name_taken", "已存在同名服务商。");
+            m.insert("provider_added_with_models", "已添加服务商，共 {count} 个模型。");
+            m.insert("models_refreshed", "已刷新 {count} 个模型。");
+            m.insert("provider_removed", "已删除服务商。");
+            m.insert("refresh_models", "刷新模型");
+            m.insert("remove_provider", "删除服务商");
+            m.insert("model_count", "{count} 个模型");
+            m.insert("models_fetched_on_save", "保存时会从 Base URL 拉取模型列表。");
             m.insert("agent", "Agent");
             m.insert("split_pane", "分屏");
             m.insert("split_right", "向右分屏");
@@ -293,7 +355,64 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("ui_language_description", "介面語言。預設跟隨系統語言。");
             m.insert("language_system", "跟隨系統");
             m.insert("appearance", "外觀");
+            m.insert(
+                "appearance_description",
+                "介面與終端機的主題、字型與字級。",
+            );
+            m.insert("font_family", "字型");
+            m.insert("font_size", "字級");
+            m.insert("font_system", "系統字型");
             m.insert("select_theme", "選擇主題…");
+            m.insert("custom_shortcuts", "自訂快捷鍵");
+            m.insert("keymap_settings", "鍵盤快捷鍵");
+            m.insert("keymap_settings_description", "檢視並自訂鍵盤快捷鍵。");
+            m.insert("keymap_search_placeholder", "搜尋快捷鍵…");
+            m.insert("keymap_bindings_count", "個快捷鍵");
+            m.insert("open_keymap_file", "開啟快捷鍵設定檔");
+            m.insert("vim_mode", "Vim 模式");
+            m.insert("llm_providers", "大型語言模型服務商");
+            m.insert(
+                "llm_providers_description",
+                "可新增多個相容 OpenAI 或 Claude 的服務商，自訂 Base URL，並從介面拉取模型列表。",
+            );
+            m.insert("base_url", "Base URL");
+            m.insert("api_key", "API Key");
+            m.insert("provider_name", "服務商名稱");
+            m.insert("provider_name_placeholder", "例如 my-proxy");
+            m.insert("add_openai_provider", "新增 OpenAI 服務商");
+            m.insert("add_claude_provider", "新增 Claude 服務商");
+            m.insert("add_provider_title", "新增 {kind} 服務商");
+            m.insert("no_providers_yet", "還沒有服務商。請新增相容 OpenAI 或 Claude 的介面。");
+            m.insert("save_and_fetch_models", "儲存並拉取模型");
+            m.insert("cancel", "取消");
+            m.insert("fetching_models", "正在拉取模型…");
+            m.insert("no_models_found", "此介面未回傳任何模型。");
+            m.insert("provider_name_required", "請填寫服務商名稱。");
+            m.insert("base_url_required", "請填寫 Base URL。");
+            m.insert("api_key_required", "請填寫 API Key。");
+            m.insert(
+                "api_key_required_for_refresh",
+                "找不到 API Key。請重新新增服務商，或在重新整理前貼上 Key。",
+            );
+            m.insert("provider_name_taken", "已存在同名服務商。");
+            m.insert("provider_added_with_models", "已新增服務商，共 {count} 個模型。");
+            m.insert("models_refreshed", "已重新整理 {count} 個模型。");
+            m.insert("provider_removed", "已刪除服務商。");
+            m.insert("refresh_models", "重新整理模型");
+            m.insert("remove_provider", "刪除服務商");
+            m.insert("model_count", "{count} 個模型");
+            m.insert("models_fetched_on_save", "儲存時會從 Base URL 拉取模型列表。");
+            m.insert("save", "儲存");
+            m.insert("reset_key", "重設金鑰");
+            m.insert("api_key_set_in_env", "API Key 已透過環境變數設定");
+            m.insert("api_key_configured", "已設定 API Key");
+            m.insert(
+                "reset_api_key_env_hint",
+                "若要重設 API Key，請取消設定環境變數 {env_var}。",
+            );
+            m.insert("paste_api_key", "貼上你的 API Key…");
+            m.insert("open_settings", "開啟設定");
+            m.insert("customize_keymaps", "自訂快捷鍵");
                         m.insert("menu_file", "檔案");
             m.insert("open", "開啟…");
             m.insert("open_recent", "開啟最近專案…");
@@ -350,7 +469,73 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             );
             m.insert("language_system", "システムに従う");
             m.insert("appearance", "外観");
+            m.insert(
+                "appearance_description",
+                "インターフェースとターミナルのテーマ、フォント、サイズ。",
+            );
+            m.insert("font_family", "フォント");
+            m.insert("font_size", "サイズ");
+            m.insert("font_system", "システムフォント");
             m.insert("select_theme", "テーマを選択…");
+            m.insert("custom_shortcuts", "カスタムショートカット");
+            m.insert("keymap_settings", "キーボードショートカット");
+            m.insert(
+                "keymap_settings_description",
+                "キーボードショートカットを表示・カスタマイズします。",
+            );
+            m.insert("keymap_search_placeholder", "ショートカットを検索…");
+            m.insert("keymap_bindings_count", "件のショートカット");
+            m.insert("open_keymap_file", "キーマップファイルを開く");
+            m.insert("vim_mode", "Vim モード");
+            m.insert("llm_providers", "LLM プロバイダー");
+            m.insert(
+                "llm_providers_description",
+                "OpenAI / Claude 互換のプロバイダーを追加し、Base URL を設定して API からモデルを取得します。",
+            );
+            m.insert("base_url", "Base URL");
+            m.insert("api_key", "API Key");
+            m.insert("provider_name", "プロバイダー名");
+            m.insert("provider_name_placeholder", "例: my-proxy");
+            m.insert("add_openai_provider", "OpenAI プロバイダーを追加");
+            m.insert("add_claude_provider", "Claude プロバイダーを追加");
+            m.insert("add_provider_title", "{kind} プロバイダーを追加");
+            m.insert(
+                "no_providers_yet",
+                "プロバイダーがありません。OpenAI または Claude 互換のエンドポイントを追加してください。",
+            );
+            m.insert("save_and_fetch_models", "保存してモデルを取得");
+            m.insert("cancel", "キャンセル");
+            m.insert("fetching_models", "モデルを取得中…");
+            m.insert("no_models_found", "このエンドポイントからモデルが返されませんでした。");
+            m.insert("provider_name_required", "プロバイダー名を入力してください。");
+            m.insert("base_url_required", "Base URL を入力してください。");
+            m.insert("api_key_required", "API Key を入力してください。");
+            m.insert(
+                "api_key_required_for_refresh",
+                "API Key が見つかりません。プロバイダーを追加し直すか、更新前に Key を貼り付けてください。",
+            );
+            m.insert("provider_name_taken", "同じ名前のプロバイダーが既に存在します。");
+            m.insert("provider_added_with_models", "プロバイダーを追加しました（{count} モデル）。");
+            m.insert("models_refreshed", "{count} 個のモデルを更新しました。");
+            m.insert("provider_removed", "プロバイダーを削除しました。");
+            m.insert("refresh_models", "モデルを更新");
+            m.insert("remove_provider", "プロバイダーを削除");
+            m.insert("model_count", "{count} モデル");
+            m.insert(
+                "models_fetched_on_save",
+                "保存時に Base URL からモデル一覧を取得します。",
+            );
+            m.insert("save", "保存");
+            m.insert("reset_key", "キーをリセット");
+            m.insert("api_key_set_in_env", "API Key は環境変数で設定されています");
+            m.insert("api_key_configured", "API Key が設定されています");
+            m.insert(
+                "reset_api_key_env_hint",
+                "API Key をリセットするには、環境変数 {env_var} を解除してください。",
+            );
+            m.insert("paste_api_key", "API Key を貼り付け…");
+            m.insert("open_settings", "設定を開く");
+            m.insert("customize_keymaps", "キーマップをカスタマイズ");
                         m.insert("menu_file", "ファイル");
             m.insert("open", "開く…");
             m.insert("open_recent", "最近のプロジェクトを開く…");
@@ -407,7 +592,73 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             );
             m.insert("language_system", "시스템");
             m.insert("appearance", "모양");
+            m.insert(
+                "appearance_description",
+                "인터페이스와 터미널의 테마, 글꼴, 크기입니다.",
+            );
+            m.insert("font_family", "글꼴");
+            m.insert("font_size", "크기");
+            m.insert("font_system", "시스템 글꼴");
             m.insert("select_theme", "테마 선택…");
+            m.insert("custom_shortcuts", "사용자 지정 단축키");
+            m.insert("keymap_settings", "키보드 단축키");
+            m.insert(
+                "keymap_settings_description",
+                "키보드 단축키를 보고 사용자 지정합니다.",
+            );
+            m.insert("keymap_search_placeholder", "단축키 검색…");
+            m.insert("keymap_bindings_count", "개 단축키");
+            m.insert("open_keymap_file", "키맵 파일 열기");
+            m.insert("vim_mode", "Vim 모드");
+            m.insert("llm_providers", "LLM 제공자");
+            m.insert(
+                "llm_providers_description",
+                "OpenAI 또는 Claude 호환 제공자를 추가하고 Base URL을 설정한 뒤 API에서 모델을 가져옵니다.",
+            );
+            m.insert("base_url", "Base URL");
+            m.insert("api_key", "API Key");
+            m.insert("provider_name", "제공자 이름");
+            m.insert("provider_name_placeholder", "예: my-proxy");
+            m.insert("add_openai_provider", "OpenAI 제공자 추가");
+            m.insert("add_claude_provider", "Claude 제공자 추가");
+            m.insert("add_provider_title", "{kind} 제공자 추가");
+            m.insert(
+                "no_providers_yet",
+                "아직 제공자가 없습니다. OpenAI 또는 Claude 호환 엔드포인트를 추가하세요.",
+            );
+            m.insert("save_and_fetch_models", "저장하고 모델 가져오기");
+            m.insert("cancel", "취소");
+            m.insert("fetching_models", "모델을 가져오는 중…");
+            m.insert("no_models_found", "이 엔드포인트에서 모델이 반환되지 않았습니다.");
+            m.insert("provider_name_required", "제공자 이름을 입력하세요.");
+            m.insert("base_url_required", "Base URL을 입력하세요.");
+            m.insert("api_key_required", "API Key를 입력하세요.");
+            m.insert(
+                "api_key_required_for_refresh",
+                "API Key를 찾을 수 없습니다. 제공자를 다시 추가하거나 새로 고침 전에 Key를 붙여넣으세요.",
+            );
+            m.insert("provider_name_taken", "같은 이름의 제공자가 이미 있습니다.");
+            m.insert("provider_added_with_models", "제공자를 추가했습니다. 모델 {count}개.");
+            m.insert("models_refreshed", "모델 {count}개를 새로 고쳤습니다.");
+            m.insert("provider_removed", "제공자를 삭제했습니다.");
+            m.insert("refresh_models", "모델 새로 고침");
+            m.insert("remove_provider", "제공자 삭제");
+            m.insert("model_count", "모델 {count}개");
+            m.insert(
+                "models_fetched_on_save",
+                "저장 시 Base URL에서 모델 목록을 가져옵니다.",
+            );
+            m.insert("save", "저장");
+            m.insert("reset_key", "키 재설정");
+            m.insert("api_key_set_in_env", "API Key가 환경 변수로 설정됨");
+            m.insert("api_key_configured", "API Key가 구성됨");
+            m.insert(
+                "reset_api_key_env_hint",
+                "API Key를 재설정하려면 환경 변수 {env_var}를 해제하세요.",
+            );
+            m.insert("paste_api_key", "API Key 붙여넣기…");
+            m.insert("open_settings", "설정 열기");
+            m.insert("customize_keymaps", "키맵 사용자 지정");
                         m.insert("menu_file", "File");
             m.insert("open", "Open…");
             m.insert("open_recent", "Open Recent…");
