@@ -1033,14 +1033,14 @@ impl Element for TerminalElement {
                     origin.x += gutter;
 
                     if matches!(self.terminal_view.read(cx).mode, TerminalMode::Standalone) {
-                        // Always bottom-anchor in alternate screen. Relying on
-                        // bottom_row_occupied here flickers as vim/htop redraw
-                        // (Zed #61236 / #61325).
-                        let should_anchor_to_bottom = {
-                            let content = self.terminal.read(cx).last_content();
-                            content.mode.contains(Modes::ALT_SCREEN)
-                                || (content.scrolled_to_bottom && content.bottom_row_occupied)
-                        };
+                        // Bottom-anchor whenever we're scrolled to the bottom.
+                        // Gating on bottom_row_occupied (Zed #56715) flips the
+                        // leftover row-padding between top/bottom when entering
+                        // or leaving alternate-screen TUIs like vim, which looks
+                        // like a one-frame vertical jump on open/quit. Alt-screen
+                        // redraws also flicker that flag (Zed #61236 / #61325).
+                        let should_anchor_to_bottom =
+                            self.terminal.read(cx).last_content().scrolled_to_bottom;
                         let scale_factor = window.scale_factor();
                         let line_height_pixels = px(line_height);
                         let line_height_device_px = (f32::from(line_height_pixels) * scale_factor)

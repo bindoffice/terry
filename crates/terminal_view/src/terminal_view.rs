@@ -3142,9 +3142,12 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_short_standalone_terminal_stays_top_anchored_on_resize(cx: &mut TestAppContext) {
-        let (bounds, _) = draw_standalone_terminal(b"$ ", cx).await;
-        assert_eq!(bounds.origin.y, px(0.));
+    async fn test_short_standalone_terminal_stays_bottom_anchored_on_resize(
+        cx: &mut TestAppContext,
+    ) {
+        let (bounds, draw_size) = draw_standalone_terminal(b"$ ", cx).await;
+        assert!(bounds.origin.y > px(0.));
+        assert_eq!(bounds.bottom(), draw_size.height);
     }
 
     #[gpui::test]
