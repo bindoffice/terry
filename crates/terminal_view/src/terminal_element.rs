@@ -1033,9 +1033,13 @@ impl Element for TerminalElement {
                     origin.x += gutter;
 
                     if matches!(self.terminal_view.read(cx).mode, TerminalMode::Standalone) {
+                        // Always bottom-anchor in alternate screen. Relying on
+                        // bottom_row_occupied here flickers as vim/htop redraw
+                        // (Zed #61236 / #61325).
                         let should_anchor_to_bottom = {
                             let content = self.terminal.read(cx).last_content();
-                            content.scrolled_to_bottom && content.bottom_row_occupied
+                            content.mode.contains(Modes::ALT_SCREEN)
+                                || (content.scrolled_to_bottom && content.bottom_row_occupied)
                         };
                         let scale_factor = window.scale_factor();
                         let line_height_pixels = px(line_height);
