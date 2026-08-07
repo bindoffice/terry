@@ -181,6 +181,9 @@ pub struct TerminalListPanel {
     /// Pane that should receive the next newly spawned terminal (e.g. where
     /// "+" was clicked). Cleared when consumed by sync.
     pending_spawn_pane: Option<WeakEntity<Pane>>,
+    /// Terminal to activate after a cross-group switch finishes restoring
+    /// layout. Set by sidebar clicks; applied (and cleared) by sync.
+    pending_focus_terminal: Option<EntityId>,
     groups: Vec<TerminalGroup>,
     active_group_id: GroupId,
     next_group_id: usize,
@@ -294,6 +297,7 @@ impl TerminalListPanel {
             _quit_subscription,
             display_pane: display_pane.downgrade(),
             pending_spawn_pane: None,
+            pending_focus_terminal: None,
             groups: Vec::new(),
             active_group_id: GroupId(0),
             next_group_id: 0,
@@ -1648,11 +1652,25 @@ impl TerminalListPanel {
         }
 
         let focus_item = true;
-        // Prefer the pane we just filled (or the pinned/active target), not the
-        // first center pane that happens to contain the last terminal id.
-        let last = active_terminals.last().cloned();
-        if let Some(last) = last {
-            let id = last.entity_id();
+        // Prefer a terminal the user clicked in the sidebar (across groups),
+        // then fall back to the last terminal in the active group.
+        let focus_target = self
+            .pending_focus_terminal
+            .and_then(|id| {
+                active_terminals
+                    .iter()
+                    .find(|tv| tv.entity_id() == id)
+                    .cloned()
+            })
+            .or_else(|| active_terminals.last().cloned());
+        if self
+            .pending_focus_terminal
+            .is_some_and(|id| focus_target.as_ref().is_some_and(|tv| tv.entity_id() == id))
+        {
+            self.pending_focus_terminal = None;
+        }
+        if let Some(focus_target) = focus_target {
+            let id = focus_target.entity_id();
             let index = target_pane
                 .read(cx)
                 .items()
@@ -1950,6 +1968,10 @@ impl TerminalListPanel {
             return;
         }
 
+        // Group-header switches (no sidebar terminal click) must not keep a
+        // stale focus target from an earlier incomplete cross-group click.
+        self.pending_focus_terminal = None;
+
         let outgoing = self.active_group_id;
         // Block sync until we have snapshotted `outgoing`'s live split layout.
         // Otherwise a deferred sync (ItemAdded / spawn) clears those panes and
@@ -2029,7 +2051,12 @@ impl TerminalListPanel {
         cx: &mut Context<Self>,
     ) {
         if group_id != self.active_group_id {
+            // switch_group restores the destination layout asynchronously;
+            // focus_terminal would no-op now because the target is not in the
+            // center panes yet. Remember the click and apply it in sync.
             self.switch_group(group_id, window, cx);
+            self.pending_focus_terminal = Some(terminal_view.entity_id());
+            return;
         }
         self.focus_terminal(terminal_view, window, cx);
     }
