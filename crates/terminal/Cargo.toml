@@ -27,6 +27,7 @@ collections.workspace = true
 futures.workspace = true
 futures-lite.workspace = true
 gpui.workspace = true
+image.workspace = true
 itertools.workspace = true
 libc.workspace = true
 log.workspace = true
@@ -35,6 +36,7 @@ release_channel.workspace = true
 schemars.workspace = true
 serde.workspace = true
 settings.workspace = true
+smallvec.workspace = true
 sysinfo.workspace = true
 task.workspace = true
 theme.workspace = true
@@ -51,6 +53,7 @@ percent-encoding.workspace = true
 windows.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 rand.workspace = true
 settings = { workspace = true, features = ["test-support"] }

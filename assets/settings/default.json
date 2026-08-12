@@ -2107,6 +2107,13 @@
     "show_count_badge": false,
     // Whether to invoke the OS-specific alert sound when the terminal bell (BEL character) is printed.
     "bell": "off",
+    // Whether to render inline images in the terminal (kitty graphics protocol
+    // and sixel). When disabled, image escape sequences are ignored.
+    "image_display": true,
+    // Maximum bytes the terminal's image pool may hold (for inline images).
+    // Older images are evicted once this budget is exceeded.
+    // Default: 536870912 (512 MiB)
+    "max_image_memory": 536870912,
   },
   "code_actions_on_format": {},
   // Settings related to running tasks.

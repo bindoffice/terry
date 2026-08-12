@@ -5,8 +5,8 @@ use gpui::{
     GlobalElementId, HighlightStyle, Hitbox, Hsla, InputHandler, InteractiveElement, Interactivity,
     IntoElement, LayoutId, Length, ModifiersChangedEvent, MouseButton, MouseMoveEvent, Pixels,
     Point as GpuiPoint, StatefulInteractiveElement, StrikethroughStyle, Styled, TextRun, TextStyle,
-    UTF16Selection, UnderlineStyle, WeakEntity, WhiteSpace, Window, div, fill, point, px, relative,
-    size,
+    UTF16Selection, UnderlineStyle, WeakEntity, WhiteSpace, Window, div, fill, img, point, px,
+    relative, size,
 };
 use itertools::Itertools;
 use language::CursorShape as EditorCursorShape;
@@ -43,6 +43,7 @@ pub struct LayoutState {
     display_offset: usize,
     hyperlink_tooltip: Option<AnyElement>,
     block_below_cursor_element: Option<AnyElement>,
+    image_elements: Vec<AnyElement>,
     base_text_style: TextStyle,
     content_mode: ContentMode,
 }
@@ -1309,6 +1310,57 @@ impl Element for TerminalElement {
                     None
                 };
 
+                // Build positioned image elements for visible image placements.
+                // Painted underneath the text, exactly like kitty renders them.
+                let image_elements = {
+                    let terminal = self.terminal.read(cx);
+                    let display_offset = terminal.last_content.display_offset;
+                    let images = terminal.last_content.images.clone();
+                    let terminal_entity = self.terminal.clone();
+                    let columns = dimensions.num_columns() as i32;
+                    let screen_lines = dimensions.num_lines() as i32;
+
+                    images
+                        .into_iter()
+                        .filter_map(|image| {
+                            let display_row = image.point.line + display_offset as i32;
+                            let col = image.point.column as i32;
+                            if display_row < 0 || col >= columns {
+                                return None;
+                            }
+
+                            // Clamp the placement to the grid.
+                            let cols = (image.cols as i32).min(columns - col);
+                            let rows = (image.rows as i32).min(screen_lines - display_row);
+                            if cols <= 0 || rows <= 0 {
+                                return None;
+                            }
+
+                            let x = bounds.origin.x + col as f32 * dimensions.cell_width();
+                            let y = dimensions.bounds.origin.y
+                                + display_row as f32 * dimensions.line_height()
+                                - scroll_top;
+                            let w = cols as f32 * dimensions.cell_width();
+                            let h = rows as f32 * dimensions.line_height();
+
+                            let render_image = terminal_entity
+                                .update(cx, |term, _| term.render_image(&image.image));
+                            let mut element = div()
+                                .w(w)
+                                .h(h)
+                                .child(img(render_image).w(w).h(h))
+                                .into_any_element();
+                            let origin = GpuiPoint::new(x, y);
+                            let available_space =
+                                size(AvailableSpace::Definite(w), AvailableSpace::Definite(h));
+                            window.with_rem_size(rem_size, |window| {
+                                element.prepaint_as_root(origin, available_space, window, cx);
+                            });
+                            Some(element)
+                        })
+                        .collect::<Vec<_>>()
+                };
+
                 LayoutState {
                     hitbox,
                     batched_text_runs,
@@ -1322,6 +1374,7 @@ impl Element for TerminalElement {
                     display_offset,
                     hyperlink_tooltip,
                     block_below_cursor_element,
+                    image_elements,
                     base_text_style: text_style,
                     content_mode,
                 }
@@ -1380,6 +1433,7 @@ impl Element for TerminalElement {
             let original_cursor = layout.cursor.take();
             let hyperlink_tooltip = layout.hyperlink_tooltip.take();
             let block_below_cursor_element = layout.block_below_cursor_element.take();
+            let image_elements = mem::take(&mut layout.image_elements);
             self.interactivity.paint(
                 global_id,
                 inspector_id,
@@ -1405,6 +1459,11 @@ impl Element for TerminalElement {
 
                     for rect in &layout.rects {
                         rect.paint(origin, &layout.dimensions, window);
+                    }
+
+                    // Paint inline images underneath the text, in z-order.
+                    for mut image_element in image_elements {
+                        image_element.paint(window, cx);
                     }
 
                     for (relative_highlighted_range, color) in &layout.relative_highlighted_ranges {

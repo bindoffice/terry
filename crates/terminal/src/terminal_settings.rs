@@ -51,6 +51,10 @@ pub struct TerminalSettings {
     pub path_hyperlink_timeout_ms: u64,
     pub show_count_badge: bool,
     pub bell: TerminalBell,
+    /// Whether to render inline images (kitty graphics protocol / sixel).
+    pub image_display: bool,
+    /// Maximum bytes the image pool may hold.
+    pub max_image_memory: usize,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -116,7 +120,11 @@ impl settings::Settings for TerminalSettings {
             scroll_multiplier: user_content.scroll_multiplier.unwrap_or_default(),
             max_scroll_history_lines: user_content.max_scroll_history_lines,
             toolbar: Toolbar {
-                breadcrumbs: user_content.toolbar.unwrap_or_default().breadcrumbs.unwrap_or_default(),
+                breadcrumbs: user_content
+                    .toolbar
+                    .unwrap_or_default()
+                    .breadcrumbs
+                    .unwrap_or_default(),
             },
             scrollbar: ScrollbarSettings {
                 show: user_content.scrollbar.unwrap_or_default().show,
@@ -131,9 +139,13 @@ impl settings::Settings for TerminalSettings {
                     PathHyperlinkRegex::MultiLine(regex) => regex.join("\n"),
                 })
                 .collect(),
-            path_hyperlink_timeout_ms: project_content.path_hyperlink_timeout_ms.unwrap_or_default(),
+            path_hyperlink_timeout_ms: project_content
+                .path_hyperlink_timeout_ms
+                .unwrap_or_default(),
             show_count_badge: user_content.show_count_badge.unwrap_or_default(),
             bell: user_content.bell.unwrap_or_default(),
+            image_display: user_content.image_display.unwrap_or_default(),
+            max_image_memory: user_content.max_image_memory.unwrap_or(512 * 1024 * 1024),
         }
     }
 }

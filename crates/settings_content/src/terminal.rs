@@ -191,6 +191,16 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: "system"
     pub bell: Option<TerminalBell>,
+    /// Whether to render inline images in the terminal (kitty graphics protocol
+    /// and sixel). When disabled, image escape sequences are ignored.
+    ///
+    /// Default: true
+    pub image_display: Option<bool>,
+    /// Maximum bytes the terminal's image pool may hold for inline images.
+    /// Older images are evicted once this budget is exceeded.
+    ///
+    /// Default: 536870912 (512 MiB)
+    pub max_image_memory: Option<usize>,
 }
 
 /// Shell configuration to open the terminal with.
