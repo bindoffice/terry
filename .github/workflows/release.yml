@@ -10,6 +10,10 @@ on:
         description: "Create a draft GitHub Release from build artifacts"
         type: boolean
         default: false
+      macos_signing_required:
+        description: "Fail the macOS job when no signing certificate is available (default: true)"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -18,6 +22,9 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
+  # macOS artifacts must be signed by default; workflow_dispatch can opt out
+  # (e.g. for throwaway ad-hoc builds) by passing macos_signing_required=false.
+  REQUIRE_SIGNING: ${{ github.event_name == 'push' || inputs.macos_signing_required }}
 
 jobs:
   build:
@@ -130,11 +137,18 @@ jobs:
         env:
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          REQUIRE_SIGNING: ${{ env.REQUIRE_SIGNING }}
         shell: bash
         run: |
           set -euo pipefail
           if [[ -z "${MACOS_CERTIFICATE}" ]]; then
-            echo "MACOS_CERTIFICATE secret not set; package script will ad-hoc sign"
+            if [[ "${REQUIRE_SIGNING}" == "true" ]]; then
+              echo "::error::MACOS_CERTIFICATE secret is not set, but macOS signing is required. " \
+                "Configure the secret (base64-encoded Developer ID Application .p12) or run " \
+                "with macos_signing_required=false for an ad-hoc build." >&2
+              exit 1
+            fi
+            echo "::warning::MACOS_CERTIFICATE secret not set; the macOS package will be ad-hoc signed (not a distribution signature)"
             exit 0
           fi
           KEYCHAIN_PATH="$RUNNER_TEMP/terry-signing.keychain-db"
@@ -144,8 +158,11 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          # Import the whole identity (certificate + private key) from the p12.
+          # `-t cert` would import only the certificate, leaving codesign without
+          # the private key it needs to produce a signature.
           security import "$CERTIFICATE_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" \
-            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+            -A -f pkcs12 -k "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
             -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychain -d user -s "$KEYCHAIN_PATH"
@@ -166,6 +183,7 @@ jobs:
         if: matrix.package == 'macos'
         shell: bash
         env:
+          REQUIRE_SIGNING: ${{ env.REQUIRE_SIGNING }}
           APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
           APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
           APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}

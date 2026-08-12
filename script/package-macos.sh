@@ -39,8 +39,17 @@ resolve_signing_identity() {
     printf '%s\n' "$identity"
     return
   fi
+  if [[ "${REQUIRE_SIGNING:-false}" == "true" ]]; then
+    echo "error: no Developer ID Application identity found, but REQUIRE_SIGNING=true" >&2
+    echo "  - set MACOS_SIGNING_IDENTITY, or" >&2
+    echo "  - import the Developer ID certificate into the keychain" >&2
+    security find-identity -v -p codesigning >&2 || true
+    exit 1
+  fi
   # Ad-hoc: avoids the Apple Silicon "damaged" Gatekeeper state for unsigned
   # + quarantined downloads, but is not a real distribution signature.
+  echo "==> Warning: no Developer ID certificate found; using AD-HOC signing" >&2
+  echo "    (the package will be quarantined/blocked on other machines)" >&2
   printf '%s\n' "-"
 }
 
