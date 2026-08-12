@@ -7,7 +7,10 @@
 
 ## 功能特性
 
-- **终端工作区** — 分组管理多个终端，按正确工作目录新建会话
+- **终端工作区** — 分组管理多个终端，按正确工作目录新建会话；分组支持自动平铺布局（手动 / tall / grid / stack，类似 kitty）
+- **终端图像** — 支持 kitty graphics 协议与 sixel，终端内直接显示图片，GIF 可动画（`chafa` / `viu` / `icat` 可用）
+- **终端协议** — kitty 键盘协议（CSI u）与 OSC 52 剪贴板读写
+- **链接跳转** — `Ctrl+Shift+E` 列出当前可见的所有链接（URL / 路径 / OSC 8），键盘选择打开
 - **AI Agent** — 侧边栏与大模型对话，通过可配置的 Profile 调用命令与工具
 - **MCP** — 接入 Model Context Protocol 服务器，扩展 Agent 能力
 - **文件面板** — 在终端旁浏览项目目录树
