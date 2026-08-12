@@ -30,6 +30,7 @@ language.workspace = true
 log.workspace = true
 menu.workspace = true
 pretty_assertions.workspace = true
+picker.workspace = true
 project.workspace = true
 regex.workspace = true
 schemars.workspace = true

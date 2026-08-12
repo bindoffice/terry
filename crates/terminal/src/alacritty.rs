@@ -36,14 +36,14 @@ use vte::ansi::Handler;
 use windows::Win32::{Foundation::HANDLE, System::Threading::GetProcessId};
 
 use crate::{
-    Cell, Color, Content, Cursor, CursorShape, Hyperlink, HyperlinkData, IndexedCell, Modes, Point,
-    PtyEvent, Range, RenderableCells, Scroll, Search, Selection, SelectionRange, SelectionSide,
-    SelectionType, TerminalBackendEvent, TerminalBounds, ViMotion,
+    Cell, Color, Content, Cursor, CursorShape, Hyperlink, HyperlinkData, IndexedCell, IndexedImage,
+    Modes, Point, PtyEvent, Range, RenderableCells, Scroll, Search, Selection, SelectionRange,
+    SelectionSide, SelectionType, TerminalBackendEvent, TerminalBounds, ViMotion,
     pty_info::ProcessIdGetter,
     terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape},
 };
 
-pub(super) use hyperlinks::{HyperlinkMatch, RegexSearches};
+pub(super) use hyperlinks::{HyperlinkMatch, RegexSearches, find_all_visible_links};
 
 pub(super) type AlacrittyPty = tty::Pty;
 pub(super) type AlacrittyTerm = Term<ZedListener>;
@@ -124,6 +124,9 @@ pub(super) fn display_only_term_config(
         scrolling_history,
         default_cursor_style: alacritty_cursor_style(cursor_shape),
         osc52: Osc52::Disabled,
+        // Support the kitty keyboard protocol (CSI u): the terminal will
+        // answer `CSI ? u` queries and accept `CSI > u` mode pushes.
+        kitty_keyboard: true,
         ..Config::default()
     }
 }
@@ -135,6 +138,11 @@ pub(super) fn pty_term_config(
     Config {
         scrolling_history,
         default_cursor_style: alacritty_cursor_style(cursor_shape),
+        // Allow applications to both write to and read from the clipboard
+        // (OSC 52), matching kitty's default behavior.
+        osc52: Osc52::CopyPaste,
+        // Support the kitty keyboard protocol (CSI u).
+        kitty_keyboard: true,
         ..Config::default()
     }
 }
@@ -250,6 +258,16 @@ pub(super) fn scroll_to_point(term: &mut AlacrittyTerm, point: Point) {
     term.scroll_to_point(point.to_alacritty());
 }
 
+pub(super) fn prompt_marks(term: &AlacrittyTerm) -> Vec<Point> {
+    term.prompt_marks()
+        .map(|point| terminal_point_from_alacritty(*point))
+        .collect()
+}
+
+pub(super) fn last_prompt_mark(term: &AlacrittyTerm) -> Option<Point> {
+    term.last_prompt_mark().map(terminal_point_from_alacritty)
+}
+
 pub(super) fn vi_goto_point(term: &mut AlacrittyTerm, point: Point) {
     term.vi_goto_point(point.to_alacritty());
 }
@@ -302,6 +320,10 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
             AlacTermEvent::MouseCursorDirty => Self::MouseCursorDirty,
             AlacTermEvent::Title(title) => Self::Title(title),
             AlacTermEvent::ResetTitle => Self::ResetTitle,
+            AlacTermEvent::Notification(title, body, progress) => {
+                Self::Notification(title, body, progress)
+            }
+            AlacTermEvent::Cwd(path) => Self::Cwd(path),
             AlacTermEvent::ClipboardStore(_, data) => Self::ClipboardStore(data),
             AlacTermEvent::ClipboardLoad(_, format) => Self::ClipboardLoad(format),
             AlacTermEvent::ColorRequest(index, format) => Self::ColorRequest(index, format),
@@ -695,6 +717,12 @@ fn terminal_modes_from_alacritty(mode: TermMode) -> Modes {
         Modes::MOUSE_MOTION,
     );
     add_terminal_mode(&mut terminal_modes, mode, TermMode::VI, Modes::VI);
+    add_terminal_mode(
+        &mut terminal_modes,
+        mode,
+        TermMode::KITTY_KEYBOARD_PROTOCOL,
+        Modes::KITTY_KEYBOARD_PROTOCOL,
+    );
     terminal_modes
 }
 
@@ -804,7 +832,12 @@ pub(super) fn shrink_to_used(term: &mut Term<ZedListener>) {
     term.grid_mut().truncate();
 }
 
-pub(super) fn make_content(term: &Term<ZedListener>, last_content: &Content) -> Content {
+pub(super) fn make_content(term: &mut Term<ZedListener>, last_content: &Content) -> Content {
+    // Sweep orphaned image placements (e.g. after erase/scroll/resize).
+    if term.images_need_gc() {
+        term.gc_images();
+    }
+
     let content = term.renderable_content();
 
     let estimated_size = content.display_iter.size_hint().0;
@@ -814,6 +847,18 @@ pub(super) fn make_content(term: &Term<ZedListener>, last_content: &Content) -> 
         point: terminal_point_from_alacritty(ic.point),
         cell: terminal_cell_from_alacritty(ic.cell),
     }));
+
+    let images = content
+        .images
+        .into_iter()
+        .map(|image| IndexedImage {
+            point: terminal_point_from_alacritty(image.point),
+            cols: image.cols,
+            rows: image.rows,
+            z: image.z,
+            image: image.image,
+        })
+        .collect();
 
     let selection_text = if content.selection.is_some() {
         term.selection_to_string()
@@ -831,6 +876,7 @@ pub(super) fn make_content(term: &Term<ZedListener>, last_content: &Content) -> 
 
     Content {
         cells,
+        images,
         mode: terminal_modes_from_alacritty(content.mode),
         display_offset: content.display_offset,
         selection_text,

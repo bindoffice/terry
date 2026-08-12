@@ -48,8 +48,8 @@ use crate::{
     NewNativeAgentThreadFromSummary,
 };
 use crate::{
-    ConversationView, CopyThreadToClipboard, Follow, LoadThreadFromClipboard,
-    NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff, ResetFastModeWarnings,
+    ConversationView, CopyThreadToClipboard, Follow, LoadThreadFromClipboard, NewTerminalThread,
+    NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff, ResetFastModeWarnings,
     ResetTrialEndUpsell, ResetTrialUpsell, ShowAllSidebarThreadMetadata, ShowThreadMetadata,
     ToggleNewThreadMenu, ToggleOptionsMenu,
     conversation_view::{
@@ -90,8 +90,8 @@ use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use text::OffsetRangeExt;
 use theme_settings::ThemeSettings;
 use ui::{
-    ContextMenu, ContextMenuEntry, GradientFade, IconButton, PopoverMenu,
-    PopoverMenuHandle, Tab, Tooltip, prelude::*, utils::WithRemSize,
+    ContextMenu, ContextMenuEntry, GradientFade, IconButton, PopoverMenu, PopoverMenuHandle, Tab,
+    Tooltip, prelude::*, utils::WithRemSize,
 };
 use util::ResultExt as _;
 use workspace::{
@@ -2193,7 +2193,8 @@ impl AgentPanel {
             move |this, _terminal, event: &TerminalEvent, window, cx| match event {
                 TerminalEvent::TitleChanged
                 | TerminalEvent::Wakeup
-                | TerminalEvent::BreadcrumbsChanged => {
+                | TerminalEvent::BreadcrumbsChanged
+                | TerminalEvent::CwdChanged => {
                     this.refresh_terminal_metadata(terminal_id, cx);
                     this.report_terminal_program(terminal_id, source, cx);
                 }
@@ -2204,7 +2205,8 @@ impl AgentPanel {
                 TerminalEvent::BlinkChanged(_)
                 | TerminalEvent::SelectionsChanged
                 | TerminalEvent::NewNavigationTarget(_)
-                | TerminalEvent::Open(_) => {}
+                | TerminalEvent::Open(_)
+                | TerminalEvent::Notification(_, _, _) => {}
             },
         );
 

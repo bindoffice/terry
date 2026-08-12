@@ -64,12 +64,14 @@ use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
     append_text_to_term, apply_config, clear_saved_screen, content_text, display_offset,
-    display_only_term_config, find_from_terminal_point, full_content_range, last_non_empty_lines,
-    make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
-    scroll_display, scroll_to_point, search_matches, selection_text, set_default_cursor_style,
-    set_selection as set_term_selection, shrink_to_used, spawn_event_loop,
-    toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
-    update_selection_to_vi_cursor, update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
+    display_only_term_config, find_all_visible_links, find_from_terminal_point, full_content_range,
+    last_non_empty_lines, last_prompt_mark as last_term_prompt_mark, make_content, new_term,
+    open_pty, prompt_marks as term_prompt_marks, pty_options, pty_term_config, resize,
+    screen_lines, scroll_display, scroll_to_point, search_matches, selection_text,
+    set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
+    spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
+    update_selection as update_term_selection, update_selection_to_vi_cursor,
+    update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
@@ -371,6 +373,8 @@ impl Modes {
     pub const MOUSE_DRAG: Self = Self(1 << 14);
     pub const MOUSE_MOTION: Self = Self(1 << 15);
     pub const VI: Self = Self(1 << 16);
+    /// The application has enabled the kitty keyboard protocol (CSI u).
+    pub const KITTY_KEYBOARD_PROTOCOL: Self = Self(1 << 17);
     pub const MOUSE_MODE: Self =
         Self(Self::MOUSE_REPORT_CLICK.0 | Self::MOUSE_DRAG.0 | Self::MOUSE_MOTION.0);
 
@@ -482,12 +486,25 @@ impl SelectionRange {
     pub fn point_range(self) -> Range {
         Range::new(self.start, self.end)
     }
+
+    /// Check whether a grid point lies within this selection, honoring the
+    /// block-selection semantics of alacritty's `SelectionRange::contains`:
+    /// for non-block selections the column bounds only constrain the first
+    /// and last line.
+    pub fn contains(&self, point: Point) -> bool {
+        self.start.line <= point.line
+            && self.end.line >= point.line
+            && (self.start.column <= point.column
+                || (self.start.line != point.line && !self.is_block))
+            && (self.end.column >= point.column || (self.end.line != point.line && !self.is_block))
+    }
 }
 
 // TODO: Un-pub
 #[derive(Clone)]
 pub struct Content {
     pub cells: Vec<IndexedCell>,
+    pub images: Vec<IndexedImage>,
     pub mode: Modes,
     pub display_offset: usize,
     pub selection_text: Option<String>,
@@ -501,6 +518,21 @@ pub struct Content {
     pub bottom_row_occupied: bool,
 }
 
+/// An image placement on the terminal grid, ready for rendering.
+#[derive(Clone, Debug)]
+pub struct IndexedImage {
+    /// Grid position of the placement's top-left cell.
+    pub point: Point,
+    /// Width of the placement in cells.
+    pub cols: u16,
+    /// Height of the placement in cells.
+    pub rows: u16,
+    /// Z-index; higher z-index images are painted on top.
+    pub z: i32,
+    /// Decoded RGBA image data.
+    pub image: Arc<alacritty_terminal::graphics::Image>,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct HoveredWord {
     pub word: String,
@@ -512,6 +544,7 @@ impl Default for Content {
     fn default() -> Self {
         Content {
             cells: Default::default(),
+            images: Default::default(),
             mode: Default::default(),
             display_offset: Default::default(),
             selection_text: Default::default(),
@@ -624,6 +657,8 @@ actions!(
         ScrollToBottom,
         /// Toggles vi mode in the terminal.
         ToggleViMode,
+        /// Lists visible hyperlinks and lets the user open one with the keyboard.
+        OpenUrls,
         /// Selects all text in the terminal.
         SelectAll,
     ]
@@ -647,7 +682,7 @@ pub fn insert_zed_terminal_env(
     env.insert("TERM_PROGRAM_VERSION".to_string(), version.to_string());
 }
 
-///Upward flowing events, for changing the title and such
+/// Upward flowing events, for changing the title and such.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     TitleChanged,
@@ -659,6 +694,13 @@ pub enum Event {
     SelectionsChanged,
     NewNavigationTarget(Option<MaybeNavigationTarget>),
     Open(MaybeNavigationTarget),
+    /// A desktop notification was requested via `OSC 9`. The first two fields
+    /// are the title/body, the last an optional progress value (0..=100, or
+    /// `-1` for indeterminate progress).
+    Notification(Option<String>, Option<String>, Option<i64>),
+    /// The working directory reported via `OSC 7` changed. Re-read
+    /// [`Terminal::working_directory`] to pick up the new value.
+    CwdChanged,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -708,6 +750,8 @@ pub(crate) enum TerminalBackendEvent {
     MouseCursorDirty,
     Title(String),
     ResetTitle,
+    Notification(Option<String>, Option<String>, Option<i64>),
+    Cwd(PathBuf),
     ClipboardStore(String),
     ClipboardLoad(ClipboardFormatter),
     ColorRequest(usize, ColorFormatter),
@@ -726,6 +770,10 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::MouseCursorDirty => f.write_str("MouseCursorDirty"),
             Self::Title(title) => write!(f, "Title({title})"),
             Self::ResetTitle => f.write_str("ResetTitle"),
+            Self::Notification(title, body, progress) => {
+                write!(f, "Notification({title:?}, {body:?}, {progress:?})")
+            }
+            Self::Cwd(path) => write!(f, "Cwd({})", path.display()),
             Self::ClipboardStore(data) => write!(f, "ClipboardStore({data})"),
             Self::ClipboardLoad(_) => f.write_str("ClipboardLoad"),
             Self::ColorRequest(index, _) => write!(f, "ColorRequest({index})"),
@@ -973,6 +1021,7 @@ impl TerminalBuilder {
             last_mouse: None,
             mouse_down_position: None,
             matches: Vec::new(),
+            image_cache: HashMap::default(),
 
             selection_head: None,
             breadcrumb_text: String::new(),
@@ -982,6 +1031,7 @@ impl TerminalBuilder {
             hyperlink_regex_searches: RegexSearches::default(),
             vi_mode_enabled: false,
             is_remote_terminal: false,
+            osc7_cwd: None,
             last_mouse_move_time: Instant::now(),
             last_hyperlink_search_position: None,
             mouse_down_hyperlink: None,
@@ -1230,7 +1280,7 @@ impl TerminalBuilder {
 
             let no_task = task.is_none();
             let terminal = Terminal {
-            content_dirty: true,
+                content_dirty: true,
                 task,
                 terminal_type,
                 subprocess,
@@ -1244,6 +1294,7 @@ impl TerminalBuilder {
                 last_mouse: None,
                 mouse_down_position: None,
                 matches: Vec::new(),
+                image_cache: HashMap::default(),
 
                 selection_head: None,
                 breadcrumb_text: String::new(),
@@ -1256,6 +1307,7 @@ impl TerminalBuilder {
                 ),
                 vi_mode_enabled: false,
                 is_remote_terminal,
+                osc7_cwd: None,
                 last_mouse_move_time: Instant::now(),
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
@@ -1426,6 +1478,9 @@ pub struct Terminal {
     pub content_dirty: bool,
     pub selection_head: Option<Point>,
 
+    /// Cache of GPU-ready images keyed by (graphics image id, generation).
+    image_cache: HashMap<(u64, u64), Arc<gpui::RenderImage>>,
+
     pub breadcrumb_text: String,
     title_override: Option<String>,
     scroll_px: Pixels,
@@ -1435,6 +1490,9 @@ pub struct Terminal {
     task: Option<TaskState>,
     vi_mode_enabled: bool,
     is_remote_terminal: bool,
+    /// Working directory reported by the shell via `OSC 7`. Used for remote
+    /// terminals where the client cannot inspect the remote shell's process.
+    osc7_cwd: Option<PathBuf>,
     last_mouse_move_time: Instant,
     last_hyperlink_search_position: Option<GpuiPoint<Pixels>>,
     mouse_down_hyperlink: Option<HyperlinkMatch>,
@@ -1535,6 +1593,15 @@ impl Terminal {
             TerminalBackendEvent::ResetTitle => {
                 self.breadcrumb_text = String::new();
                 cx.emit(Event::BreadcrumbsChanged);
+            }
+            TerminalBackendEvent::Notification(title, body, progress) => {
+                cx.emit(Event::Notification(title, body, progress));
+            }
+            TerminalBackendEvent::Cwd(path) => {
+                if self.osc7_cwd.as_ref() != Some(&path) {
+                    self.osc7_cwd = Some(path);
+                    cx.emit(Event::CwdChanged);
+                }
             }
             TerminalBackendEvent::ClipboardStore(data) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(data))
@@ -1749,31 +1816,52 @@ impl Terminal {
         } = hyperlink;
         let prev_hovered_word = self.last_content.last_hovered_word.take();
 
-        let target = if is_url {
-            if let Some(path) = maybe_url_or_path.strip_prefix("file://") {
-                let decoded_path = urlencoding::decode(path)
-                    .map(|decoded| decoded.into_owned())
-                    .unwrap_or(path.to_owned());
-
-                MaybeNavigationTarget::PathLike(PathLikeTarget {
-                    maybe_path: decoded_path,
-                    terminal_dir: self.working_directory(),
-                })
-            } else {
-                MaybeNavigationTarget::Url(maybe_url_or_path.clone())
-            }
-        } else {
-            MaybeNavigationTarget::PathLike(PathLikeTarget {
-                maybe_path: maybe_url_or_path.clone(),
-                terminal_dir: self.working_directory(),
-            })
-        };
+        let target = self.navigate_target(&maybe_url_or_path, is_url);
 
         if open {
             cx.emit(Event::Open(target));
         } else {
             self.update_selected_word(prev_hovered_word, range, maybe_url_or_path, target, cx);
         }
+    }
+
+    /// Resolve a hyperlink text into a navigation target (URL or path-like).
+    fn navigate_target(&self, maybe_url_or_path: &str, is_url: bool) -> MaybeNavigationTarget {
+        if is_url {
+            if let Some(path) = maybe_url_or_path.strip_prefix("file://") {
+                let decoded_path = urlencoding::decode(path)
+                    .map(|decoded| decoded.into_owned())
+                    .unwrap_or_else(|_| path.to_owned());
+
+                MaybeNavigationTarget::PathLike(PathLikeTarget {
+                    maybe_path: decoded_path,
+                    terminal_dir: self.working_directory(),
+                })
+            } else {
+                MaybeNavigationTarget::Url(maybe_url_or_path.to_owned())
+            }
+        } else {
+            MaybeNavigationTarget::PathLike(PathLikeTarget {
+                maybe_path: maybe_url_or_path.to_owned(),
+                terminal_dir: self.working_directory(),
+            })
+        }
+    }
+
+    /// Open a hyperlink identified by the link picker.
+    pub fn open_link(&mut self, text: &str, is_url: bool, cx: &mut Context<Self>) {
+        let target = self.navigate_target(text, is_url);
+        cx.emit(Event::Open(target));
+    }
+
+    /// Collect every hyperlink visible on screen, for the link picker.
+    pub fn visible_hyperlinks(&mut self) -> Vec<(String, bool)> {
+        let term_lock = self.term.lock();
+        find_all_visible_links(
+            &term_lock,
+            &mut self.hyperlink_regex_searches,
+            self.path_style,
+        )
     }
 
     fn find_hyperlink_at_point(&mut self, point: Point) -> Option<HyperlinkMatch> {
@@ -1830,6 +1918,13 @@ impl Terminal {
         apply_config(&self.term, &self.term_config);
     }
 
+    /// Apply graphics-related terminal settings (image display + pool budget).
+    pub fn apply_graphics_settings(&mut self, settings: &TerminalSettings) {
+        self.term_config.graphics_enabled = settings.image_display;
+        self.term_config.max_image_memory = settings.max_image_memory;
+        apply_config(&self.term, &self.term_config);
+    }
+
     pub fn write_output(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         // Inject bytes directly into the terminal emulator and refresh the UI.
         // This bypasses the PTY/event loop for display-only terminals.
@@ -1849,6 +1944,26 @@ impl Terminal {
 
     pub fn viewport_lines(&self) -> usize {
         screen_lines(&self.term.lock_unfair())
+    }
+
+    /// Grid points where shell prompts started (OSC 133), oldest first.
+    pub fn prompt_marks(&self) -> Vec<Point> {
+        term_prompt_marks(&self.term.lock_unfair())
+    }
+
+    /// The most recent prompt mark, if any.
+    pub fn last_prompt_mark(&self) -> Option<Point> {
+        last_term_prompt_mark(&self.term.lock_unfair())
+    }
+
+    /// Scroll so the most recent shell prompt (OSC 133) becomes visible.
+    /// Returns whether a mark existed.
+    pub fn jump_to_previous_prompt(&mut self) -> bool {
+        let Some(mark) = self.last_prompt_mark() else {
+            return false;
+        };
+        self.events.push_back(InternalEvent::ScrollToPoint(mark));
+        true
     }
 
     //To test:
@@ -1949,9 +2064,59 @@ impl Terminal {
         self.last_content.scrolled_to_bottom
     }
 
+    /// Return a GPU-ready [`gpui::RenderImage`] for a decoded terminal image,
+    /// caching it so texture upload happens once per image.
+    ///
+    /// Animated images (GIF / kitty animation frames) produce a multi-frame
+    /// [`gpui::RenderImage`] which GPUI animates automatically.
+    pub fn render_image(
+        &mut self,
+        image: &Arc<alacritty_terminal::graphics::Image>,
+    ) -> Arc<gpui::RenderImage> {
+        let cache_key = (image.id, image.generation);
+        if let Some(cached) = self.image_cache.get(&cache_key) {
+            return cached.clone();
+        }
+
+        // GPUI expects BGRA byte order and per-frame delays.
+        let mut frames = smallvec::SmallVec::<[image::Frame; 1]>::new();
+        for frame in std::iter::once(image.clone()).chain(image.frames.iter().cloned()) {
+            let mut bgra = frame.rgba.as_ref().clone();
+            for pixel in bgra.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            let rgba_image =
+                image::RgbaImage::from_raw(frame.width, frame.height, bgra).expect("valid size");
+            let delay_ms = frame.delay_ms.max(1);
+            let delay = image::Delay::from_numer_denom_ms(delay_ms, 1000);
+            frames.push(image::Frame::from_parts(rgba_image, 0, 0, delay));
+        }
+
+        let render_image = Arc::new(gpui::RenderImage::new(frames));
+
+        // Animated images bump `generation` every frame, which would otherwise
+        // accumulate a stale cache entry per frame and eventually trigger the
+        // wholesale `clear()` below, forcing *every* visible image (including
+        // static ones) to be re-decoded and re-uploaded every frame. Keep only
+        // the newest generation per image id instead.
+        self.image_cache.retain(|&(id, _), _| id != image.id);
+
+        // Bound the cache; evicted entries are lazily re-uploaded on demand.
+        if self.image_cache.len() >= 128 {
+            self.image_cache.clear();
+        }
+        self.image_cache.insert(cache_key, render_image.clone());
+        render_image
+    }
+
     ///Resize the terminal and the PTY.
     pub fn set_size(&mut self, new_bounds: TerminalBounds) {
         let new_bounds = normalize_terminal_bounds(new_bounds);
+
+        // Keep the graphics engine's cell size in sync for placement sizing.
+        self.term
+            .lock()
+            .set_image_cell_size(new_bounds.cell_width.into(), new_bounds.line_height.into());
 
         let old_bounds = self.last_content.terminal_bounds;
         self.last_content.terminal_bounds = new_bounds;
@@ -2091,7 +2256,7 @@ impl Terminal {
     fn clear_for_init_command(&mut self, cx: &mut Context<Self>) {
         let mut term = self.term.lock_unfair();
         clear_saved_screen(&mut term);
-        self.last_content = make_content(&term, &self.last_content);
+        self.last_content = make_content(&mut term, &self.last_content);
         cx.emit(Event::Wakeup);
     }
 
@@ -2265,7 +2430,7 @@ impl Terminal {
 
     pub fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.content_dirty && self.events.is_empty() {
-             return;
+            return;
         }
 
         let term = self.term.clone();
@@ -2275,7 +2440,7 @@ impl Terminal {
             self.process_terminal_event(&e, &mut terminal, window, cx)
         }
 
-        self.last_content = make_content(&terminal, &self.last_content);
+        self.last_content = make_content(&mut terminal, &self.last_content);
         self.content_dirty = false;
     }
 
@@ -2545,9 +2710,20 @@ impl Terminal {
                             .push_back(InternalEvent::SetSelection(Some(selection)));
                     }
                 }
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 MouseButton::Middle => {
-                    if let Some(item) = cx.read_from_primary() {
+                    // Middle-clicking inside the current selection copies it to
+                    // the clipboard; clicking elsewhere pastes the clipboard,
+                    // matching kitty's default middle-click behavior.
+                    let clicked_on_selection = self
+                        .last_content
+                        .selection
+                        .as_ref()
+                        .map(|selection| selection.contains(point))
+                        .unwrap_or(false);
+
+                    if clicked_on_selection {
+                        self.copy(Some(true));
+                    } else if let Some(item) = cx.read_from_clipboard() {
                         let text = item.text().unwrap_or_default();
                         self.paste(&text);
                     }
@@ -2707,13 +2883,14 @@ impl Terminal {
         })
     }
 
-    pub fn shell(&self) -> &task::Shell { &self.template.shell }
+    pub fn shell(&self) -> &task::Shell {
+        &self.template.shell
+    }
     pub fn working_directory(&self) -> Option<PathBuf> {
         if self.is_remote_terminal {
-            // We can't yet reliably detect the working directory of a shell on the
-            // SSH host. Until we can do that, it doesn't make sense to display
-            // the working directory on the client and persist that.
-            None
+            // The remote shell's directory can't be inspected locally; use the
+            // directory it reports via `OSC 7` (if any).
+            self.osc7_cwd.clone()
         } else {
             self.client_side_working_directory()
         }
@@ -3350,7 +3527,7 @@ mod tests {
     use gpui::MouseMoveEvent;
     use gpui::{
         ClipboardItem, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
-        TestAppContext, bounds, point, size,
+        TestAppContext, VisualContext, bounds, point, size,
     };
     use parking_lot::Mutex;
     use rand::{Rng, distr, rngs::StdRng};
@@ -3644,8 +3821,8 @@ mod tests {
         cx.run_until_parked();
 
         terminal.update(cx, |terminal, _cx| {
-            let term_lock = terminal.term.lock();
-            terminal.last_content = make_content(&term_lock, &terminal.last_content);
+            let mut term_lock = terminal.term.lock();
+            terminal.last_content = make_content(&mut term_lock, &terminal.last_content);
             drop(term_lock);
 
             let terminal_bounds = TerminalBounds::new(
@@ -3745,6 +3922,135 @@ mod tests {
             modifiers: Modifiers::none(),
         };
         terminal.mouse_drag(&drag_event, region, cx);
+    }
+
+    fn middle_mouse_down_at(
+        terminal: &mut Terminal,
+        position: GpuiPoint<Pixels>,
+        cx: &mut Context<Terminal>,
+    ) {
+        let mouse_down = MouseDownEvent {
+            button: MouseButton::Middle,
+            position,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: true,
+        };
+        terminal.mouse_down(&mouse_down, cx);
+    }
+
+    fn init_middle_click_test(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Terminal>, &mut gpui::VisualTestContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        // Render "hello world" on a fixed 20x10px cell grid.
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.write_output(b"hello world\r\n", cx);
+            terminal.sync(window, cx);
+
+            let terminal_bounds = TerminalBounds::new(
+                px(10.0),
+                px(20.0),
+                bounds(point(px(0.0), px(0.0)), size(px(400.0), px(400.0))),
+            );
+            terminal.last_content.terminal_bounds = terminal_bounds;
+            let mut term = terminal.term.lock_unfair();
+            terminal.last_content = make_content(&mut term, &terminal.last_content);
+        });
+
+        (terminal, window)
+    }
+
+    #[gpui::test]
+    async fn test_middle_click_copies_selection(cx: &mut TestAppContext) {
+        let (terminal, window) = init_middle_click_test(cx);
+
+        // Drag-select "hello" (columns 0-4).
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            left_mouse_down_at(terminal, point(px(5.0), px(5.0)), cx);
+            left_mouse_drag_to(terminal, point(px(95.0), px(5.0)), cx);
+            left_mouse_up_at(terminal, point(px(95.0), px(5.0)), cx);
+            terminal.sync(window, cx);
+            assert!(
+                terminal.last_content.selection.is_some(),
+                "expected a selection after dragging"
+            );
+        });
+
+        // Middle-clicking inside the selection copies it, keeping the selection.
+        window.update_window_entity(&terminal, |terminal, _window, cx| {
+            middle_mouse_down_at(terminal, point(px(45.0), px(5.0)), cx);
+            assert!(
+                terminal
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, InternalEvent::Copy(Some(true)))),
+                "middle-clicking a selection should enqueue a keep-selection copy"
+            );
+        });
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.sync(window, cx);
+        });
+
+        drop(window);
+        let clipboard = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(clipboard.as_deref(), Some("hello"));
+    }
+
+    #[gpui::test]
+    async fn test_middle_click_outside_selection_pastes_clipboard(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string("clipboard-content".to_string()))
+        });
+
+        let (terminal, window) = init_middle_click_test(cx);
+
+        // Drag-select "hello" so the selection path is exercised.
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            left_mouse_down_at(terminal, point(px(5.0), px(5.0)), cx);
+            left_mouse_drag_to(terminal, point(px(95.0), px(5.0)), cx);
+            left_mouse_up_at(terminal, point(px(95.0), px(5.0)), cx);
+            terminal.sync(window, cx);
+        });
+
+        // Middle-clicking outside the selection pastes the clipboard.
+        window.update_window_entity(&terminal, |terminal, _window, cx| {
+            middle_mouse_down_at(terminal, point(px(300.0), px(5.0)), cx);
+            assert!(
+                !terminal
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, InternalEvent::Copy(_))),
+                "middle-clicking outside a selection should not copy"
+            );
+            let writes = terminal.take_pty_write_log();
+            assert!(
+                writes.iter().any(|write| write == b"clipboard-content"),
+                "middle-clicking outside a selection should paste the clipboard, got {writes:?}"
+            );
+        });
+
+        // Pasting must not clobber the clipboard.
+        drop(window);
+        let clipboard = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(clipboard.as_deref(), Some("clipboard-content"));
     }
 
     /// A left click that jitters by a pixel or two (e.g. the window-focusing
@@ -4443,8 +4749,8 @@ mod tests {
 
         // Get the content by directly accessing the term
         let content = terminal.update(cx, |terminal, _cx| {
-            let term = terminal.term.lock_unfair();
-            make_content(&term, &terminal.last_content)
+            let mut term = terminal.term.lock_unfair();
+            make_content(&mut term, &terminal.last_content)
         });
 
         // If LF is properly converted to CRLF, each line should start at column 0
@@ -4470,6 +4776,115 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_write_output_displays_kitty_graphics(cx: &mut TestAppContext) {
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b_Ga=t,t=1,f=100;\x1b\\", cx);
+        });
+
+        // A 1x1 RGBA red pixel, transmitted in two chunks and placed.
+        let pixels = [255, 0, 0, 255];
+        let mut seq = format!("\x1b_Ga=t,t=1,f=32,s=1,v=1;").into_bytes();
+        seq.extend_from_slice(&pixels);
+        seq.extend_from_slice(b"\x1b\\");
+        seq.extend_from_slice(b"\x1b_Ga=p,i=1,c=1,r=1\x1b\\");
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(&seq, cx);
+        });
+
+        terminal.update(cx, |terminal, _cx| {
+            let mut term = terminal.term.lock_unfair();
+            let content = make_content(&mut term, &terminal.last_content);
+            assert_eq!(content.images.len(), 1, "one image should be placed");
+            let image = &content.images[0];
+            assert_eq!(image.cols, 1);
+            assert_eq!(image.rows, 1);
+            assert_eq!(image.image.width, 1);
+            assert_eq!(image.image.height, 1);
+            assert_eq!(image.image.rgba.as_slice(), &pixels[..]);
+
+            // Images can be deleted via the kitty protocol.
+            term.gc_images();
+            term.image_state_mut().clear();
+            let content = make_content(&mut term, &terminal.last_content);
+            assert!(content.images.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_chafa_style_kitty_output(cx: &mut TestAppContext) {
+        use base64::Engine as _;
+        use image::ImageEncoder as _;
+        // Mimics chafa's exact encoding: `a=T`, PNG (f=100) with source
+        // dimensions (s/v), cell size (c/r) and 4KiB base64 chunks.
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        let rgba = image::RgbaImage::from_pixel(8, 4, image::Rgba([12, 34, 56, 255]));
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(
+                rgba.as_raw().as_slice(),
+                8,
+                4,
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+
+        let mut seq = Vec::new();
+        for (i, chunk) in b64.as_bytes().chunks(4096).enumerate() {
+            let more = if i + 1 < b64.as_bytes().chunks(4096).count() {
+                1
+            } else {
+                0
+            };
+            seq.extend_from_slice(format!("\x1b_Ga=T,f=100,s=8,v=4,c=4,r=2,m={more};").as_bytes());
+            seq.extend_from_slice(chunk);
+            seq.extend_from_slice(b"\x1b\\");
+        }
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(&seq, cx);
+        });
+
+        terminal.update(cx, |terminal, _cx| {
+            let mut term = terminal.term.lock_unfair();
+            let content = make_content(&mut term, &terminal.last_content);
+            assert_eq!(
+                content.images.len(),
+                1,
+                "chafa-style output should place one image"
+            );
+            let image = &content.images[0];
+            assert_eq!(image.image.width, 8);
+            assert_eq!(image.image.height, 4);
+            // a=T advances the cursor past the placement.
+            assert_eq!(image.point.column, 0);
+        });
+    }
+
+    #[gpui::test]
     async fn test_write_output_preserves_existing_crlf(cx: &mut TestAppContext) {
         let terminal = cx.new(|cx| {
             TerminalBuilder::new_display_only(
@@ -4490,8 +4905,8 @@ mod tests {
 
         // Get the content by directly accessing the term
         let content = terminal.update(cx, |terminal, _cx| {
-            let term = terminal.term.lock_unfair();
-            make_content(&term, &terminal.last_content)
+            let mut term = terminal.term.lock_unfair();
+            make_content(&mut term, &terminal.last_content)
         });
 
         let cells = &content.cells;
@@ -4531,8 +4946,8 @@ mod tests {
 
         // Get the content by directly accessing the term
         let content = terminal.update(cx, |terminal, _cx| {
-            let term = terminal.term.lock_unfair();
-            make_content(&term, &terminal.last_content)
+            let mut term = terminal.term.lock_unfair();
+            make_content(&mut term, &terminal.last_content)
         });
 
         let cells = &content.cells;

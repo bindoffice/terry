@@ -2,7 +2,7 @@ use alacritty_terminal::{
     Term,
     event::EventListener,
     grid::Dimensions,
-    index::{Boundary, Column, Direction as AlacDirection, Point as AlacPoint},
+    index::{Boundary, Column, Direction as AlacDirection, Line, Point as AlacPoint},
     term::{
         cell::Flags,
         search::{Match, RegexIter, RegexSearch},
@@ -17,7 +17,7 @@ use std::{
 use url::Url;
 use util::paths::{PathStyle, UrlExt};
 
-use crate::Range;
+use crate::{Point, Range};
 
 const URL_REGEX: &str = r#"(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file://|git://|ssh:|ftp://|zed://)[^\u{0000}-\u{001F}\u{007F}-\u{009F}<>"\s{-}\^⟨⟩`']+"#;
 const WIDE_CHAR_SPACERS: Flags =
@@ -147,6 +147,116 @@ pub(crate) fn find_from_grid_point<T: EventListener>(
     };
 
     found_word.map(|found_word| normalize_found_word(found_word, path_style))
+}
+
+/// Collect every hyperlink visible on screen: OSC 8 hyperlinks plus URL / path
+/// regex matches, deduplicated. Returns `(text, is_url)` pairs for the link
+/// picker. `is_url` is `true` for URLs (and `file://` IRIs which the caller
+/// re-resolves); path-like matches are relative to the terminal's cwd.
+///
+/// The result is capped to keep the picker usable on noisy output.
+const MAX_VISIBLE_LINKS: usize = 500;
+
+pub(crate) fn find_all_visible_links<T: EventListener>(
+    term: &Term<T>,
+    regex_searches: &mut RegexSearches,
+    path_style: PathStyle,
+) -> Vec<(String, bool)> {
+    let grid = term.grid();
+    let display_offset = grid.display_offset() as i32;
+    let first_line = AlacPoint::new(Line(-display_offset), Column(0));
+    let last_line = AlacPoint::new(
+        Line(grid.screen_lines() as i32 - 1 - display_offset),
+        grid.last_column(),
+    );
+
+    let mut links: Vec<(String, bool)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |text: String, is_url: bool, links: &mut Vec<(String, bool)>| {
+        let key = format!("{is_url}\u{1}{text}");
+        if !text.is_empty()
+            && text.len() < 4096
+            && seen.insert(key)
+            && links.len() < MAX_VISIBLE_LINKS
+        {
+            links.push((text, is_url));
+        }
+    };
+
+    // OSC 8 hyperlinks: one entry per distinct URI.
+    for line_ix in first_line.line.0..=last_line.line.0 {
+        let line = Line(line_ix);
+        for col in 0..grid.columns() {
+            if let Some(link) = grid[line][Column(col)].hyperlink() {
+                let uri = link.uri().to_owned();
+                push(uri, true, &mut links);
+            }
+        }
+    }
+
+    // Regex-based links, run per visible line.
+    for line_ix in first_line.line.0..=last_line.line.0 {
+        let line = Line(line_ix);
+        let text = term.bounds_to_string(
+            AlacPoint::new(line, Column(0)),
+            AlacPoint::new(line, grid.last_column()),
+        );
+        let text = text.trim_end_matches('\n');
+        if text.is_empty() {
+            continue;
+        }
+
+        if let Some(url_regex) = regex_searches.url_regex.as_mut() {
+            let line_start = AlacPoint::new(line, Column(0));
+            let line_end = AlacPoint::new(line, grid.last_column());
+            for rm in RegexIter::new(line_start, line_end, AlacDirection::Right, term, url_regex) {
+                let url = term.bounds_to_string(*rm.start(), *rm.end());
+                let (url, _) = sanitize_url_punctuation(url, rm, term);
+                push(url, true, &mut links);
+            }
+        }
+
+        for path_regex in &mut regex_searches.path_hyperlink_regexes {
+            for captures in path_regex.captures_iter(text) {
+                let Some(m) = captures.get(0) else { continue };
+                let link = captures
+                    .name("link")
+                    .map(|c| c.as_str().to_owned())
+                    .unwrap_or_else(|| m.as_str().to_owned());
+                let mut path = captures
+                    .name("path")
+                    .map(|c| c.as_str().to_owned())
+                    .unwrap_or_else(|| link.clone());
+                if let Some(line) = captures
+                    .name("line")
+                    .and_then(|c| c.as_str().parse::<u32>().ok())
+                {
+                    path += &format!(":{line}");
+                    if let Some(column) = captures
+                        .name("column")
+                        .and_then(|c| c.as_str().parse::<u32>().ok())
+                    {
+                        path += &format!(":{column}");
+                    }
+                }
+                push(path, false, &mut links);
+            }
+        }
+    }
+
+    // Normalize `file://` IRIs to paths, matching the hover path behavior.
+    links
+        .into_iter()
+        .map(|(text, is_url)| {
+            let normalized = normalize_hyperlink_match(
+                text,
+                is_url,
+                Range::new(Point::new(0, 0), Point::new(0, 0)),
+                path_style,
+            );
+            (normalized.text, normalized.is_url)
+        })
+        .collect()
 }
 
 fn normalize_found_word(
@@ -1977,5 +2087,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn find_all_visible_links_collects_urls_paths_and_osc8() {
+        // Build a terminal with a URL, a path and an OSC 8 link on screen.
+        let size = TermSize::new(100, 8);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut processor = vte::ansi::Processor::<vte::ansi::StdSyncHandler>::new();
+
+        processor.advance(
+            &mut term,
+            b"see https://example.com/page?q=1 and src/main.rs:12:3 now\r\n",
+        );
+        processor.advance(
+            &mut term,
+            b"\x1b]8;;https://osc8.example/path\x1b\\an osc8 link\x1b]8;;\x1b\\\r\n",
+        );
+
+        let mut regex_searches = RegexSearches::new(Vec::<String>::new(), 0);
+        // The default path regexes are needed for the path match.
+        {
+            let default_settings_content: Rc<SettingsContent> =
+                settings::parse_json_with_comments(&settings::default_settings()).unwrap();
+            let default_terminal_settings =
+                TerminalSettings::from_settings(&default_settings_content);
+            regex_searches = RegexSearches::new(
+                default_terminal_settings.path_hyperlink_regexes.clone(),
+                1000,
+            );
+        }
+
+        let links = find_all_visible_links(&term, &mut regex_searches, PathStyle::local());
+
+        // URL matched.
+        assert!(
+            links
+                .iter()
+                .any(|(text, is_url)| *is_url && text == "https://example.com/page?q=1"),
+            "expected the URL in {links:?}"
+        );
+        // Path with line:column matched as a path.
+        assert!(
+            links
+                .iter()
+                .any(|(text, is_url)| !is_url && text.contains("src/main.rs:12:3")),
+            "expected the path in {links:?}"
+        );
+        // OSC 8 link collected.
+        assert!(
+            links
+                .iter()
+                .any(|(text, is_url)| *is_url && text == "https://osc8.example/path"),
+            "expected the OSC 8 link in {links:?}"
+        );
     }
 }

@@ -18,6 +18,13 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("rename", "Rename");
             m.insert("move_up", "Move Up");
             m.insert("move_down", "Move Down");
+            m.insert("layout", "Layout");
+            m.insert("layout_manual", "Manual");
+            m.insert("layout_tall", "Tall");
+            m.insert("layout_grid", "Grid");
+            m.insert("layout_stack", "Stack");
+            m.insert("select_link_to_open", "Select a link to open…");
+            m.insert("no_links_found", "No links found");
             m.insert("close", "Close");
             m.insert("terminal_list", "Terminal List");
             m.insert("group", "Group");
@@ -179,6 +186,13 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("rename", "重命名");
             m.insert("move_up", "上移");
             m.insert("move_down", "下移");
+            m.insert("layout", "平铺布局");
+            m.insert("layout_manual", "手动分屏");
+            m.insert("layout_tall", "竖向平铺");
+            m.insert("layout_grid", "网格平铺");
+            m.insert("layout_stack", "堆叠");
+            m.insert("select_link_to_open", "选择要打开的链接…");
+            m.insert("no_links_found", "未找到链接");
             m.insert("close", "关闭");
             m.insert("terminal_list", "终端列表");
             m.insert("group", "分组");
@@ -192,10 +206,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("ui_language_description", "界面语言。默认跟随系统语言。");
             m.insert("language_system", "跟随系统");
             m.insert("appearance", "外观");
-            m.insert(
-                "appearance_description",
-                "界面与终端的主题、字体和字号。",
-            );
+            m.insert("appearance_description", "界面与终端的主题、字体和字号。");
             m.insert("font_family", "字体");
             m.insert("font_size", "字号");
             m.insert("font_system", "系统字体");
@@ -207,7 +218,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("keymap_bindings_count", "个快捷键");
             m.insert("open_keymap_file", "打开快捷键配置文件");
             m.insert("vim_mode", "Vim 模式");
-                        m.insert("menu_file", "文件");
+            m.insert("menu_file", "文件");
             m.insert("open", "打开…");
             m.insert("open_recent", "打开最近项目…");
             m.insert("add_folder_to_project", "将文件夹添加到项目…");
@@ -228,7 +239,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("add_openai_provider", "添加 OpenAI 服务商");
             m.insert("add_claude_provider", "添加 Claude 服务商");
             m.insert("add_provider_title", "添加 {kind} 服务商");
-            m.insert("no_providers_yet", "还没有服务商。请添加兼容 OpenAI 或 Claude 的接口。");
+            m.insert(
+                "no_providers_yet",
+                "还没有服务商。请添加兼容 OpenAI 或 Claude 的接口。",
+            );
             m.insert("save_and_fetch_models", "保存并拉取模型");
             m.insert("cancel", "取消");
             m.insert("fetching_models", "正在拉取模型…");
@@ -236,15 +250,24 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("provider_name_required", "请填写服务商名称。");
             m.insert("base_url_required", "请填写 Base URL。");
             m.insert("api_key_required", "请填写 API Key。");
-            m.insert("api_key_required_for_refresh", "未找到 API Key。请重新添加服务商，或在刷新前粘贴 Key。");
+            m.insert(
+                "api_key_required_for_refresh",
+                "未找到 API Key。请重新添加服务商，或在刷新前粘贴 Key。",
+            );
             m.insert("provider_name_taken", "已存在同名服务商。");
-            m.insert("provider_added_with_models", "已添加服务商，共 {count} 个模型。");
+            m.insert(
+                "provider_added_with_models",
+                "已添加服务商，共 {count} 个模型。",
+            );
             m.insert("models_refreshed", "已刷新 {count} 个模型。");
             m.insert("provider_removed", "已删除服务商。");
             m.insert("refresh_models", "刷新模型");
             m.insert("remove_provider", "删除服务商");
             m.insert("model_count", "{count} 个模型");
-            m.insert("models_fetched_on_save", "保存时会从 Base URL 拉取模型列表。");
+            m.insert(
+                "models_fetched_on_save",
+                "保存时会从 Base URL 拉取模型列表。",
+            );
             m.insert("agent", "Agent");
             m.insert("split_pane", "分屏");
             m.insert("split_right", "向右分屏");
@@ -287,10 +310,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("visit_the", "请访问");
             m.insert("provider_dashboard", "{provider} 控制台");
             m.insert("to_generate_api_key", "以生成 API Key。");
-            m.insert(
-                "or_set_env_var",
-                "或设置环境变量 {env_var} 并重启后生效。",
-            );
+            m.insert("or_set_env_var", "或设置环境变量 {env_var} 并重启后生效。");
             m.insert("save", "保存");
             m.insert("reset_key", "重置密钥");
             m.insert("api_key_set_in_env", "API Key 已通过环境变量设置");
@@ -334,6 +354,13 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("rename", "重新命名");
             m.insert("move_up", "上移");
             m.insert("move_down", "下移");
+            m.insert("layout", "平鋪佈局");
+            m.insert("layout_manual", "手動分割");
+            m.insert("layout_tall", "縱向平鋪");
+            m.insert("layout_grid", "網格平鋪");
+            m.insert("layout_stack", "堆疊");
+            m.insert("select_link_to_open", "選擇要開啟的連結…");
+            m.insert("no_links_found", "找不到連結");
             m.insert("close", "關閉");
             m.insert("copy", "拷貝");
             m.insert("paste", "貼上");
@@ -355,10 +382,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("ui_language_description", "介面語言。預設跟隨系統語言。");
             m.insert("language_system", "跟隨系統");
             m.insert("appearance", "外觀");
-            m.insert(
-                "appearance_description",
-                "介面與終端機的主題、字型與字級。",
-            );
+            m.insert("appearance_description", "介面與終端機的主題、字型與字級。");
             m.insert("font_family", "字型");
             m.insert("font_size", "字級");
             m.insert("font_system", "系統字型");
@@ -382,7 +406,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("add_openai_provider", "新增 OpenAI 服務商");
             m.insert("add_claude_provider", "新增 Claude 服務商");
             m.insert("add_provider_title", "新增 {kind} 服務商");
-            m.insert("no_providers_yet", "還沒有服務商。請新增相容 OpenAI 或 Claude 的介面。");
+            m.insert(
+                "no_providers_yet",
+                "還沒有服務商。請新增相容 OpenAI 或 Claude 的介面。",
+            );
             m.insert("save_and_fetch_models", "儲存並拉取模型");
             m.insert("cancel", "取消");
             m.insert("fetching_models", "正在拉取模型…");
@@ -395,13 +422,19 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
                 "找不到 API Key。請重新新增服務商，或在重新整理前貼上 Key。",
             );
             m.insert("provider_name_taken", "已存在同名服務商。");
-            m.insert("provider_added_with_models", "已新增服務商，共 {count} 個模型。");
+            m.insert(
+                "provider_added_with_models",
+                "已新增服務商，共 {count} 個模型。",
+            );
             m.insert("models_refreshed", "已重新整理 {count} 個模型。");
             m.insert("provider_removed", "已刪除服務商。");
             m.insert("refresh_models", "重新整理模型");
             m.insert("remove_provider", "刪除服務商");
             m.insert("model_count", "{count} 個模型");
-            m.insert("models_fetched_on_save", "儲存時會從 Base URL 拉取模型列表。");
+            m.insert(
+                "models_fetched_on_save",
+                "儲存時會從 Base URL 拉取模型列表。",
+            );
             m.insert("save", "儲存");
             m.insert("reset_key", "重設金鑰");
             m.insert("api_key_set_in_env", "API Key 已透過環境變數設定");
@@ -413,7 +446,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("paste_api_key", "貼上你的 API Key…");
             m.insert("open_settings", "開啟設定");
             m.insert("customize_keymaps", "自訂快捷鍵");
-                        m.insert("menu_file", "檔案");
+            m.insert("menu_file", "檔案");
             m.insert("open", "開啟…");
             m.insert("open_recent", "開啟最近專案…");
             m.insert("add_folder_to_project", "將資料夾加入專案…");
@@ -445,6 +478,13 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("rename", "名前を変更");
             m.insert("move_up", "上へ移動");
             m.insert("move_down", "下へ移動");
+            m.insert("layout", "レイアウト");
+            m.insert("layout_manual", "手動");
+            m.insert("layout_tall", "縦並び");
+            m.insert("layout_grid", "グリッド");
+            m.insert("layout_stack", "スタック");
+            m.insert("select_link_to_open", "開くリンクを選択…");
+            m.insert("no_links_found", "リンクが見つかりません");
             m.insert("close", "閉じる");
             m.insert("copy", "コピー");
             m.insert("paste", "貼り付け");
@@ -568,6 +608,13 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("rename", "이름 바꾸기");
             m.insert("move_up", "위로 이동");
             m.insert("move_down", "아래로 이동");
+            m.insert("layout", "레이아웃");
+            m.insert("layout_manual", "수동");
+            m.insert("layout_tall", "세로 타일");
+            m.insert("layout_grid", "그리드");
+            m.insert("layout_stack", "스택");
+            m.insert("select_link_to_open", "열 링크 선택…");
+            m.insert("no_links_found", "링크를 찾을 수 없음");
             m.insert("close", "닫기");
             m.insert("copy", "복사");
             m.insert("paste", "붙여넣기");
@@ -1141,22 +1188,31 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "सिस्टम");
             m.insert("appearance", "दिखावट");
             m.insert("select_theme", "थीम चुनें…");
-                        m.insert("menu_file", "File");
+            m.insert("menu_file", "File");
             m.insert("open", "Open…");
             m.insert("open_recent", "Open Recent…");
             m.insert("add_folder_to_project", "Add Folder to Project…");
             m.insert("close_window", "Close Window");
             m.insert("settings", "सेटिंग्स");
             m.insert("open_recent_project", "हालिया प्रोजेक्ट खोलें");
-            m.insert("appearance_description", "इंटरफ़ेस और टर्मिनल के लिए थीम, फ़ॉन्ट और आकार।");
+            m.insert(
+                "appearance_description",
+                "इंटरफ़ेस और टर्मिनल के लिए थीम, फ़ॉन्ट और आकार।",
+            );
             m.insert("font_family", "फ़ॉन्ट");
             m.insert("font_size", "आकार");
             m.insert("font_system", "सिस्टम");
             m.insert("custom_shortcuts", "कस्टम शॉर्टकट");
             m.insert("keymap_settings", "कीबोर्ड शॉर्टकट");
-            m.insert("keymap_settings_description", "कीबोर्ड शॉर्टकट देखें और अनुकूलित करें।");
+            m.insert(
+                "keymap_settings_description",
+                "कीबोर्ड शॉर्टकट देखें और अनुकूलित करें।",
+            );
             m.insert("llm_providers", "LLM प्रदाता");
-            m.insert("llm_providers_description", "कस्टम Base URL के साथ OpenAI या Claude संगत प्रदाता जोड़ें। मॉडल API से लाए जाते हैं।");
+            m.insert(
+                "llm_providers_description",
+                "कस्टम Base URL के साथ OpenAI या Claude संगत प्रदाता जोड़ें। मॉडल API से लाए जाते हैं।",
+            );
             m.insert("save", "सहेजें");
             m.insert("cancel", "रद्द करें");
             m.insert("open_settings", "सेटिंग्स खोलें");
@@ -1387,14 +1443,17 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("language_system", "ระบบ");
             m.insert("appearance", "ลักษณะ");
             m.insert("select_theme", "เลือกธีม…");
-                        m.insert("menu_file", "File");
+            m.insert("menu_file", "File");
             m.insert("open", "Open…");
             m.insert("open_recent", "Open Recent…");
             m.insert("add_folder_to_project", "Add Folder to Project…");
             m.insert("close_window", "Close Window");
             m.insert("settings", "การตั้งค่า");
             m.insert("open_recent_project", "เปิดโปรเจกต์ล่าสุด");
-            m.insert("appearance_description", "ธีม แบบอักษร และขนาดสำหรับอินเทอร์เฟซและเทอร์มินัล");
+            m.insert(
+                "appearance_description",
+                "ธีม แบบอักษร และขนาดสำหรับอินเทอร์เฟซและเทอร์มินัล",
+            );
             m.insert("font_family", "แบบอักษร");
             m.insert("font_size", "ขนาด");
             m.insert("font_system", "ระบบ");
@@ -1402,7 +1461,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("keymap_settings", "ทางลัดแป้นพิมพ์");
             m.insert("keymap_settings_description", "ดูและปรับแต่งทางลัดแป้นพิมพ์");
             m.insert("llm_providers", "ผู้ให้บริการ LLM");
-            m.insert("llm_providers_description", "เพิ่มผู้ให้บริการที่เข้ากันได้กับ OpenAI หรือ Claude พร้อม Base URL ที่กำหนดเอง โมเดลจะดึงจาก API");
+            m.insert(
+                "llm_providers_description",
+                "เพิ่มผู้ให้บริการที่เข้ากันได้กับ OpenAI หรือ Claude พร้อม Base URL ที่กำหนดเอง โมเดลจะดึงจาก API",
+            );
             m.insert("save", "บันทึก");
             m.insert("cancel", "ยกเลิก");
             m.insert("open_settings", "เปิดการตั้งค่า");

@@ -49,6 +49,12 @@ pub(crate) fn to_esc_str(
     mode: Modes,
     option_as_meta: bool,
 ) -> Option<Cow<'static, str>> {
+    // When the application has enabled the kitty keyboard protocol, encode
+    // keystrokes as CSI u sequences so it can disambiguate modifiers.
+    if mode.contains(Modes::KITTY_KEYBOARD_PROTOCOL) {
+        return kitty_esc_str(keystroke);
+    }
+
     let modifiers = TerminalModifiers::new(keystroke);
 
     // Manual Bindings including modifiers
@@ -253,6 +259,105 @@ fn modifier_code(keystroke: &Keystroke) -> u32 {
     modifier_code + 1
 }
 
+/// CSI u key codes for special keys, from the kitty keyboard protocol.
+///
+/// https://sw.kovidgoyal.net/kitty/keyboard-protocol/
+fn kitty_key_code(key: &str) -> Option<u32> {
+    Some(match key {
+        "enter" => 13,
+        "tab" => 9,
+        "backspace" => 127,
+        "escape" => 27,
+        "space" => 32,
+        "up" => 57421,
+        "down" => 57422,
+        "left" => 57423,
+        "right" => 57424,
+        "home" => 57425,
+        "end" => 57426,
+        "pageup" => 57427,
+        "pagedown" => 57428,
+        "delete" => 57429,
+        "insert" => 57430,
+        "f1" => 57431,
+        "f2" => 57432,
+        "f3" => 57433,
+        "f4" => 57434,
+        "f5" => 57435,
+        "f6" => 57436,
+        "f7" => 57437,
+        "f8" => 57438,
+        "f9" => 57439,
+        "f10" => 57440,
+        "f11" => 57441,
+        "f12" => 57442,
+        "f13" => 57443,
+        "f14" => 57444,
+        "f15" => 57445,
+        "f16" => 57446,
+        "f17" => 57447,
+        "f18" => 57448,
+        "f19" => 57449,
+        "f20" => 57450,
+        "f21" => 57451,
+        "f22" => 57452,
+        "f23" => 57453,
+        "f24" => 57454,
+        _ => return None,
+    })
+}
+
+/// Modifier bits for the kitty keyboard protocol: the value is 1 plus the
+/// sum of modifier weights (shift = 1, alt = 2, ctrl = 4, super = 8).
+fn kitty_modifiers(keystroke: &Keystroke) -> u32 {
+    let mut mods = 1;
+    if keystroke.modifiers.shift {
+        mods += 1;
+    }
+    if keystroke.modifiers.alt {
+        mods += 2;
+    }
+    if keystroke.modifiers.control {
+        mods += 4;
+    }
+    if keystroke.modifiers.platform {
+        mods += 8;
+    }
+    mods
+}
+
+/// Encode a keystroke using the kitty keyboard protocol (CSI u).
+fn kitty_esc_str(keystroke: &Keystroke) -> Option<Cow<'static, str>> {
+    let mods = kitty_modifiers(keystroke);
+    let has_mods = mods != 1;
+
+    if let Some(code) = kitty_key_code(&keystroke.key) {
+        // Enter/Tab/Backspace/Escape/Space stay legacy when unmodified.
+        match keystroke.key.as_str() {
+            "enter" if !has_mods => return Some(Cow::Borrowed("\r")),
+            "tab" if !has_mods => return Some(Cow::Borrowed("\t")),
+            "backspace" if !has_mods => return Some(Cow::Borrowed("\x7f")),
+            "escape" if !has_mods => return Some(Cow::Borrowed("\x1b")),
+            "space" if !has_mods => return Some(Cow::Borrowed(" ")),
+            _ => {}
+        }
+        return Some(Cow::Owned(format!("\x1b[{code};{mods}u")));
+    }
+
+    // Printable characters.
+    if keystroke.key.chars().count() == 1 {
+        let c = keystroke.key.chars().next().unwrap();
+        if !c.is_ascii_control() {
+            if has_mods {
+                return Some(Cow::Owned(format!("\x1b[{};{mods}u", c as u32)));
+            }
+            return Some(Cow::Owned(keystroke.key.clone()));
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod test {
     use gpui::Modifiers;
@@ -319,6 +424,69 @@ mod test {
             to_esc_str(&shift_end, none, false),
             Some("\x1b[1;2F".into())
         );
+    }
+
+    #[test]
+    fn test_kitty_keyboard_protocol() {
+        let kitty = Modes::KITTY_KEYBOARD_PROTOCOL;
+
+        // Unmodified printable keys are sent as-is.
+        let a = Keystroke::parse("a").unwrap();
+        assert_eq!(to_esc_str(&a, kitty, false), Some("a".into()));
+
+        // Ctrl+letter uses CSI u with ctrl modifier bit (4) + 1.
+        let ctrl_c = Keystroke::parse("ctrl-c").unwrap();
+        assert_eq!(to_esc_str(&ctrl_c, kitty, false), Some("\x1b[99;5u".into()));
+
+        // Shift+Ctrl+letter.
+        let ctrl_shift_a = Keystroke::parse("ctrl-shift-a").unwrap();
+        assert_eq!(
+            to_esc_str(&ctrl_shift_a, kitty, false),
+            Some("\x1b[97;6u".into())
+        );
+
+        // Alt+key uses the alt modifier bit (2) + 1.
+        let alt_x = Keystroke::parse("alt-x").unwrap();
+        assert_eq!(to_esc_str(&alt_x, kitty, false), Some("\x1b[120;3u".into()));
+
+        // Special keys use kitty key codes.
+        let up = Keystroke::parse("up").unwrap();
+        assert_eq!(to_esc_str(&up, kitty, false), Some("\x1b[57421;1u".into()));
+        let shift_up = Keystroke::parse("shift-up").unwrap();
+        assert_eq!(
+            to_esc_str(&shift_up, kitty, false),
+            Some("\x1b[57421;2u".into())
+        );
+        let shift_tab = Keystroke::parse("shift-tab").unwrap();
+        assert_eq!(
+            to_esc_str(&shift_tab, kitty, false),
+            Some("\x1b[9;2u".into())
+        );
+        let ctrl_f5 = Keystroke::parse("ctrl-f5").unwrap();
+        assert_eq!(
+            to_esc_str(&ctrl_f5, kitty, false),
+            Some("\x1b[57435;5u".into())
+        );
+
+        // Enter/Tab/Backspace/Escape stay legacy when unmodified.
+        let enter = Keystroke::parse("enter").unwrap();
+        assert_eq!(to_esc_str(&enter, kitty, false), Some("\r".into()));
+        let shift_enter = Keystroke::parse("shift-enter").unwrap();
+        assert_eq!(
+            to_esc_str(&shift_enter, kitty, false),
+            Some("\x1b[13;2u".into())
+        );
+        let escape = Keystroke::parse("escape").unwrap();
+        assert_eq!(to_esc_str(&escape, kitty, false), Some("\x1b".into()));
+        let ctrl_escape = Keystroke::parse("ctrl-escape").unwrap();
+        assert_eq!(
+            to_esc_str(&ctrl_escape, kitty, false),
+            Some("\x1b[27;5u".into())
+        );
+
+        // Legacy behavior without the protocol.
+        assert_eq!(to_esc_str(&ctrl_c, Modes::NONE, false), Some("\x03".into()));
+        assert_eq!(to_esc_str(&up, Modes::NONE, false), Some("\x1b[A".into()));
     }
 
     #[test]

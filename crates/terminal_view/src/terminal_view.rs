@@ -1,5 +1,6 @@
 mod persistence;
 pub mod terminal_element;
+mod terminal_link_picker;
 pub mod terminal_panel;
 mod terminal_path_like_target;
 pub mod terminal_scrollbar;
@@ -11,8 +12,8 @@ use editor::{
 use gpui::{
     Action, AnyElement, App, ClipboardEntry, DismissEvent, Entity, EventEmitter, ExternalPaths,
     FocusHandle, Focusable, Font, KeyContext, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
-    Pixels, Point as GpuiPoint, Render, ScrollWheelEvent, Styled, Subscription, Task, TaskExt,
-    WeakEntity, actions, anchored, deferred, div,
+    Pixels, Point as GpuiPoint, Render, ScrollWheelEvent, Styled, Subscription, SystemNotification,
+    Task, TaskExt, WeakEntity, actions, anchored, deferred, div,
 };
 use menu;
 use persistence::TerminalDb;
@@ -33,12 +34,14 @@ use std::{
 };
 use task::TaskId;
 use terminal::{
-    Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Modes, Paste, PasteText, Point, Range,
-    ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
-    Search, ShowCharacterPalette, TaskState, TaskStatus, Terminal, TerminalBounds, ToggleViMode,
+    Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Modes, OpenUrls, Paste, PasteText,
+    Point, Range, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom,
+    ScrollToTop, Search, ShowCharacterPalette, TaskState, TaskStatus, Terminal, TerminalBounds,
+    ToggleViMode,
     terminal_settings::{CursorShape, TerminalSettings},
 };
 use terminal_element::TerminalElement;
+use terminal_link_picker::TerminalLinkPicker;
 use terminal_panel::TerminalPanel;
 use terminal_path_like_target::{hover_path_like_target, open_path_like_target};
 use terminal_scrollbar::TerminalScrollHandle;
@@ -95,6 +98,8 @@ actions!(
     [
         /// Reruns the last executed task in the terminal.
         RerunTask,
+        /// Scrolls to the most recent shell prompt (requires OSC 133 shell integration).
+        JumpToPreviousPrompt,
     ]
 );
 
@@ -555,10 +560,7 @@ impl TerminalView {
                     assistant_enabled && !matches!(self.mode, TerminalMode::Embedded { .. }),
                     |menu| {
                         menu.separator()
-                            .action(
-                                i18n::t("inline_assist"),
-                                Box::new(InlineAssist::default()),
-                            )
+                            .action(i18n::t("inline_assist"), Box::new(InlineAssist::default()))
                             .when(has_selection && self.shows_workspace_actions(), |menu| {
                                 menu.action(
                                     i18n::t("add_to_agent_thread"),
@@ -597,7 +599,7 @@ impl TerminalView {
     }
 
     fn settings_changed(&mut self, cx: &mut Context<Self>) {
-        let settings = TerminalSettings::get_global(cx);
+        let settings = TerminalSettings::get_global(cx).clone();
         let breadcrumb_visibility_changed = self.show_breadcrumbs != settings.toolbar.breadcrumbs;
         self.show_breadcrumbs = settings.toolbar.breadcrumbs;
 
@@ -614,6 +616,10 @@ impl TerminalView {
                 term.set_cursor_shape(self.cursor_shape);
             });
         }
+
+        self.terminal.update(cx, |term, _| {
+            term.apply_graphics_settings(&settings);
+        });
 
         self.blink_manager.update(
             cx,
@@ -833,9 +839,54 @@ impl TerminalView {
         cx.notify();
     }
 
+    fn jump_to_previous_prompt(
+        &mut self,
+        _: &JumpToPreviousPrompt,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_alt_screen(cx) {
+            cx.propagate();
+            return;
+        }
+
+        let jumped = self
+            .terminal
+            .update(cx, |term, _| term.jump_to_previous_prompt());
+        if jumped {
+            cx.notify();
+        }
+    }
+
     fn toggle_vi_mode(&mut self, _: &ToggleViMode, _: &mut Window, cx: &mut Context<Self>) {
         self.terminal.update(cx, |term, _| term.toggle_vi_mode());
         cx.notify();
+    }
+
+    /// Opens a picker listing every hyperlink visible in the terminal.
+    fn open_urls(&mut self, _: &OpenUrls, window: &mut Window, cx: &mut Context<Self>) {
+        let links = self
+            .terminal
+            .update(cx, |term, _| term.visible_hyperlinks());
+        if links.is_empty() {
+            return;
+        }
+        if links.len() == 1 {
+            let (text, is_url) = links.into_iter().next().unwrap();
+            self.terminal
+                .update(cx, |term, cx| term.open_link(&text, is_url, cx));
+            return;
+        }
+
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let terminal = self.terminal.clone();
+        workspace.update(cx, |workspace, cx| {
+            workspace.toggle_modal(window, cx, |window, cx| {
+                TerminalLinkPicker::new(terminal.clone(), links, window, cx)
+            });
+        });
     }
 
     pub fn should_show_cursor(&self, focused: bool, cx: &mut Context<Self>) -> bool {
@@ -1152,6 +1203,34 @@ fn subscribe_for_terminal_events(
                     cx.emit(Event::Wakeup);
                 }
 
+                Event::Notification(title, body, _progress) => {
+                    let title = title
+                        .as_deref()
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or("")
+                        .to_owned();
+                    let body = body
+                        .as_deref()
+                        .filter(|b| !b.is_empty())
+                        .unwrap_or("")
+                        .to_owned();
+                    if !title.is_empty() || !body.is_empty() {
+                        // macOS refuses an empty body; kitty falls back to
+                        // using the body as the title, mirror that here.
+                        let (title, body) = if title.is_empty() {
+                            (body, String::new())
+                        } else {
+                            (title, body)
+                        };
+                        cx.show_system_notification(SystemNotification {
+                            tag: "terminal-osc9".into(),
+                            title: title.into(),
+                            body: body.into(),
+                            actions: Vec::new(),
+                        });
+                    }
+                }
+
                 Event::BlinkChanged(blinking) => {
                     terminal_view.blinking_terminal_enabled = *blinking;
 
@@ -1235,6 +1314,12 @@ fn subscribe_for_terminal_events(
                 Event::SelectionsChanged => {
                     window.invalidate_character_coordinates();
                     cx.emit(SearchEvent::ActiveMatchChanged)
+                }
+                Event::CwdChanged => {
+                    // The `previous_cwd` comparison at the top of this handler
+                    // already marks the terminal for re-serialization; refresh
+                    // anything that surfaces the directory (e.g. tab title).
+                    cx.emit(ItemEvent::UpdateTab);
                 }
             }
         },
@@ -1368,7 +1453,9 @@ impl Render for TerminalView {
             .on_action(cx.listener(TerminalView::scroll_page_down))
             .on_action(cx.listener(TerminalView::scroll_to_top))
             .on_action(cx.listener(TerminalView::scroll_to_bottom))
+            .on_action(cx.listener(TerminalView::jump_to_previous_prompt))
             .on_action(cx.listener(TerminalView::toggle_vi_mode))
+            .on_action(cx.listener(TerminalView::open_urls))
             .on_action(cx.listener(TerminalView::show_character_palette))
             .on_action(cx.listener(TerminalView::select_all))
             .on_action(cx.listener(TerminalView::rerun_task))
@@ -1890,14 +1977,16 @@ impl SerializableItem for TerminalView {
         let workspace_id = self.workspace_id?;
         let cwd = terminal.working_directory();
         let custom_title = self.custom_title.clone();
-        
+
         let shell = terminal.shell();
         let (shell_program, shell_args) = match shell {
             task::Shell::System => (None, None),
             task::Shell::Program(p) => (Some(p.clone()), None),
-            task::Shell::WithArguments { program, args, .. } => (Some(program.clone()), Some(args.join(" "))),
+            task::Shell::WithArguments { program, args, .. } => {
+                (Some(program.clone()), Some(args.join(" ")))
+            }
         };
-        
+
         self.needs_serialize = false;
 
         let db = TerminalDb::global(cx);
@@ -1949,17 +2038,22 @@ impl SerializableItem for TerminalView {
                         .log_err()
                         .flatten()
                         .filter(|title| !title.trim().is_empty());
-                        
+
                     let shell_data = db.get_shell(item_id, workspace_id).log_err();
                     let shell = match shell_data {
                         Some((Some(program), None)) => Some(task::Shell::Program(program)),
                         Some((Some(program), Some(args_str))) => {
-                            let args: Vec<String> = args_str.split(' ').map(|s| s.to_string()).collect();
-                            Some(task::Shell::WithArguments { program, args, title_override: None })
-                        },
+                            let args: Vec<String> =
+                                args_str.split(' ').map(|s| s.to_string()).collect();
+                            Some(task::Shell::WithArguments {
+                                program,
+                                args,
+                                title_override: None,
+                            })
+                        }
                         _ => None,
                     };
-                        
+
                     (cwd, custom_title, shell)
                 })
                 .ok()
