@@ -1447,7 +1447,7 @@ pub mod test {
         Window,
     };
     use project::{Project, ProjectEntryId, ProjectPath, WorktreeId};
-    use std::{any::Any, cell::Cell, sync::Arc};
+    use std::{any::Any, cell::Cell, path::PathBuf, sync::Arc};
     use util::rel_path::rel_path;
 
     pub struct TestProjectItem {
@@ -1770,7 +1770,9 @@ pub mod test {
             self.has_conflict
         }
 
-        fn directory_for_new_file(&self, _: &App) -> Option<PathBuf> { None }
+        fn directory_for_new_file(&self, _: &App) -> Option<PathBuf> {
+            None
+        }
         fn has_deleted_file(&self, _: &App) -> bool {
             self.has_deleted_file
         }

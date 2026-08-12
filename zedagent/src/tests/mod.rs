@@ -52,7 +52,7 @@ use std::{
     },
     time::Duration,
 };
-use util::path;
+use util::{path, path_list::PathList};
 
 mod test_tools;
 use test_tools::*;
@@ -187,12 +187,21 @@ pub(crate) struct FakeThreadEnvironment {
     subagent_handle: Option<Rc<FakeSubagentHandle>>,
     terminal_creations: Arc<AtomicUsize>,
     terminal_output_limits: std::cell::RefCell<Vec<Option<u64>>>,
+    terminal_cwds: std::cell::RefCell<Vec<Option<std::path::PathBuf>>>,
+    work_dirs: Option<PathList>,
 }
 
 impl FakeThreadEnvironment {
     pub(crate) fn with_terminal(self, terminal_handle: FakeTerminalHandle) -> Self {
         Self {
             terminal_handle: Some(terminal_handle.into()),
+            ..self
+        }
+    }
+
+    pub(crate) fn with_work_dirs(self, work_dirs: PathList) -> Self {
+        Self {
+            work_dirs: Some(work_dirs),
             ..self
         }
     }
@@ -204,6 +213,10 @@ impl FakeThreadEnvironment {
     pub(crate) fn terminal_output_limits(&self) -> Vec<Option<u64>> {
         self.terminal_output_limits.borrow().clone()
     }
+
+    pub(crate) fn terminal_cwds(&self) -> Vec<Option<std::path::PathBuf>> {
+        self.terminal_cwds.borrow().clone()
+    }
 }
 
 impl crate::ThreadEnvironment for FakeThreadEnvironment {
@@ -211,7 +224,7 @@ impl crate::ThreadEnvironment for FakeThreadEnvironment {
         &self,
         _command: String,
         _extra_env: Vec<acp::EnvVariable>,
-        _cwd: Option<std::path::PathBuf>,
+        cwd: Option<std::path::PathBuf>,
         output_byte_limit: Option<u64>,
         _sandbox_wrap: Option<acp_thread::SandboxWrap>,
         _cx: &mut AsyncApp,
@@ -220,11 +233,16 @@ impl crate::ThreadEnvironment for FakeThreadEnvironment {
         self.terminal_output_limits
             .borrow_mut()
             .push(output_byte_limit);
+        self.terminal_cwds.borrow_mut().push(cwd);
         let handle = self
             .terminal_handle
             .clone()
             .expect("Terminal handle not available on FakeThreadEnvironment");
         Task::ready(Ok(handle as Rc<dyn crate::TerminalHandle>))
+    }
+
+    fn work_dirs(&self, _cx: &App) -> Option<PathList> {
+        self.work_dirs.clone()
     }
 
     fn create_subagent(&self, _label: String, _cx: &mut App) -> Result<Rc<dyn SubagentHandle>> {
@@ -6083,6 +6101,28 @@ async fn test_lsp_tools_gated_by_feature_flag(cx: &mut TestAppContext) {
         );
         thread.add_default_tools(environment, cx);
         thread
+    });
+
+    // Terry's default profile ("terminal") deliberately keeps a minimal tool
+    // allowlist that omits rename and the LSP tools. This test only exercises
+    // feature-flag gating, so widen the active profile's allowlist for the
+    // tools under test instead of coupling the assertions to a specific
+    // default profile.
+    cx.update(|cx| {
+        let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+        let profile_id = settings.default_profile.clone();
+        if let Some(profile) = settings.profiles.get_mut(&profile_id) {
+            for tool_name in [
+                RenameTool::NAME,
+                FindReferencesTool::NAME,
+                GetCodeActionsTool::NAME,
+                ApplyCodeActionTool::NAME,
+                GoToDefinitionTool::NAME,
+            ] {
+                profile.tools.insert(tool_name.into(), true);
+            }
+        }
+        agent_settings::AgentSettings::override_global(settings, cx);
     });
 
     let lsp_tool_names = [

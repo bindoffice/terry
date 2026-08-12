@@ -24,6 +24,17 @@ case "$ARCH" in
   *) ARCH_LABEL="$ARCH" ;;
 esac
 
+HOST="$(rustc -vV | sed -n 's/^host: //p')"
+if [[ -n "$TARGET" && "$TARGET" != "$HOST" ]]; then
+  echo "==> Cross-compiling from ${HOST} to ${TARGET}…"
+  # Xcode's clang carries a universal SDK, so one clang can target both Apple
+  # arches. Point `cc`-based build scripts and cmake (aws-lc-sys etc.) at it.
+  TARGET_ENV="$(printf '%s' "$TARGET" | tr - _)"
+  export "CC_${TARGET_ENV}=clang -arch $ARCH"
+  export "CXX_${TARGET_ENV}=clang++ -arch $ARCH"
+  export CMAKE_OSX_ARCHITECTURES="$ARCH"
+fi
+
 resolve_signing_identity() {
   if [[ -n "${MACOS_SIGNING_IDENTITY:-}" ]]; then
     printf '%s\n' "$MACOS_SIGNING_IDENTITY"

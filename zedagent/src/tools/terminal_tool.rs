@@ -418,8 +418,8 @@ async fn run_terminal_tool(
 
     let (working_dir, authorize, sandboxing, is_local_project, wsl_zed_release) =
         cx.update(|cx| {
-            let working_dir =
-                working_dir(&input.cd, &project, cx).map_err(|err| err.to_string())?;
+            let working_dir = working_dir(&input.cd, &*environment, &project, cx)
+                .map_err(|err| err.to_string())?;
             let context =
                 crate::ToolPermissionContext::new(TerminalTool::NAME, vec![input.command.clone()]);
             let authorize =
@@ -1232,10 +1232,27 @@ fn process_content(
     content
 }
 
-fn working_dir(cd: &str, project: &Entity<Project>, cx: &mut App) -> Result<Option<PathBuf>> {
+fn working_dir(
+    cd: &str,
+    environment: &dyn ThreadEnvironment,
+    project: &Entity<Project>,
+    cx: &mut App,
+) -> Result<Option<PathBuf>> {
     let project = project.read(cx);
 
     if cd == "." || cd.is_empty() {
+        // Prefer the thread's primary work directory (in Terry, the active
+        // terminal's cwd) so commands run where the user's terminal is rather
+        // than always starting at the project root. Only when the thread
+        // declares exactly one work directory: with multiple roots the default
+        // stays ambiguous so the model must pick one explicitly.
+        if let Some(work_dirs) = environment.work_dirs(cx)
+            && work_dirs.paths().len() == 1
+            && let Some(primary) = work_dirs.ordered_paths().next()
+        {
+            return Ok(Some(primary.clone()));
+        }
+
         let mut worktrees = project.worktrees(cx);
 
         match worktrees.next() {
@@ -2222,6 +2239,107 @@ mod tests {
         assert_eq!(
             environment.terminal_output_limits(),
             vec![Some(COMMAND_OUTPUT_LIMIT)]
+        );
+    }
+
+    #[gpui::test]
+    async fn test_run_default_cd_uses_thread_work_dir(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
+
+        // The thread declares a single work directory (in Terry, the active
+        // terminal's cwd) that differs from the project worktree root.
+        let work_dir = "/root/project-a".to_string();
+        let environment = std::rc::Rc::new(cx.update(|cx| {
+            crate::tests::FakeThreadEnvironment::default()
+                .with_terminal(crate::tests::FakeTerminalHandle::new_with_immediate_exit(
+                    cx, 0,
+                ))
+                .with_work_dirs(util::path_list::PathList::new(&["/root/project-a"]))
+        }));
+
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
+        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
+
+        let task = cx.update(|cx| {
+            tool.run(
+                crate::ToolInput::resolved(TerminalToolInput {
+                    command: "echo output".to_string(),
+                    cd: ".".to_string(),
+                    timeout_ms: None,
+                    ..Default::default()
+                }),
+                event_stream,
+                cx,
+            )
+        });
+
+        rx.expect_update_fields().await;
+        task.await.expect("terminal command should succeed");
+        assert_eq!(
+            environment.terminal_cwds(),
+            vec![Some(PathBuf::from(&work_dir))],
+            "default `cd: \".\"` should run in the thread's work directory"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_run_default_cd_without_work_dirs_uses_worktree_root(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        crate::tests::init_test(cx);
+
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
+
+        let environment = std::rc::Rc::new(cx.update(|cx| {
+            crate::tests::FakeThreadEnvironment::default().with_terminal(
+                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
+            )
+        }));
+
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
+        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
+
+        let task = cx.update(|cx| {
+            tool.run(
+                crate::ToolInput::resolved(TerminalToolInput {
+                    command: "echo output".to_string(),
+                    cd: ".".to_string(),
+                    timeout_ms: None,
+                    ..Default::default()
+                }),
+                event_stream,
+                cx,
+            )
+        });
+
+        rx.expect_update_fields().await;
+        task.await.expect("terminal command should succeed");
+        assert_eq!(
+            environment.terminal_cwds(),
+            vec![Some(PathBuf::from("/root"))],
+            "default `cd: \".\"` without work dirs should fall back to the worktree root"
         );
     }
 

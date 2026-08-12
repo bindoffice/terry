@@ -40,12 +40,14 @@ jobs:
             target: aarch64-apple-darwin
             artifact: terry-macos-aarch64
             package: macos
-          # Temporarily disabled — re-enable when Intel Mac packaging is needed again.
-          # - name: macOS x86_64
-          #   os: macos-13
-          #   target: x86_64-apple-darwin
-          #   artifact: terry-macos-x86_64
-          #   package: macos
+          # Built on an Apple Silicon runner and cross-compiled to x86_64 with
+          # the Xcode SDK (no Intel runner needed).
+          - name: macOS x86_64
+            os: macos-14
+            target: x86_64-apple-darwin
+            artifact: terry-macos-x86_64
+            package: macos
+            cross: true
           - name: Linux x86_64
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
@@ -108,6 +110,21 @@ jobs:
         with:
           toolchain: "1.95.0"
           targets: ${{ matrix.target }}
+
+      - name: Prepare macOS x86_64 cross-compilation
+        if: matrix.cross
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOST="$(rustc -vV | sed -n 's/^host: //p')"
+          echo "Cross-compiling ${{ matrix.target }} from ${HOST}"
+          # Xcode's clang ships a universal SDK, so it can target x86_64 from an
+          # arm64 runner. Route `cc`-based build scripts and cmake (aws-lc-sys)
+          # at it; rustc links with the default `cc` since the objects are already
+          # x86_64.
+          echo "CC_x86_64_apple_darwin=clang -arch x86_64" >> "$GITHUB_ENV"
+          echo "CXX_x86_64_apple_darwin=clang++ -arch x86_64" >> "$GITHUB_ENV"
+          echo "CMAKE_OSX_ARCHITECTURES=x86_64" >> "$GITHUB_ENV"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

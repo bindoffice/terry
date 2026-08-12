@@ -66,7 +66,9 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use util::{ResultExt, debug_panic, markdown::MarkdownCodeBlock, paths::PathStyle};
+use util::{
+    ResultExt, debug_panic, markdown::MarkdownCodeBlock, path_list::PathList, paths::PathStyle,
+};
 use uuid::Uuid;
 
 const TOOL_CANCELED_MESSAGE: &str = "Tool canceled by user";
@@ -760,6 +762,13 @@ pub trait ThreadEnvironment {
         sandbox_wrap: Option<acp_thread::SandboxWrap>,
         cx: &mut AsyncApp,
     ) -> Task<Result<Rc<dyn TerminalHandle>>>;
+
+    /// The thread's work directories, in display order. Tools that resolve a
+    /// default working directory (such as the terminal tool with `cd: "."`)
+    /// should run in the thread's primary work directory when one is set.
+    fn work_dirs(&self, _cx: &App) -> Option<PathList> {
+        None
+    }
 
     fn create_subagent(&self, label: String, cx: &mut App) -> Result<Rc<dyn SubagentHandle>>;
 

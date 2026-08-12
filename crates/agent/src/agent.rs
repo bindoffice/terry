@@ -3244,6 +3244,12 @@ impl ThreadEnvironment for NativeThreadEnvironment {
         })
     }
 
+    fn work_dirs(&self, cx: &App) -> Option<PathList> {
+        self.acp_thread
+            .upgrade()
+            .and_then(|thread| thread.read(cx).work_dirs().cloned())
+    }
+
     fn create_subagent(&self, label: String, cx: &mut App) -> Result<Rc<dyn SubagentHandle>> {
         self.create_subagent_thread(label, cx)
     }
