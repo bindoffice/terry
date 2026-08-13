@@ -7,7 +7,10 @@ It is built on [Zed](https://zed.dev)’s GPUI stack, but focused on terminals, 
 
 ## Features
 
-- **Terminal workspace** — Group and manage multiple terminals; open new sessions with the right working directory
+- **Terminal workspace** — Group and manage multiple terminals; open new sessions with the right working directory; groups support automatic tiled layouts (manual / tall / grid / stack, like kitty)
+- **Terminal images** — kitty graphics protocol and sixel support for rendering images directly in the terminal, with animated GIFs (`chafa` / `viu` / `icat` work)
+- **Terminal protocols** — kitty keyboard protocol (CSI u) and OSC 52 clipboard read/write
+- **Link jump** — `Ctrl+Shift+E` lists all currently visible links (URL / path / OSC 8); pick one with the keyboard to open it
 - **AI Agent** — Chat with LLMs in a side panel; run commands and tools with configurable profiles
 - **MCP** — Connect Model Context Protocol servers to extend agent capabilities
 - **Files panel** — Browse the project tree alongside your terminals
