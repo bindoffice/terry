@@ -1,8 +1,8 @@
 use crate::{
     BoolExt, MacDisplay, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
     TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,
-    kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
-    ns_string, renderer,
+    kTISPropertyInputSourceID, kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType,
+    kTISTypeKeyboardInputMode, ns_string, renderer,
 };
 #[cfg(any(test, feature = "test-support"))]
 use anyhow::Result;
@@ -2106,15 +2106,41 @@ unsafe fn is_ime_input_source_active() -> bool {
                 kTISTypeKeyboardInputMode as CFTypeRef,
             ) != 0;
 
+        // Plain keyboard layouts (e.g. ABC) are not IMEs.
+        if !is_input_mode {
+            CFRelease(source as CFTypeRef);
+            return false;
+        }
+
         let is_ascii = TISGetInputSourceProperty(
             source,
             kTISPropertyInputSourceIsASCIICapable as *const c_void,
         );
         let is_ascii_capable = !is_ascii.is_null() && CFBooleanGetValue(is_ascii as CFBooleanRef);
 
+        // Non-ASCII-capable input modes (Chinese Pinyin, Japanese Kana, Korean, etc.)
+        // are always composition IMEs.
+        if !is_ascii_capable {
+            CFRelease(source as CFTypeRef);
+            return true;
+        }
+
+        // ASCII-capable input modes: only known ASCII IMEs (e.g. Japanese Romaji)
+        // should skip IME-first dispatch so multi-stroke keybindings like `jj` keep
+        // working. Some third-party IMEs (Rime, Sogou, ...) incorrectly report
+        // IsASCIICapable = true; treating them as non-IME would make keystrokes
+        // bypass the input method, so Chinese text could not be composed.
+        let source_id =
+            TISGetInputSourceProperty(source, kTISPropertyInputSourceID as *const c_void);
+        let is_known_ascii_ime = !source_id.is_null()
+            && {
+                let is_equal: BOOL = msg_send![source_id as id, isEqualToString: ns_string("com.apple.inputmethod.Kotoeri.Romaji")];
+                is_equal == YES
+            };
+
         CFRelease(source as CFTypeRef);
 
-        is_input_mode && !is_ascii_capable
+        !is_known_ascii_ime
     }
 }
 
