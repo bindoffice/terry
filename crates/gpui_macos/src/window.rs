@@ -37,8 +37,9 @@ use gpui::{
 use image::RgbaImage;
 
 use core_foundation::base::{CFRelease, CFTypeRef};
-use core_foundation_sys::base::CFEqual;
+use core_foundation_sys::base::{CFEqual, kCFAllocatorDefault};
 use core_foundation_sys::number::{CFBooleanGetValue, CFBooleanRef};
+use core_foundation_sys::string::{CFStringCreateWithCString, kCFStringEncodingUTF8};
 use core_graphics::display::{CGDirectDisplayID, CGRect};
 use ctor::ctor;
 use futures::channel::oneshot;
@@ -68,7 +69,7 @@ use std::{
     ptr::{self, NonNull},
     rc::Rc,
     sync::{
-        Arc, Weak,
+        Arc, LazyLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -2089,8 +2090,28 @@ extern "C" fn handle_key_up(this: &Object, _: Sel, native_event: id) {
 /// 1. The source type is `kTISTypeKeyboardInputMode` (an IME input mode, not a plain
 ///    keyboard layout). This excludes non-ASCII layouts like Armenian and Ukrainian
 ///    that map keys directly without composition.
-/// 2. The source is not ASCII-capable, which excludes modes like Japanese Romaji that
-///    produce ASCII characters and should allow multi-stroke keybindings like `jj`.
+/// 2. Non-ASCII-capable input modes are always IMEs. ASCII-capable ones are treated
+///    as IMEs unless their source id is on a small allow-list of known ASCII IMEs
+///    (currently only Japanese Romaji) so multi-stroke keybindings like `jj` keep
+///    working; the rest stay on the IME-first path because some third-party IMEs
+///    (Rime, Sogou, ...) incorrectly report `IsASCIICapable = true`.
+///
+/// The allow-list is deliberately conservative: new first-party ASCII input modes
+/// must be added to [`KOTOERI_ROMAJI_SOURCE_ID`] explicitly, otherwise they fall
+/// back to IME-first dispatch (safe — only multi-stroke keybindings lose).
+
+// The source id of the only first-party ASCII IME treated as non-composition.
+// Created once and cached: this is compared on the per-keystroke hot path,
+// so it must not allocate an NSString for every key. Stored as usize because
+// a raw CFStringRef pointer is not `Sync`.
+static KOTOERI_ROMAJI_SOURCE_ID: LazyLock<usize> = LazyLock::new(|| unsafe {
+    CFStringCreateWithCString(
+        kCFAllocatorDefault,
+        c"com.apple.inputmethod.Kotoeri.Romaji".as_ptr(),
+        kCFStringEncodingUTF8,
+    ) as usize
+});
+
 unsafe fn is_ime_input_source_active() -> bool {
     unsafe {
         let source = TISCopyCurrentKeyboardInputSource();
@@ -2133,10 +2154,10 @@ unsafe fn is_ime_input_source_active() -> bool {
         let source_id =
             TISGetInputSourceProperty(source, kTISPropertyInputSourceID as *const c_void);
         let is_known_ascii_ime = !source_id.is_null()
-            && {
-                let is_equal: BOOL = msg_send![source_id as id, isEqualToString: ns_string("com.apple.inputmethod.Kotoeri.Romaji")];
-                is_equal == YES
-            };
+            && CFEqual(
+                source_id as CFTypeRef,
+                *KOTOERI_ROMAJI_SOURCE_ID as CFTypeRef,
+            ) != 0;
 
         CFRelease(source as CFTypeRef);
 

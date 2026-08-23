@@ -297,6 +297,12 @@ pub struct TerminalListPanel {
     /// Guards against reconciling the model while a group switch is
     /// transiently removing/adding items in the display pane.
     switching: bool,
+    /// Depth of in-flight center-layout rebuilds. Workspace events
+    /// (ItemRemoved/ItemAdded/PaneAdded) are dispatched asynchronously after
+    /// the rebuild's update stack unwinds — by then the `switching` flag set
+    /// by callers has already been cleared. A positive depth suppresses those
+    /// events until the rebuild's deferred decrement runs.
+    reflowing_layout_depth: usize,
     /// Outgoing group whose live split layout must be captured before any
     /// sync may clear its terminals from the center panes.
     pending_switch_from: Option<GroupId>,
@@ -408,6 +414,7 @@ impl TerminalListPanel {
             active_group_id: GroupId(0),
             next_group_id: 0,
             switching: false,
+            reflowing_layout_depth: 0,
             pending_switch_from: None,
             pending_layout_restore: false,
             session_restoring: false,
@@ -472,6 +479,18 @@ impl TerminalListPanel {
     /// Only call when Workspace is not already being updated.
     fn refresh_active_layout_and_save(&mut self, cx: &App) {
         if self.session_restoring {
+            return;
+        }
+        // Auto-tiling groups derive their layout from the terminal list; a
+        // stale capture here (the list can be mid-reflow) would overwrite
+        // saved_layout with a mismatched tree and re-trigger the rebuild.
+        let is_auto = self
+            .groups
+            .iter()
+            .find(|g| g.id == self.active_group_id)
+            .is_some_and(|g| g.layout_mode != GroupLayoutMode::Manual);
+        if is_auto {
+            self.write_session_file(cx, false);
             return;
         }
         if let Some(layout) = self.capture_active_group_layout(cx) {
@@ -705,11 +724,20 @@ impl TerminalListPanel {
                 session.active_group_index = i;
             }
 
+            // Auto-tiling groups derive their layout from the terminal list;
+            // saved_layout may lag behind (spawn/close between re-flows), so
+            // serialize a fresh tree. A stale layout would prune terminals on
+            // the next load.
+            let layout = if group.layout_mode != GroupLayoutMode::Manual {
+                GroupLayoutMode::generate_layout(group.layout_mode, group.terminals.len())
+            } else {
+                group.saved_layout.clone()
+            };
             let mut p_group = PersistedGroup {
                 name: group.name.to_string(),
                 collapsed: group.collapsed,
                 terminals: Vec::new(),
-                layout: group.saved_layout.clone(),
+                layout,
                 layout_mode: Some(group.layout_mode),
             };
 
@@ -1735,9 +1763,13 @@ impl TerminalListPanel {
                 if let Some(layout) = &generated {
                     // The rebuild removes/re-adds items; guard so the
                     // ItemRemoved events don't drop them from the model.
+                    // Restore the previous value instead of force-clearing:
+                    // an outer caller may hold the guard (e.g. switch_group)
+                    // and must not have it stripped mid-flight.
+                    let was_switching = self.switching;
                     self.switching = true;
                     self.apply_layout_to_center(self.active_group_id, layout, window, cx);
-                    self.switching = false;
+                    self.switching = was_switching;
                 }
                 self.write_session_file(cx, false);
             }
@@ -2180,6 +2212,18 @@ impl TerminalListPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Workspace events from this rebuild are dispatched asynchronously
+        // (flush_effects) after the update stack unwinds, when the caller's
+        // `switching` guard has already been cleared. Track the rebuild depth
+        // here and suppress those events via on_workspace_event until the
+        // deferred decrement below runs — it is queued after every event this
+        // rebuild emits, so the guard stays up for all of them.
+        self.reflowing_layout_depth += 1;
+        cx.defer_in(window, |this, _window, cx| {
+            this.reflowing_layout_depth -= 1;
+            cx.notify();
+        });
+
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
@@ -2363,7 +2407,11 @@ impl TerminalListPanel {
         // model too. During a group switch the removals are intentional, so we
         // must not treat them as user closes or the outgoing group's terminals
         // would be dropped from the model and vanish on switch.
-        if self.switching || self.pending_switch_from.is_some() || self.session_restoring {
+        if self.switching
+            || self.reflowing_layout_depth > 0
+            || self.pending_switch_from.is_some()
+            || self.session_restoring
+        {
             cx.notify();
             return;
         }
@@ -2411,6 +2459,7 @@ impl TerminalListPanel {
             workspace::Event::PaneAdded(_) | workspace::Event::PaneRemoved => {
                 cx.defer_in(window, |this, _window, cx| {
                     if this.switching
+                        || this.reflowing_layout_depth > 0
                         || this.pending_switch_from.is_some()
                         || this.session_restoring
                         || this.pending_layout_restore
@@ -2947,9 +2996,8 @@ mod tests {
     use super::*;
     use gpui::{TestAppContext, WindowHandle};
     use project::Project;
-    use terminal::CursorShape;
+    use terminal::terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape};
     use terminal::TerminalBuilder;
-    use terminal::terminal_settings::AlternateScroll;
     use util::paths::PathStyle;
     use workspace::{AppState, MultiWorkspace};
 
@@ -3066,7 +3114,7 @@ mod tests {
     ) -> Entity<TerminalView> {
         let terminal = cx.new(|cx| {
             TerminalBuilder::new_display_only(
-                CursorShape::default(),
+                SettingsCursorShape::Block,
                 AlternateScroll::On,
                 None,
                 0,
@@ -3130,12 +3178,7 @@ mod tests {
     #[gpui::test]
     async fn tiling_reflow_keeps_group_terminals_and_does_not_hang(cx: &mut TestAppContext) {
         // Isolate session-file writes from the real data directory.
-        paths::set_custom_data_dir(
-            &std::env::temp_dir()
-                .join(format!("terry-test-{}", std::process::id()))
-                .join("data")
-                .to_string_lossy(),
-        );
+        ensure_test_data_dir();
 
         let params = cx.update(AppState::test);
         cx.update(|cx| {
@@ -3261,5 +3304,96 @@ mod tests {
         assert_eq!(panel.read_with(cx, |p, _| p.active_group_id), GroupId(0));
         assert_eq!(panel.read_with(cx, |p, _| p.groups[0].terminals.len()), 2);
         assert_eq!(panel.read_with(cx, |p, _| p.groups[1].terminals.len()), 1);
+    }
+
+    /// `set_custom_data_dir` may only be called once per process; all tests
+    /// that write session files share one isolated data directory.
+    fn ensure_test_data_dir() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            paths::set_custom_data_dir(
+                &std::env::temp_dir()
+                    .join(format!("terry-test-{}", std::process::id()))
+                    .join("data")
+                    .to_string_lossy(),
+            );
+        });
+    }
+
+    /// Auto-tiling groups must persist a layout that matches the current
+    /// terminal count even when `saved_layout` is stale (spawn between
+    /// re-flows); otherwise the next load prunes the newest terminals.
+    #[gpui::test]
+    async fn write_session_serializes_fresh_layout_for_auto_tiling_groups(
+        cx: &mut TestAppContext,
+    ) {
+        // Isolate session-file writes from the real data directory.
+        ensure_test_data_dir();
+
+        let params = cx.update(AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let project = Project::test(params.fs.clone(), [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+
+        let panel = window_handle
+            .update(cx, |mw, window, cx| {
+                let workspace = mw.workspace().clone();
+                let project = workspace.read(cx).project().clone();
+                let display_pane = workspace.read(cx).active_pane().clone();
+                let panel = cx.new(|cx| {
+                    TerminalListPanel::new(
+                        workspace.clone(),
+                        display_pane,
+                        project,
+                        None,
+                        window,
+                        cx,
+                    )
+                });
+                workspace.update(cx, |workspace, cx| {
+                    workspace.add_panel(panel.clone(), window, cx);
+                });
+                panel
+            })
+            .unwrap();
+
+        seed_group(&panel, &workspace, &project, &window_handle, cx);
+        window_handle
+            .update(cx, |_mw, window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.set_group_layout(GroupId(0), GroupLayoutMode::Grid, window, cx);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(panel.read_with(cx, |p, _| p.groups[0].terminals.len()), 2);
+
+        // Simulate the stale window: a third terminal joins the group but the
+        // deferred re-flow has not run yet, so saved_layout still covers 0..2.
+        window_handle
+            .update(cx, |_mw, window, cx| {
+                panel.update(cx, |panel, cx| {
+                    let tv = new_display_only_terminal_view(&workspace, &project, window, cx);
+                    panel.add_terminal_to_group(GroupId(0), tv, None, None, cx);
+                    panel.write_session_file(cx, false);
+                });
+            })
+            .unwrap();
+
+        let path = panel.read_with(cx, |p, _| p.session_file_path());
+        let json = std::fs::read_to_string(path).unwrap();
+        let session: PersistedSession = serde_json::from_str(&json).unwrap();
+        let layout = session.groups[0].layout.as_ref().unwrap();
+        let mut referenced: Vec<usize> = TerminalListPanel::layout_referenced_indices(layout)
+            .into_iter()
+            .collect();
+        referenced.sort_unstable();
+        assert_eq!(referenced, vec![0, 1, 2]);
     }
 }

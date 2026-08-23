@@ -1135,3 +1135,20 @@ ignored = [
 # this workspace on purpose.
 [workspace.metadata.dylint]
 libraries = [{ path = "tooling/lints" }]
+
+# Enables the test-support APIs used by the terminal list panel's tests
+# (TestAppContext, Project::test, TerminalBuilder::new_display_only, ...)
+# when running `cargo test`.
+[dev-dependencies]
+agent_ui = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+paths = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
+recent_projects = { workspace = true, features = ["test-support"] }
+remote_connection = { workspace = true, features = ["test-support"] }
+terminal = { workspace = true, features = ["test-support"] }
+theme = { workspace = true, features = ["test-support"] }
+theme_settings = { workspace = true, features = ["test-support"] }
+title_bar = { workspace = true, features = ["test-support"] }
+util = { workspace = true, features = ["test-support"] }
+workspace = { workspace = true, features = ["test-support"] }
