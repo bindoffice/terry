@@ -24,3 +24,4 @@ target
 # Local release artifacts
 /*.zip
 /dist/
+.DS_Store
