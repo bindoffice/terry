@@ -1,8 +1,8 @@
 use crate::{
     BoolExt, MacDisplay, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
     TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,
-    kTISPropertyInputSourceID, kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType,
-    kTISTypeKeyboardInputMode, ns_string, renderer,
+    kTISPropertyInputSourceID, kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceLanguages,
+    kTISPropertyInputSourceType, kTISTypeKeyboardInputMode, ns_string, renderer,
 };
 #[cfg(any(test, feature = "test-support"))]
 use anyhow::Result;
@@ -37,9 +37,12 @@ use gpui::{
 use image::RgbaImage;
 
 use core_foundation::base::{CFRelease, CFTypeRef};
-use core_foundation_sys::base::{CFEqual, kCFAllocatorDefault};
-use core_foundation_sys::number::{CFBooleanGetValue, CFBooleanRef};
-use core_foundation_sys::string::{CFStringCreateWithCString, kCFStringEncodingUTF8};
+use core_foundation_sys::{
+    array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef},
+    base::{CFEqual, CFIndex, kCFAllocatorDefault},
+    number::{CFBooleanGetValue, CFBooleanRef},
+    string::{CFStringCreateWithCString, CFStringGetCString, CFStringRef, kCFStringEncodingUTF8},
+};
 use core_graphics::display::{CGDirectDisplayID, CGRect};
 use ctor::ctor;
 use futures::channel::oneshot;
@@ -2086,19 +2089,21 @@ extern "C" fn handle_key_up(this: &Object, _: Sel, native_event: id) {
 /// Returns true if the current keyboard input source is a composition-based IME
 /// (e.g. Japanese Hiragana, Korean, Chinese Pinyin) that produces non-ASCII output.
 ///
-/// This checks two properties:
-/// 1. The source type is `kTISTypeKeyboardInputMode` (an IME input mode, not a plain
-///    keyboard layout). This excludes non-ASCII layouts like Armenian and Ukrainian
-///    that map keys directly without composition.
-/// 2. Non-ASCII-capable input modes are always IMEs. ASCII-capable ones are treated
-///    as IMEs unless their source id is on a small allow-list of known ASCII IMEs
-///    (currently only Japanese Romaji) so multi-stroke keybindings like `jj` keep
-///    working; the rest stay on the IME-first path because some third-party IMEs
-///    (Rime, Sogou, ...) incorrectly report `IsASCIICapable = true`.
-///
-/// The allow-list is deliberately conservative: new first-party ASCII input modes
-/// must be added to [`KOTOERI_ROMAJI_SOURCE_ID`] explicitly, otherwise they fall
-/// back to IME-first dispatch (safe — only multi-stroke keybindings lose).
+/// Rules:
+/// 1. Sources whose languages include CJK (zh/ja/ko/yue) count as IMEs even when they
+///    are ASCII-capable or register as keyboard layouts: WeChat IME's main source
+///    (com.tencent.inputmethod.wetype) is ASCII-capable but still composes Chinese,
+///    and Apple's Chinese “Pinyin keyboard layout” is a layout. Without this, printable
+///    keys never reach the IME and only ASCII can be typed.
+/// 2. The exception is ASCII-capable `kTISTypeKeyboardInputMode` sources (Japanese
+///    Romaji and equivalent ASCII-only modes of CJK IMEs): they return false so
+///    multi-stroke keybindings like `jj` still work. The source-id allow-list of
+///    known ASCII IMEs is deliberately conservative: some third-party IMEs (Rime,
+///    Sogou, ...) incorrectly report `IsASCIICapable = true`; they stay on the
+///    IME-first path unless their source id matches [`KOTOERI_ROMAJI_SOURCE_ID`].
+/// 3. Non-CJK sources count as IMEs only when they are non-ASCII-capable
+///    `kTISTypeKeyboardInputMode` sources (Apple SCIM, Kotoeri, third-party IMEs),
+///    so plain non-ASCII layouts like Armenian or Ukrainian are not treated as IMEs.
 
 // The source id of the only first-party ASCII IME treated as non-composition.
 // Created once and cached: this is compared on the per-keystroke hot path,
@@ -2119,6 +2124,12 @@ unsafe fn is_ime_input_source_active() -> bool {
             return false;
         }
 
+        let is_ascii = TISGetInputSourceProperty(
+            source,
+            kTISPropertyInputSourceIsASCIICapable as *const c_void,
+        );
+        let is_ascii_capable = !is_ascii.is_null() && CFBooleanGetValue(is_ascii as CFBooleanRef);
+
         let source_type =
             TISGetInputSourceProperty(source, kTISPropertyInputSourceType as *const c_void);
         let is_input_mode = !source_type.is_null()
@@ -2126,25 +2137,6 @@ unsafe fn is_ime_input_source_active() -> bool {
                 source_type as CFTypeRef,
                 kTISTypeKeyboardInputMode as CFTypeRef,
             ) != 0;
-
-        // Plain keyboard layouts (e.g. ABC) are not IMEs.
-        if !is_input_mode {
-            CFRelease(source as CFTypeRef);
-            return false;
-        }
-
-        let is_ascii = TISGetInputSourceProperty(
-            source,
-            kTISPropertyInputSourceIsASCIICapable as *const c_void,
-        );
-        let is_ascii_capable = !is_ascii.is_null() && CFBooleanGetValue(is_ascii as CFBooleanRef);
-
-        // Non-ASCII-capable input modes (Chinese Pinyin, Japanese Kana, Korean, etc.)
-        // are always composition IMEs.
-        if !is_ascii_capable {
-            CFRelease(source as CFTypeRef);
-            return true;
-        }
 
         // ASCII-capable input modes: only known ASCII IMEs (e.g. Japanese Romaji)
         // should skip IME-first dispatch so multi-stroke keybindings like `jj` keep
@@ -2159,9 +2151,67 @@ unsafe fn is_ime_input_source_active() -> bool {
                 *KOTOERI_ROMAJI_SOURCE_ID as CFTypeRef,
             ) != 0;
 
+        let is_cjk = input_source_has_cjk_language(source);
+
         CFRelease(source as CFTypeRef);
 
-        !is_known_ascii_ime
+        if is_cjk {
+            // CJK sources compose text even when ASCII-capable (WeChat IME's main
+            // source) or registered as keyboard layouts (Apple's “Pinyin keyboard
+            // layout”). Japanese Romaji is the exception: an ASCII-capable input mode
+            // that must keep letting multi-stroke keybindings like `jj` win.
+            if is_input_mode && is_ascii_capable {
+                return !is_known_ascii_ime;
+            }
+            return true;
+        }
+
+        is_input_mode && !is_ascii_capable
+    }
+}
+
+const CJK_LANGUAGE_PREFIXES: &[&str] = &["zh", "ja", "ko", "yue"];
+
+unsafe fn language_tag_is_cjk(value: CFStringRef) -> bool {
+    unsafe {
+        if value.is_null() {
+            return false;
+        }
+        // Language tags are short (e.g. "zh-Hans"); a stack buffer keeps this
+        // per-keystroke check free of heap allocations.
+        let mut buffer = [0u8; 64];
+        let converted = CFStringGetCString(
+            value,
+            buffer.as_mut_ptr() as *mut std::os::raw::c_char,
+            buffer.len() as CFIndex,
+            kCFStringEncodingUTF8,
+        );
+        if converted == 0 {
+            return false;
+        }
+        let bytes = CStr::from_ptr(buffer.as_ptr() as *const std::os::raw::c_char).to_bytes();
+        CJK_LANGUAGE_PREFIXES.iter().any(|prefix| {
+            bytes.len() >= prefix.len()
+                && bytes[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+        })
+    }
+}
+
+unsafe fn input_source_has_cjk_language(source: *mut Object) -> bool {
+    unsafe {
+        let languages =
+            TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages as *const c_void);
+        if languages.is_null() {
+            return false;
+        }
+        let languages = languages as CFArrayRef;
+        for index in 0..CFArrayGetCount(languages) {
+            let language = CFArrayGetValueAtIndex(languages, index) as CFStringRef;
+            if language_tag_is_cjk(language) {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -2219,8 +2269,11 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
             // We also send printable keys to the IME first when an IME input source (e.g. Japanese,
             // Korean, Chinese) is active and the input handler accepts text input. This prevents
             // multi-stroke keybindings like `jj` from intercepting keys that the IME should compose
-            // (e.g. typing 'ji' should produce 'じ', not 'jい'). If the IME doesn't handle the key,
-            // it calls `doCommandBySelector:` which routes it back to keybinding matching.
+            // (e.g. typing 'ji' should produce 'じ', not 'jい'). Pending multi-stroke prefixes must
+            // not suppress this path for CJK IMEs — otherwise candidates never appear. Keys the IME
+            // doesn't handle come back via `doCommandBySelector:` and still reach keybinding
+            // matching (at the cost of one IME round-trip); non-IME sources such as ASCII-capable
+            // layouts never take this path.
             let is_ime_printable_key = !is_composing
                 && key_down_event
                     .keystroke
@@ -2232,7 +2285,7 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
                 && !key_down_event.keystroke.modifiers.platform
                 && unsafe { is_ime_input_source_active() }
                 && with_input_handler(this, |input_handler| {
-                    input_handler.query_prefers_ime_for_printable_keys()
+                    input_handler.query_accepts_text_input()
                 })
                 .unwrap_or(false);
 
