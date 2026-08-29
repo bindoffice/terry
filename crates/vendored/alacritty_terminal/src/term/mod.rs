@@ -825,6 +825,51 @@ impl<T> Term<T> {
         &self.mode
     }
 
+    /// Reset terminal modes that a foreground program may have left enabled
+    /// (mouse reporting, alternate screen, scroll region, bracketed paste, ...).
+    ///
+    /// Called when the PTY child exits, so that a program exiting without
+    /// restoring the terminal (e.g. a killed daemon) does not leave the
+    /// terminal stuck in a state where scrolling emits escape sequences
+    /// that get echoed back as garbage.
+    pub fn reset_modes(&mut self) {
+        // Restore the primary screen when the program left the alternate screen.
+        if self.mode.contains(TermMode::ALT_SCREEN) {
+            self.swap_alt();
+        }
+
+        // Drop modes that programs enable and are expected to disable on exit.
+        self.mode.remove(
+            TermMode::MOUSE_REPORT_CLICK
+                | TermMode::MOUSE_MOTION
+                | TermMode::MOUSE_DRAG
+                | TermMode::SGR_MOUSE
+                | TermMode::UTF8_MOUSE
+                | TermMode::BRACKETED_PASTE
+                | TermMode::APP_CURSOR
+                | TermMode::APP_KEYPAD
+                | TermMode::FOCUS_IN_OUT
+                | TermMode::ORIGIN
+                | TermMode::INSERT
+                | TermMode::LINE_FEED_NEW_LINE
+                | TermMode::ALTERNATE_SCROLL
+                | TermMode::URGENCY_HINTS
+                | TermMode::KITTY_KEYBOARD_PROTOCOL,
+        );
+
+        // Re-enable modes that are on by default.
+        self.mode.insert(
+            TermMode::SHOW_CURSOR
+                | TermMode::LINE_WRAP
+                | TermMode::ALTERNATE_SCROLL
+                | TermMode::URGENCY_HINTS,
+        );
+
+        // Reset the scroll region to the full screen.
+        self.scroll_region = Line(0)..Line(self.grid.screen_lines() as i32);
+        self.mark_fully_damaged();
+    }
+
     /// Swap primary and alternate screen buffer.
     pub fn swap_alt(&mut self) {
         if !self.mode.contains(TermMode::ALT_SCREEN) {

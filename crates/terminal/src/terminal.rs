@@ -2808,12 +2808,18 @@ impl Terminal {
     ///Scroll the terminal
     pub fn scroll_wheel(&mut self, e: &ScrollWheelEvent, scroll_multiplier: f32) {
         let mouse_mode = self.mouse_mode(e.shift);
-        let scroll_multiplier = if mouse_mode { 1. } else { scroll_multiplier };
+        // Only forward wheel events to the program while it is running on the
+        // alternate screen (fullscreen TUIs like vim/htop/less handle them). On
+        // the primary screen, programs (daemons, shells) usually don't
+        // understand mouse wheel sequences; forwarding would make scrolling
+        // appear broken and echo garbage into the terminal.
+        let forward_mouse = mouse_mode && self.last_content.mode.contains(Modes::ALT_SCREEN);
+        let scroll_multiplier = if forward_mouse { 1. } else { scroll_multiplier };
 
         if let Some(scroll_lines) = self.determine_scroll_lines(e, scroll_multiplier)
             && scroll_lines != 0
         {
-            if mouse_mode {
+            if forward_mouse {
                 let point = grid_point(
                     e.position - self.last_content.terminal_bounds.bounds.origin,
                     self.last_content.terminal_bounds,
@@ -3047,6 +3053,12 @@ impl Terminal {
         exit_status: Option<ExitStatus>,
         cx: &mut Context<Terminal>,
     ) {
+        // Reset terminal modes that the exited program may have left enabled
+        // (mouse reporting, alternate screen, scroll region, ...). A killed or
+        // crashed daemon that never restored the terminal would otherwise leave
+        // it in a state where scrolling writes escape sequences to the PTY,
+        // which get echoed back as garbage.
+        self.term.lock().reset_modes();
         if let Some(tx) = &self.completion_tx {
             tx.try_send(exit_status).ok();
         }
