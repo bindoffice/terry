@@ -1014,6 +1014,7 @@ impl TerminalBuilder {
             output_processor: Processor::<StdSyncHandler>::new(),
             title_override: None,
             events: VecDeque::with_capacity(10),
+            last_synced_history_size: 0,
             last_content: Content {
                 terminal_bounds,
                 ..Default::default()
@@ -1290,6 +1291,7 @@ impl TerminalBuilder {
                 output_processor: Processor::<StdSyncHandler>::new(),
                 title_override: terminal_title_override,
                 events: VecDeque::with_capacity(10), //Should never get this high.
+                last_synced_history_size: 0,
                 last_content: Default::default(),
                 last_mouse: None,
                 mouse_down_position: None,
@@ -1476,6 +1478,10 @@ pub struct Terminal {
     pub matches: Vec<Range>,
     pub last_content: Content,
     pub content_dirty: bool,
+    /// Scrollback line count observed at the last [`Terminal::sync`]. Used to
+    /// detect large output bursts (e.g. `git log`) so the viewport can stay at
+    /// the start of the new output instead of following it to the bottom.
+    last_synced_history_size: usize,
     pub selection_head: Option<Point>,
 
     /// Cache of GPU-ready images keyed by (graphics image id, generation).
@@ -2439,6 +2445,23 @@ impl Terminal {
         while let Some(e) = self.events.pop_front() {
             self.process_terminal_event(&e, &mut terminal, window, cx)
         }
+
+        // When a burst of output (more than a viewport of lines) arrives between
+        // two frames while the viewport is pinned to the bottom, keep the viewport
+        // at the *start* of the new output instead of following it down. This way
+        // commands like `git log` show their beginning (the newest commits) rather
+        // than dumping the user straight at the tail of the log.
+        let viewport_lines = screen_lines(&terminal);
+        let history_lines = total_lines(&terminal).saturating_sub(viewport_lines);
+        let added_lines = history_lines.saturating_sub(self.last_synced_history_size);
+        if added_lines > viewport_lines && display_offset(&terminal) == 0 {
+            let scroll_to_start_of_output = added_lines - viewport_lines;
+            scroll_display(
+                &mut terminal,
+                Scroll::Delta(scroll_to_start_of_output as i32),
+            );
+        }
+        self.last_synced_history_size = history_lines;
 
         self.last_content = make_content(&mut terminal, &self.last_content);
         self.content_dirty = false;
@@ -3988,6 +4011,95 @@ mod tests {
         });
 
         (terminal, window)
+    }
+
+    #[gpui::test]
+    async fn test_burst_output_keeps_viewport_at_start(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| {
+            TerminalBuilder::new_display_only_with_bounds(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+                // 40-line viewport (400px / 10px line height).
+                TerminalBounds::new(
+                    px(10.0),
+                    px(10.0),
+                    bounds(point(px(0.0), px(0.0)), size(px(400.0), px(400.0))),
+                ),
+            )
+            .subscribe(cx)
+        });
+
+        // A burst of output taller than the viewport (like `git log`): the
+        // viewport should settle at the start of the burst, not its tail.
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            let output: Vec<u8> = (0..100)
+                .flat_map(|i| format!("commit {i}\r\n").into_bytes())
+                .collect();
+            terminal.write_output(&output, cx);
+            terminal.sync(window, cx);
+
+            // 100 lines on a 40-line viewport yields 61 scrollback lines (the
+            // cursor starts on line 0, so scrolling kicks in on the 40th
+            // line); pinning the viewport to the start of the burst offsets
+            // it by 61 - 40 = 21 lines from the bottom.
+            assert_eq!(
+                terminal.last_content.display_offset,
+                21,
+                "viewport should show the beginning of the burst",
+            );
+            assert!(
+                !terminal.last_content.scrolled_to_bottom,
+                "viewport should not be pinned to the bottom",
+            );
+        });
+
+        // A small incremental write keeps following the bottom as usual.
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.write_output(b"prompt $ \r\n", cx);
+            terminal.content_dirty = true;
+            terminal.sync(window, cx);
+            assert_eq!(
+                terminal.last_content.display_offset,
+                22,
+                "small output should keep following the bottom",
+            );
+        });
+
+        // While the user has scrolled away, bursts must not yank the viewport.
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.scroll_to_top();
+            terminal.sync(window, cx);
+            assert_eq!(
+                terminal.last_content.display_offset,
+                62,
+                "scrolling to the top should stick",
+            );
+
+            let output: Vec<u8> = (0..50)
+                .flat_map(|i| format!("more output {i}\r\n").into_bytes())
+                .collect();
+            terminal.write_output(&output, cx);
+            terminal.content_dirty = true;
+            terminal.sync(window, cx);
+
+            // The viewport stays put: display_offset grows with the scrollback
+            // so the same content remains visible (topmost line unchanged).
+            assert_eq!(
+                terminal.last_content.display_offset,
+                112,
+                "new output should not yank a scrolled-away viewport",
+            );
+        });
     }
 
     #[gpui::test]
