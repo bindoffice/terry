@@ -68,6 +68,10 @@ pub fn app_menus(_cx: &App) -> Vec<Menu> {
             disabled: false,
             items: vec![
                 MenuItem::action(i18n::t("about_terry"), zed_actions::About),
+                MenuItem::action(
+                    i18n::t("check_for_updates"),
+                    update_checker::CheckForUpdates,
+                ),
                 MenuItem::separator(),
                 MenuItem::action(i18n::t("settings"), zed_actions::OpenSettings),
                 MenuItem::action(

@@ -138,6 +138,17 @@ fn main() {
         app_menus::init(cx);
 
         release_channel::init(app_version, cx);
+        update_checker::init(cx);
+
+        // A few seconds after startup, quietly check whether a newer Terry
+        // release exists; the result is surfaced by the status bar item.
+        let check_delay = std::time::Duration::from_secs(5);
+        let background_executor = cx.background_executor().clone();
+        cx.spawn(async move |cx| {
+            background_executor.timer(check_delay).await;
+            cx.update(|cx| update_checker::check_for_updates(cx));
+        })
+        .detach();
         gpui_tokio::init(cx);
         settings::init(cx);
         // Load user settings from disk (theme, etc.) and watch for changes.
@@ -659,6 +670,7 @@ fn init_workspace(
         return;
     }
 
+    let update_status_item = cx.new(|cx| update_checker::UpdateStatusItem::new(cx));
     let active_terminal_context =
         cx.new(|_| status_bar_items::ActiveTerminalContext::new(&terminal_panel));
     let active_terminal_cwd = cx.new(|_| status_bar_items::ActiveTerminalCwd::new());
@@ -672,6 +684,7 @@ fn init_workspace(
     let cursor_position = cx.new(|_| go_to_line::cursor_position::CursorPosition::new(workspace));
 
     workspace.status_bar().update(cx, |status_bar, cx| {
+        status_bar.add_right_item(update_status_item, window, cx);
         status_bar.add_left_item(active_file_name, window, cx);
         status_bar.add_right_item(active_buffer_encoding, window, cx);
         status_bar.add_right_item(active_buffer_language, window, cx);

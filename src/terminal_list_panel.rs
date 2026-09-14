@@ -685,9 +685,12 @@ impl TerminalListPanel {
         for group in &self.groups {
             for view_ent in &group.terminals {
                 let terminal = view_ent.read(cx).terminal().read(cx);
+                // Read the background-refreshed cached cwd, not
+                // latest_working_directory(): the latter force-refreshes process
+                // info via blocking syscalls for every terminal on the UI
+                // thread, which stalls session writes (and terminal creation).
                 let live = terminal
-                    .latest_working_directory()
-                    .or_else(|| terminal.working_directory())
+                    .working_directory()
                     .filter(|cwd| !cwd.as_os_str().is_empty());
                 live_cwds.push((view_ent.entity_id(), live));
             }
@@ -1093,10 +1096,12 @@ impl TerminalListPanel {
             .and_then(|group| group.terminals.last().cloned())
     }
 
-    /// Live cwd of the currently focused terminal, force-refreshed from the PTY.
+    /// Cached cwd of the currently focused terminal. Reads the value the
+    /// background process-info refresh keeps warm rather than force-refreshing
+    /// on the UI thread (which blocks terminal creation on macOS).
     pub fn active_terminal_cwd(&self, cx: &App) -> Option<PathBuf> {
         self.active_terminal_view(cx)
-            .and_then(|tv| tv.read(cx).terminal().read(cx).latest_working_directory())
+            .and_then(|tv| tv.read(cx).terminal().read(cx).working_directory())
     }
 
     /// Adds a new terminal to the given group, switching to it if needed.
@@ -1128,6 +1133,34 @@ impl TerminalListPanel {
             group.collapsed = false;
         }
         self.spawn_terminal(group_id, cwd, source, destination, None, None, window, cx);
+        self.save_session(cx);
+    }
+
+    /// Clones a terminal: spawns a new one in the same group, starting in the
+    /// source terminal's current working directory (live PTY cwd, falling back
+    /// to its original working directory).
+    fn clone_terminal(
+        &mut self,
+        group_id: GroupId,
+        terminal_view: Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.groups.iter().any(|group| group.id == group_id) {
+            return;
+        }
+        let terminal = terminal_view.read(cx).terminal().clone();
+        // Use the cached cwd (kept fresh by the background process-info
+        // refresh). Force-refreshing here via latest_working_directory() blocks
+        // the UI thread on macOS process syscalls and can hang terminal cloning.
+        let cwd = terminal.read(cx).working_directory();
+        if group_id != self.active_group_id {
+            self.switch_group(group_id, window, cx);
+        }
+        if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
+            group.collapsed = false;
+        }
+        self.spawn_terminal(group_id, cwd, Some(terminal_view), None, None, None, window, cx);
         self.save_session(cx);
     }
 
@@ -1457,9 +1490,10 @@ impl TerminalListPanel {
                                     .timer(Duration::from_millis(delay_ms))
                                     .await;
                                 let needs_cd = terminal.update(cx, |term, _cx| {
-                                    let live = term
-                                        .latest_working_directory()
-                                        .or_else(|| term.working_directory());
+                                    // Cached cwd; a stale/None read only causes a
+                                    // harmless redundant `cd`, whereas a live
+                                    // force-refresh would block the UI thread.
+                                    let live = term.working_directory();
                                     live.as_ref() != Some(&path)
                                 });
                                 if !needs_cd {
@@ -1648,10 +1682,12 @@ impl TerminalListPanel {
                 ) {
                     return;
                 }
+                // TitleChanged is emitted right after the background refresh
+                // updates the cached cwd, so read the cache instead of
+                // force-refreshing again on the UI thread (redundant + blocking).
                 let cwd = term
                     .read(cx)
-                    .latest_working_directory()
-                    .or_else(|| term.read(cx).working_directory())
+                    .working_directory()
                     .filter(|cwd| !cwd.as_os_str().is_empty());
                 let Some(cwd) = cwd else {
                     return;
@@ -2213,11 +2249,13 @@ impl TerminalListPanel {
         cx: &mut Context<Self>,
     ) {
         // Workspace events from this rebuild are dispatched asynchronously
-        // (flush_effects) after the update stack unwinds, when the caller's
-        // `switching` guard has already been cleared. Track the rebuild depth
-        // here and suppress those events via on_workspace_event until the
-        // deferred decrement below runs — it is queued after every event this
-        // rebuild emits, so the guard stays up for all of them.
+        // (flush_effects) after the update stack unwinds. gpui's effect queue
+        // is FIFO, so the decrement queued here runs BEFORE the pane events
+        // this rebuild emits — the depth guard below can be down by the time
+        // those events reach on_workspace_event. The real protection against
+        // those events dropping model terminals is the still-visible check in
+        // on_workspace_event's ItemRemoved arm; the depth guard remains as a
+        // secondary filter for PaneAdded/PaneRemoved refreshes.
         self.reflowing_layout_depth += 1;
         cx.defer_in(window, |this, _window, cx| {
             this.reflowing_layout_depth -= 1;
@@ -2417,6 +2455,28 @@ impl TerminalListPanel {
         }
         match event {
             workspace::Event::ItemRemoved { item_id } => {
+                // `apply_layout_to_center` removes every tile and re-adds it to
+                // its new pane within the same update. Its guard decrement is
+                // queued before the pane events it must cover (gpui effects
+                // flush FIFO), so the guards above can already be down when
+                // this handler runs. A rebuild always re-homes its tiles
+                // before the events are processed — pane state is final — so
+                // treat a removal as a user close only when the item is no
+                // longer visible in any center pane. Otherwise a tiling
+                // re-flow (clone / set layout / spawn) would drop the group's
+                // terminals from the model and delete the emptied group.
+                let still_visible = self
+                    .center_panes(cx)
+                    .iter()
+                    .any(|pane| {
+                        pane.read(cx)
+                            .items()
+                            .any(|item| item.item_id() == *item_id)
+                    });
+                if still_visible {
+                    cx.notify();
+                    return;
+                }
                 let mut belongs_to_active_group = false;
                 for group in &self.groups {
                     if group.id == self.active_group_id {
@@ -2812,8 +2872,24 @@ impl Render for TerminalListPanel {
                                     let terminal_view = terminal_view.clone();
                                     let panel = panel.clone();
                                     ContextMenu::build(window, cx, move |menu, _, _| {
-                                        let panel = panel.clone();
-                                        menu.entry(i18n::t("rename"), None, move |window, cx| {
+                                        let clone_panel = panel.clone();
+                                        let close_panel = panel.clone();
+                                        let clone_view = terminal_view.clone();
+                                        menu.entry(
+                                            i18n::t("clone_terminal"),
+                                            None,
+                                            move |window, cx| {
+                                                clone_panel.update(cx, |this, cx| {
+                                                    this.clone_terminal(
+                                                        group_id,
+                                                        clone_view.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                });
+                                            },
+                                        )
+                                        .entry(i18n::t("rename"), None, move |window, cx| {
                                             terminal_view.update(cx, |this, cx| {
                                                 this.rename_terminal(
                                                     &terminal_view::RenameTerminal,
@@ -2826,7 +2902,7 @@ impl Render for TerminalListPanel {
                                             i18n::t("close"),
                                             None,
                                             move |window, cx| {
-                                                panel.update(cx, |this, cx| {
+                                                close_panel.update(cx, |this, cx| {
                                                     this.close_terminal(terminal_id, window, cx);
                                                 });
                                             },

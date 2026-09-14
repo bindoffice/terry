@@ -70,6 +70,7 @@ theme.workspace = true
 theme_settings.workspace = true
 theme_selector.workspace = true
 ui.workspace = true
+update_checker.workspace = true
 util.workspace = true
 uuid.workspace = true
 vim.workspace = true
@@ -268,6 +269,7 @@ members = [
     "crates/ui",
     "crates/ui_input",
     "crates/ui_macros",
+    "crates/update_checker",
     "crates/util",
     "crates/util_macros",
     "crates/vendored/alacritty_terminal",
@@ -510,6 +512,7 @@ ui = { path = "crates/ui" }
 ui_input = { path = "crates/ui_input" }
 ui_macros = { path = "crates/ui_macros" }
 ui_prompt = { path = "crates/ui_prompt" }
+update_checker = { path = "crates/update_checker" }
 util = { path = "crates/util" }
 util_macros = { path = "crates/util_macros" }
 vim = { path = "crates/vim" }

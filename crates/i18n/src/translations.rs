@@ -9,6 +9,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "Terminals");
             m.insert("new_terminal", "New Terminal");
+            m.insert("clone_terminal", "Clone Terminal");
             m.insert("new_center_terminal", "New Center Terminal");
             m.insert("new_ellipsis", "New…");
             m.insert("new_file", "New File");
@@ -107,6 +108,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("zoom_out", "Zoom Out");
             m.insert("about_terry", "About Terry");
             m.insert("about_terry_description", "A terminal-focused workspace.");
+            m.insert("check_for_updates", "Check for Updates…");
+            m.insert("checking_for_updates", "Checking for updates…");
+            m.insert("up_to_date", "Up to date");
+            m.insert("update_available", "Update available");
+            m.insert("update_check_failed", "Update check failed");
             m.insert("ok", "OK");
             m.insert("services", "Services");
             m.insert("hide_terry", "Hide Terry");
@@ -177,6 +183,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "终端");
             m.insert("new_terminal", "新建终端");
+            m.insert("clone_terminal", "克隆终端");
             m.insert("new_center_terminal", "新建中间终端");
             m.insert("new_ellipsis", "新建…");
             m.insert("new_file", "新建文件");
@@ -278,6 +285,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("zoom_out", "缩小");
             m.insert("about_terry", "关于 Terry");
             m.insert("about_terry_description", "以终端为中心的工作区。");
+            m.insert("check_for_updates", "检查更新…");
+            m.insert("checking_for_updates", "正在检查更新…");
+            m.insert("up_to_date", "已是最新版本");
+            m.insert("update_available", "发现新版本");
+            m.insert("update_check_failed", "检查更新失败");
             m.insert("ok", "好");
             m.insert("services", "服务");
             m.insert("hide_terry", "隐藏 Terry");
@@ -345,6 +357,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "終端機");
             m.insert("new_terminal", "新增終端機");
+            m.insert("clone_terminal", "複製終端機");
             m.insert("new_center_terminal", "新增中間終端機");
             m.insert("new_ellipsis", "新增…");
             m.insert("new_file", "新增檔案");
@@ -469,6 +482,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "ターミナル");
             m.insert("new_terminal", "新しいターミナル");
+            m.insert("clone_terminal", "ターミナルを複製");
             m.insert("new_center_terminal", "中央に新しいターミナル");
             m.insert("new_ellipsis", "新規…");
             m.insert("new_file", "新しいファイル");
@@ -599,6 +613,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "터미널");
             m.insert("new_terminal", "새 터미널");
+            m.insert("clone_terminal", "터미널 복제");
             m.insert("new_center_terminal", "중앙에 새 터미널");
             m.insert("new_ellipsis", "새로 만들기…");
             m.insert("new_file", "새 파일");
@@ -729,6 +744,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "Terminales");
             m.insert("new_terminal", "Nueva terminal");
+            m.insert("clone_terminal", "Clonar terminal");
             m.insert("terminal_list", "Lista de terminales");
             m.insert("group", "Grupo");
             m.insert("new_group", "Nuevo grupo");
@@ -809,6 +825,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "Terminaux");
             m.insert("new_terminal", "Nouveau terminal");
+            m.insert("clone_terminal", "Cloner le terminal");
             m.insert("terminal_list", "Liste des terminaux");
             m.insert("group", "Groupe");
             m.insert("new_group", "Nouveau groupe");
@@ -892,6 +909,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "Terminals");
             m.insert("new_terminal", "Neues Terminal");
+            m.insert("clone_terminal", "Terminal klonen");
             m.insert("terminal_list", "Terminal-Liste");
             m.insert("group", "Gruppe");
             m.insert("new_group", "Neue Gruppe");
@@ -975,6 +993,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "Terminais");
             m.insert("new_terminal", "Novo terminal");
+            m.insert("clone_terminal", "Clonar terminal");
             m.insert("terminal_list", "Lista de terminais");
             m.insert("group", "Grupo");
             m.insert("new_group", "Novo grupo");
@@ -1055,6 +1074,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "Терминалы");
             m.insert("new_terminal", "Новый терминал");
+            m.insert("clone_terminal", "Клонировать терминал");
             m.insert("terminal_list", "Список терминалов");
             m.insert("group", "Группа");
             m.insert("new_group", "Новая группа");
@@ -1132,6 +1152,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "الطرفيات");
             m.insert("new_terminal", "طرفية جديدة");
+            m.insert("clone_terminal", "استنساخ الطرفية");
             m.insert("terminal_list", "قائمة الطرفيات");
             m.insert("group", "مجموعة");
             m.insert("new_group", "مجموعة جديدة");
@@ -1173,6 +1194,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "टर्मिनल");
             m.insert("new_terminal", "नया टर्मिनल");
+            m.insert("clone_terminal", "टर्मिनल क्लोन करें");
             m.insert("terminal_list", "टर्मिनल सूची");
             m.insert("group", "समूह");
             m.insert("new_group", "नया समूह");
@@ -1223,6 +1245,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "Terminali");
             m.insert("new_terminal", "Nuovo terminale");
+            m.insert("clone_terminal", "Clona terminale");
             m.insert("terminal_list", "Elenco terminali");
             m.insert("group", "Gruppo");
             m.insert("new_group", "Nuovo gruppo");
@@ -1264,6 +1287,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "Terminals");
             m.insert("new_terminal", "Nieuwe terminal");
+            m.insert("clone_terminal", "Terminal klonen");
             m.insert("terminal_list", "Terminallijst");
             m.insert("group", "Groep");
             m.insert("new_group", "Nieuwe groep");
@@ -1305,6 +1329,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "Terminaller");
             m.insert("new_terminal", "Yeni terminal");
+            m.insert("clone_terminal", "Terminali Klonla");
             m.insert("terminal_list", "Terminal listesi");
             m.insert("group", "Grup");
             m.insert("new_group", "Yeni grup");
