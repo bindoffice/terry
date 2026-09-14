@@ -1103,6 +1103,14 @@ impl TerminalBuilder {
             // the behavior of standalone terminal emulators like iTerm2/Kitty/Alacritty.
             env.remove("SHLVL");
 
+            // Launchers (IDEs, agent shells) commonly inject pager overrides
+            // such as `GIT_PAGER=cat` that disable interactive paging. Never
+            // forward them into terminals: the spawned shell re-reads the
+            // user's dotfiles, so a genuine pager configuration still applies,
+            // and commands like `git log` keep paging through `less` (space to
+            // scroll) like in a standalone terminal emulator.
+            util::shell_env::remove_pager_disabling_overrides(&mut env);
+
             // If the parent environment doesn't have a locale set
             // (As is the case when launched from a .app on MacOS),
             // and the Project doesn't have a locale set, then

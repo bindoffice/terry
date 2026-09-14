@@ -12,6 +12,46 @@ use crate::shell::ShellKind;
 static SHELL_ENV_LOADED: AtomicBool = AtomicBool::new(false);
 static SHELL_ENV_WAITERS: Mutex<Vec<oneshot::Sender<()>>> = Mutex::new(Vec::new());
 
+/// Environment variables that launchers (IDEs, AI agent shells, process
+/// managers) commonly inject to disable interactive pagers. They must not leak
+/// into Terry's process or terminal environments: terminal shells re-read the
+/// user's dotfiles, so a genuine pager configuration still takes effect, while
+/// commands like `git log` keep paging through `less` with space to scroll,
+/// matching standalone terminal emulators.
+pub const PAGER_OVERRIDE_ENV_VARS: &[&str] = &["GIT_PAGER", "PAGER"];
+
+/// Whether `name`/`value` is a pager override that disables interactive paging,
+/// e.g. `GIT_PAGER=cat` or an empty `PAGER`.
+pub fn is_disabling_pager_override(name: &str, value: &str) -> bool {
+    if !PAGER_OVERRIDE_ENV_VARS.contains(&name) {
+        return false;
+    }
+    let value = value.trim();
+    value.is_empty() || value.eq_ignore_ascii_case("cat") || value.eq_ignore_ascii_case("true")
+}
+
+/// Remove pager-disabling overrides from an environment map before using it to
+/// spawn a terminal or serve as the login-shell environment.
+pub fn remove_pager_disabling_overrides(env: &mut HashMap<String, String>) {
+    env.retain(|name, value| !is_disabling_pager_override(name, value));
+}
+
+/// Drop pager-disabling overrides that were inherited from the launching
+/// process out of this process, so spawns that never touch the shell-env cache
+/// (e.g. a failed capture) stay clean as well.
+fn scrub_pager_disabling_process_vars() {
+    for name in PAGER_OVERRIDE_ENV_VARS {
+        if let Ok(value) = std::env::var(name) {
+            if is_disabling_pager_override(name, &value) {
+                // SAFETY: called during app startup / background env refresh
+                // before / while spawning user shells, same as
+                // `apply_environment_map` below.
+                unsafe { std::env::remove_var(name) };
+            }
+        }
+    }
+}
+
 fn shell_env_cache_path() -> PathBuf {
     let base = if cfg!(target_os = "macos") {
         dirs::home_dir()
@@ -89,17 +129,28 @@ fn save_environment_cache(env_map: &HashMap<String, String>) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(json) = serde_json::to_vec(env_map) {
+    // Never persist pager overrides that disable paging: a single launch from a
+    // host that injects them (e.g. an IDE setting `GIT_PAGER=cat`) would
+    // otherwise stick in the cache and disable paging in every later session.
+    let mut env_map = env_map.clone();
+    remove_pager_disabling_overrides(&mut env_map);
+    if let Ok(json) = serde_json::to_vec(&env_map) {
         let _ = std::fs::write(path, json);
     }
 }
 
 fn apply_environment_map(env_map: &HashMap<String, String>) {
+    scrub_pager_disabling_process_vars();
     for (name, value) in env_map {
         // Skip SHLVL to prevent it from polluting the process environment.
         // The login shell used for env capture increments SHLVL, and if we
         // propagate it, terminals inherit it and increment again.
         if name == "SHLVL" {
+            continue;
+        }
+        // Pager overrides are launcher junk when they disable paging; never
+        // apply them, or `git log` would dump its output instead of paging.
+        if is_disabling_pager_override(name, value) {
             continue;
         }
         // SAFETY: called during app startup / background env refresh before /
@@ -119,6 +170,7 @@ pub fn apply_environment_map_and_cache(env_map: &HashMap<String, String>) {
 /// Unblock waiters even when login-shell capture fails, so terminals can still
 /// start with the current process environment.
 pub fn notify_shell_env_ready() {
+    scrub_pager_disabling_process_vars();
     mark_shell_env_loaded();
 }
 
@@ -208,6 +260,13 @@ async fn capture_unix(
     let mut command_string = String::new();
     let mut command = new_std_command(shell_path);
     command.args(args);
+    // Strip launcher-injected pager overrides (e.g. `GIT_PAGER=cat` set by an
+    // IDE or agent shell) so the captured environment only reflects what the
+    // user's dotfiles set up; otherwise they would be cached and disable
+    // paging in every terminal spawned afterwards.
+    for name in PAGER_OVERRIDE_ENV_VARS {
+        command.env_remove(name);
+    }
     // In some shells, file descriptors greater than 2 cannot be used in interactive mode,
     // so file descriptor 0 (stdin) is used instead. This impacts zsh, old bash; perhaps others.
     // See: https://github.com/zed-industries/zed/pull/32136#issuecomment-2999645482
@@ -353,6 +412,11 @@ async fn capture_windows(
     };
     let mut cmd = crate::command::new_command(shell_path);
     cmd.args(args);
+    // See `capture_unix`: never let launcher-injected pager overrides leak
+    // into the captured login-shell environment.
+    for name in PAGER_OVERRIDE_ENV_VARS {
+        cmd.env_remove(name);
+    }
     let quoted_directory = quote_for_shell(&directory_string)?;
     let quoted_zed_path = quote_for_shell(&zed_path_string)?;
     let cmd = match shell_kind {
@@ -468,5 +532,32 @@ mod tests {
             env_map.get("SHELL").map(String::as_str),
             Some(path!("/bin/zsh"))
         );
+    }
+
+    #[test]
+    fn disabling_pager_overrides_are_detected() {
+        assert!(is_disabling_pager_override("GIT_PAGER", "cat"));
+        assert!(is_disabling_pager_override("GIT_PAGER", "CAT"));
+        assert!(is_disabling_pager_override("PAGER", ""));
+        assert!(is_disabling_pager_override("PAGER", " true "));
+        assert!(!is_disabling_pager_override("GIT_PAGER", "less"));
+        assert!(!is_disabling_pager_override("GIT_PAGER", "delta -n"));
+        // Variables outside the pager override list are never touched.
+        assert!(!is_disabling_pager_override("LESS", "cat"));
+        assert!(!is_disabling_pager_override("GIT_EDITOR", "cat"));
+    }
+
+    #[test]
+    fn remove_pager_disabling_overrides_strips_only_disabling_values() {
+        let mut env = HashMap::default();
+        env.insert("GIT_PAGER".to_string(), "cat".to_string());
+        env.insert("PAGER".to_string(), "less".to_string());
+        env.insert("PATH".to_string(), path!("/usr/bin").to_string());
+
+        remove_pager_disabling_overrides(&mut env);
+
+        assert_eq!(env.get("GIT_PAGER"), None);
+        assert_eq!(env.get("PAGER").map(String::as_str), Some("less"));
+        assert_eq!(env.get("PATH").map(String::as_str), Some(path!("/usr/bin")));
     }
 }
