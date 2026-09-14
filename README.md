@@ -5,6 +5,18 @@
 **Terry** 是一款以终端为中心的桌面工作区，内置 AI Agent。  
 基于 [Zed](https://zed.dev) 的 GPUI 技术栈，但聚焦于**终端、文件与 Agent 工作流**，而不是完整的 IDE。
 
+## 预览
+
+<p align="center">
+  <img src="assets/images/1.jpg" alt="Terry 预览 1" width="800" />
+</p>
+<p align="center">
+  <img src="assets/images/2.png" alt="Terry 预览 2" width="800" />
+</p>
+<p align="center">
+  <img src="assets/images/3.png" alt="Terry 预览 3" width="800" />
+</p>
+
 ## 功能特性
 
 - **终端工作区** — 分组管理多个终端，按正确工作目录新建会话；分组支持自动平铺布局（手动 / tall / grid / stack，类似 kitty）

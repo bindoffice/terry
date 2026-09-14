@@ -5,6 +5,18 @@
 **Terry** is a terminal-first desktop workspace with a built-in AI agent.  
 It is built on [Zed](https://zed.dev)’s GPUI stack, but focused on terminals, files, and agent workflows — not as a full IDE.
 
+## Preview
+
+<p align="center">
+  <img src="assets/images/1.jpg" alt="Terry preview 1" width="800" />
+</p>
+<p align="center">
+  <img src="assets/images/2.png" alt="Terry preview 2" width="800" />
+</p>
+<p align="center">
+  <img src="assets/images/3.png" alt="Terry preview 3" width="800" />
+</p>
+
 ## Features
 
 - **Terminal workspace** — Group and manage multiple terminals; open new sessions with the right working directory; groups support automatic tiled layouts (manual / tall / grid / stack, like kitty)
