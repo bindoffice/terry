@@ -6153,7 +6153,18 @@ impl AgentPanel {
                                 .tooltip(Tooltip::text("File List"))
                                 .on_click(|_, window, cx| {
                                     window.dispatch_action(
-                                        Box::new(zed_actions::file_list_panel::ToggleFocus),
+                                        Box::new(zed_actions::file_list_panel::ShowList),
+                                        cx,
+                                    );
+                                }),
+                        )
+                        .child(
+                            IconButton::new("show-finder", IconName::FolderOpen)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text("Finder"))
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(
+                                        Box::new(zed_actions::file_list_panel::ShowFinder),
                                         cx,
                                     );
                                 }),

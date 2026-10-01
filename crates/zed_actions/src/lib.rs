@@ -986,6 +986,10 @@ pub mod file_list_panel {
         [
             /// Toggles focus on the file list panel.
             ToggleFocus,
+            /// Opens the file panel as a name list.
+            ShowList,
+            /// Opens the file panel as an icon grid, like Finder.
+            ShowFinder,
         ]
     );
 }

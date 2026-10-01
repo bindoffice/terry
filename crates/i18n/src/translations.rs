@@ -9,6 +9,9 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "Terminals");
             m.insert("new_terminal", "New Terminal");
+            m.insert("resume_agent_session", "Resume Agent Session");
+            m.insert("fork_agent_session", "Fork Agent Session");
+            m.insert("past_agent_sessions", "Past Agent Sessions");
             m.insert("clone_terminal", "Clone Terminal");
             m.insert("new_center_terminal", "New Center Terminal");
             m.insert("new_ellipsis", "New…");
@@ -35,6 +38,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("up_one_level", "Up One Level");
             m.insert("refresh", "Refresh");
             m.insert("file_list", "File List");
+            m.insert("finder", "Finder");
             m.insert("ui_language", "Language");
             m.insert(
                 "ui_language_description",
@@ -186,6 +190,9 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "终端");
             m.insert("new_terminal", "新建终端");
+            m.insert("resume_agent_session", "继续 Agent 会话");
+            m.insert("fork_agent_session", "分叉 Agent 会话");
+            m.insert("past_agent_sessions", "历史 Agent 会话");
             m.insert("clone_terminal", "克隆终端");
             m.insert("new_center_terminal", "新建中间终端");
             m.insert("new_ellipsis", "新建…");
@@ -212,6 +219,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("up_one_level", "上级目录");
             m.insert("refresh", "刷新");
             m.insert("file_list", "文件列表");
+            m.insert("finder", "文件夹");
             m.insert("ui_language", "语言");
             m.insert("ui_language_description", "界面语言。默认跟随系统语言。");
             m.insert("language_system", "跟随系统");

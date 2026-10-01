@@ -1,22 +1,47 @@
 use std::path::PathBuf;
 
 use gpui::{
-    Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString,
-    Subscription, TaskExt, WeakEntity, Window, div, px,
+    Action, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    Render, SharedString, Subscription, TaskExt, WeakEntity, Window, div, px,
 };
 use ui::{IconButton, IconName, Label, LabelSize, Tooltip, prelude::*};
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 use workspace::OpenOptions;
-use zed_actions::file_list_panel::ToggleFocus;
+use zed_actions::file_list_panel::{ShowFinder, ShowList, ToggleFocus};
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
             workspace.toggle_panel_focus::<FileListPanel>(window, cx);
         });
+        workspace.register_action(|workspace, _: &ShowList, window, cx| {
+            show_file_panel(workspace, FileViewMode::List, window, cx);
+        });
+        workspace.register_action(|workspace, _: &ShowFinder, window, cx| {
+            show_file_panel(workspace, FileViewMode::Finder, window, cx);
+        });
     })
     .detach();
+}
+
+fn show_file_panel(
+    workspace: &mut Workspace,
+    mode: FileViewMode,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    workspace.open_panel::<FileListPanel>(window, cx);
+    if let Some(panel) = workspace.panel::<FileListPanel>(cx) {
+        panel.update(cx, |panel, cx| panel.set_view_mode(mode, cx));
+    }
+    workspace.focus_panel::<FileListPanel>(window, cx);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FileViewMode {
+    List,
+    Finder,
 }
 
 struct FileEntry {
@@ -30,6 +55,7 @@ pub struct FileListPanel {
     focus_handle: FocusHandle,
     position: DockPosition,
     current_dir: PathBuf,
+    view_mode: FileViewMode,
     _workspace_subscription: Subscription,
 }
 
@@ -48,8 +74,14 @@ impl FileListPanel {
             focus_handle,
             position: DockPosition::Left,
             current_dir,
+            view_mode: FileViewMode::List,
             _workspace_subscription,
         }
+    }
+
+    fn set_view_mode(&mut self, mode: FileViewMode, cx: &mut Context<Self>) {
+        self.view_mode = mode;
+        cx.notify();
     }
 
     fn update_from_active_item(&mut self, cx: &mut Context<Self>) {
@@ -192,8 +224,20 @@ impl Render for FileListPanel {
                             .child(
                                 IconButton::new("show-file-list", IconName::File)
                                     .icon_size(IconSize::Small)
-                                    .toggle_state(true)
-                                    .tooltip(Tooltip::text(i18n::t("file_list"))),
+                                    .toggle_state(self.view_mode == FileViewMode::List)
+                                    .tooltip(Tooltip::text(i18n::t("file_list")))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(ShowList), cx);
+                                    }),
+                            )
+                            .child(
+                                IconButton::new("show-finder", IconName::FolderOpen)
+                                    .icon_size(IconSize::Small)
+                                    .toggle_state(self.view_mode == FileViewMode::Finder)
+                                    .tooltip(Tooltip::text(i18n::t("finder")))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(Box::new(ShowFinder), cx);
+                                    }),
                             )
                             .child(
                                 IconButton::new("show-agent", IconName::Sparkle)
@@ -235,52 +279,127 @@ impl Render for FileListPanel {
                             .truncate(),
                     ),
             )
-            .child(
-                v_flex()
-                    .id("file-list")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .children(entries.into_iter().enumerate().map(|(index, entry)| {
-                        let colors = theme.colors().clone();
-                        let is_dir = entry.is_dir;
-                        let is_parent = entry.name.as_ref() == "..";
-                        let icon = if is_parent {
-                            IconName::ArrowUp
-                        } else if is_dir {
-                            IconName::Folder
-                        } else {
-                            IconName::File
-                        };
-                        div()
-                            .id(index)
-                            .px_2()
-                            .py_1()
-                            .mx_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(colors.element_hover))
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(
-                                        ui::Icon::new(icon)
-                                            .size(IconSize::Small)
-                                            .color(Color::Muted),
-                                    )
-                                    .child(Label::new(entry.name.clone()).size(LabelSize::Small).truncate()),
-                            )
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                let entry = FileEntry {
-                                    path: entry.path.clone(),
-                                    name: entry.name.clone(),
-                                    is_dir,
-                                };
-                                this.entry_clicked(entry, window, cx);
-                            }))
-                    })),
-            )
+            .child(match self.view_mode {
+                FileViewMode::List => render_file_rows(entries, theme, cx),
+                FileViewMode::Finder => render_finder_grid(entries, theme, cx),
+            })
     }
+}
+
+fn entry_icon(entry: &FileEntry) -> IconName {
+    if entry.name.as_ref() == ".." {
+        IconName::ArrowUp
+    } else if entry.is_dir {
+        IconName::Folder
+    } else {
+        IconName::File
+    }
+}
+
+fn entry_clicked(
+    this: &mut FileListPanel,
+    entry: &FileEntry,
+    window: &mut Window,
+    cx: &mut Context<FileListPanel>,
+) {
+    this.entry_clicked(
+        FileEntry {
+            path: entry.path.clone(),
+            name: entry.name.clone(),
+            is_dir: entry.is_dir,
+        },
+        window,
+        cx,
+    );
+}
+
+fn render_file_rows(
+    entries: Vec<FileEntry>,
+    theme: std::sync::Arc<theme::Theme>,
+    cx: &mut Context<FileListPanel>,
+) -> AnyElement {
+    v_flex()
+        .id("file-list")
+        .flex_1()
+        .overflow_y_scroll()
+        .children(entries.into_iter().enumerate().map(|(index, entry)| {
+            let colors = theme.colors().clone();
+            let icon = entry_icon(&entry);
+            div()
+                .id(index)
+                .px_2()
+                .py_1()
+                .mx_1()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|style| style.bg(colors.element_hover))
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(
+                            ui::Icon::new(icon)
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new(entry.name.clone())
+                                .size(LabelSize::Small)
+                                .truncate(),
+                        ),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    entry_clicked(this, &entry, window, cx);
+                }))
+        }))
+        .into_any_element()
+}
+
+fn render_finder_grid(
+    entries: Vec<FileEntry>,
+    theme: std::sync::Arc<theme::Theme>,
+    cx: &mut Context<FileListPanel>,
+) -> AnyElement {
+    h_flex()
+        .id("finder")
+        .flex_1()
+        .flex_wrap()
+        .content_start()
+        .items_start()
+        .p_2()
+        .gap_1()
+        .overflow_y_scroll()
+        .children(entries.into_iter().enumerate().map(|(index, entry)| {
+            let colors = theme.colors().clone();
+            let icon = entry_icon(&entry);
+            let icon_color = if entry.is_dir && entry.name.as_ref() != ".." {
+                Color::Accent
+            } else {
+                Color::Muted
+            };
+            v_flex()
+                .id(index)
+                .w(px(108.))
+                .items_center()
+                .gap_1()
+                .px_1()
+                .py_2()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|style| style.bg(colors.element_hover))
+                .child(ui::Icon::new(icon).size(IconSize::XLarge).color(icon_color))
+                .child(
+                    div().w(px(96.)).text_center().child(
+                        Label::new(entry.name.clone())
+                            .size(LabelSize::XSmall)
+                            .truncate(),
+                    ),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    entry_clicked(this, &entry, window, cx);
+                }))
+        }))
+        .into_any_element()
 }
 
 impl Panel for FileListPanel {

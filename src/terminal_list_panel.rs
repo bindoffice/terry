@@ -1,4 +1,5 @@
 use editor::{Editor, MultiBufferOffset};
+use futures::FutureExt;
 use gpui::{
     Action, AnyElement, App, Axis, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
     Render, SharedString, Subscription, Task, TaskExt, WeakEntity, Window, div, px,
@@ -49,6 +50,356 @@ fn release_session_claim(workspace_key: &str, owner: EntityId) {
     if owners.get(workspace_key) == Some(&owner) {
         owners.remove(workspace_key);
     }
+}
+
+/// A terminal whose foreground process is a coding agent. Kept alive after the
+/// tab is closed so opening a terminal again continues the same session.
+struct ParkedAgentSession {
+    view: Entity<TerminalView>,
+    cwd: Option<PathBuf>,
+}
+
+/// Group-menu actions for the coding agent in that group.
+struct AgentSessionActions {
+    cwd: Option<PathBuf>,
+    resume: bool,
+    resume_command: Option<String>,
+    fork: Option<String>,
+    past: Option<String>,
+}
+
+/// Agent identity remembered after a terminal closes, including after the
+/// process itself has exited. `pending_resume` is consumed by the next new
+/// terminal. Fork and past-session actions keep working afterwards.
+struct RememberedAgentSession {
+    agent_id: &'static str,
+    /// Allowlisted CLI name used in the resume command. Never a raw process path.
+    bin: &'static str,
+    cwd: Option<PathBuf>,
+    pending_resume: bool,
+}
+
+const PARKED_AGENT_SESSION_LIMIT: usize = 8;
+const REMEMBERED_AGENT_SESSION_LIMIT: usize = 8;
+
+/// Public CLI commands for continuing, listing, or forking a coding-agent
+/// session. `{bin}` is replaced with an allowlisted executable name.
+///
+/// Commands are only set when the CLI documents a one-shot flag or subcommand.
+/// Agents without a published command stay detected so a live process can be
+/// reattached, and do not get a guessed flag.
+struct AgentCli {
+    id: &'static str,
+    names: &'static [&'static str],
+    bin: &'static str,
+    resume: Option<&'static str>,
+    past: Option<&'static str>,
+    fork: Option<&'static str>,
+}
+
+fn coding_agents() -> &'static [AgentCli] {
+    &[
+        AgentCli {
+            id: "claude",
+            names: &["claude", "claude-code"],
+            bin: "claude",
+            resume: Some("{bin} --continue"),
+            past: Some("{bin} --resume"),
+            fork: Some("{bin} --continue --fork-session"),
+        },
+        AgentCli {
+            id: "codex",
+            names: &["codex"],
+            bin: "codex",
+            resume: Some("{bin} resume --last"),
+            past: Some("{bin} resume"),
+            fork: Some("{bin} fork"),
+        },
+        AgentCli {
+            id: "trae",
+            names: &["traecli", "trae", "traecode"],
+            bin: "traecli",
+            resume: Some("{bin} resume"),
+            past: None,
+            fork: Some("{bin} fork"),
+        },
+        AgentCli {
+            id: "opencode",
+            names: &["opencode"],
+            bin: "opencode",
+            resume: Some("{bin} --continue"),
+            past: None,
+            fork: Some("{bin} --continue --fork"),
+        },
+        AgentCli {
+            id: "omp",
+            names: &["omp", "oh-my-pi"],
+            bin: "omp",
+            resume: Some("{bin} --continue"),
+            past: Some("{bin} --resume"),
+            // `--fork` requires a session id, so there is no one-shot command.
+            fork: None,
+        },
+        AgentCli {
+            id: "qoder",
+            names: &["qoder", "qodercli"],
+            bin: "qoder",
+            resume: Some("{bin} -c"),
+            past: Some("{bin} -r"),
+            fork: Some("{bin} --fork-session -r"),
+        },
+        AgentCli {
+            id: "qoder-cn",
+            names: &["qoder-cn"],
+            bin: "qoder-cn",
+            resume: Some("{bin} -c"),
+            past: Some("{bin} -r"),
+            fork: Some("{bin} --fork-session -r"),
+        },
+        AgentCli {
+            id: "gemini",
+            names: &["gemini"],
+            bin: "gemini",
+            resume: Some("{bin} --resume"),
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "cursor",
+            names: &["cursor-agent", "cursor"],
+            bin: "cursor-agent",
+            resume: Some("{bin} --resume"),
+            past: None,
+            fork: None,
+        },
+        // Detected, and a still-running process is reattached. No documented
+        // one-shot resume, fork, or past-session command.
+        AgentCli {
+            id: "grok",
+            names: &["grok"],
+            bin: "grok",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "prime",
+            names: &["prime-agent", "prime"],
+            bin: "prime-agent",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "droid",
+            names: &["droid"],
+            bin: "droid",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "qwen",
+            names: &["qwen", "qwen-code"],
+            bin: "qwen",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "goose",
+            names: &["goose"],
+            bin: "goose",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "codebuddy",
+            names: &["codebuddy"],
+            bin: "codebuddy",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "copilot",
+            names: &["copilot"],
+            bin: "copilot",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "kimi",
+            names: &["kimi"],
+            bin: "kimi",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "pi",
+            names: &["pi"],
+            bin: "pi",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "crush",
+            names: &["crush"],
+            bin: "crush",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "antigravity",
+            names: &["agy", "antigravity"],
+            bin: "agy",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "aider",
+            names: &["aider"],
+            bin: "aider",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "amp",
+            names: &["amp"],
+            bin: "amp",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "auggie",
+            names: &["auggie"],
+            bin: "auggie",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "hermes",
+            names: &["hermes"],
+            bin: "hermes",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "vibe",
+            names: &["vibe"],
+            bin: "vibe",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "empryo",
+            names: &["empryo"],
+            bin: "empryo",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+    ]
+}
+
+fn command_basename(name: &str) -> String {
+    let base = name
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(name);
+    let base = base
+        .strip_suffix(".exe")
+        .or_else(|| base.strip_suffix(".EXE"))
+        .unwrap_or(base);
+    base.to_ascii_lowercase()
+}
+
+fn agent_for_basename(base: &str) -> Option<&'static AgentCli> {
+    coding_agents().iter().find(|agent| {
+        agent.names.iter().any(|name| {
+            base == *name
+                || base.starts_with(&format!("{name}-"))
+                || base.starts_with(&format!("{name}_"))
+        })
+    })
+}
+
+fn invocation_bin(agent: &'static AgentCli, base: &str) -> &'static str {
+    agent
+        .names
+        .iter()
+        .copied()
+        .find(|name| *name == base)
+        .unwrap_or(agent.bin)
+}
+
+fn agent_command(template: &str, bin: &str) -> String {
+    template.replace("{bin}", bin)
+}
+
+fn agent_by_id(id: &str) -> Option<&'static AgentCli> {
+    coding_agents().iter().find(|agent| agent.id == id)
+}
+
+fn is_coding_agent_name(name: &str) -> bool {
+    agent_for_basename(&command_basename(name)).is_some()
+}
+
+fn text_mentions_coding_agent(text: &str) -> bool {
+    agent_mentioned_in_text(text).is_some()
+}
+
+fn agent_mentioned_in_text(text: &str) -> Option<(&'static AgentCli, &'static str)> {
+    // Short command names (pi, amp, omp, agy) match process names only.
+    // Matching them inside a title produces false positives.
+    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+        .filter(|token| token.chars().count() >= 4)
+        .find_map(|token| {
+            let base = command_basename(token);
+            let agent = agent_for_basename(&base)?;
+            Some((agent, invocation_bin(agent, &base)))
+        })
+}
+
+fn coding_agent_from_view(
+    view: &Entity<TerminalView>,
+    cx: &App,
+) -> Option<(&'static AgentCli, &'static str)> {
+    let terminal = view.read(cx).terminal().read(cx);
+    if let Some(name) = terminal.foreground_process_command_name() {
+        let base = command_basename(&name);
+        if let Some(agent) = agent_for_basename(&base) {
+            return Some((agent, invocation_bin(agent, &base)));
+        }
+    }
+    agent_mentioned_in_text(&terminal.title(false))
+        .or_else(|| agent_mentioned_in_text(&terminal.breadcrumb_text))
+}
+
+fn should_park_agent_session(view: &Entity<TerminalView>, cx: &App) -> bool {
+    let terminal = view.read(cx).terminal().read(cx);
+    if terminal.has_exited() {
+        return false;
+    }
+    if terminal
+        .foreground_process_command_name()
+        .is_some_and(|name| is_coding_agent_name(&name))
+    {
+        return true;
+    }
+    text_mentions_coding_agent(&terminal.title(false))
+        || text_mentions_coding_agent(&terminal.breadcrumb_text)
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -336,6 +687,12 @@ pub struct TerminalListPanel {
     /// After session restore, ignore process-info reports of `$HOME` that would
     /// clobber a more specific restored path while shell rc finishes.
     restore_cwd_guard_until: Option<std::time::Instant>,
+    /// Coding-agent terminals closed by the user. The PTY stays alive so the
+    /// next new terminal can reattach instead of starting a fresh shell.
+    parked_agent_sessions: Vec<ParkedAgentSession>,
+    /// Agent and directory remembered at close time, so a later terminal can
+    /// run the CLI's resume command after the process has exited.
+    remembered_agent_sessions: Vec<RememberedAgentSession>,
     _session_release_subscription: Subscription,
     renaming_group_id: Option<GroupId>,
     rename_editor: Entity<Editor>,
@@ -428,6 +785,8 @@ impl TerminalListPanel {
             _terminal_cwd_subscriptions: Vec::new(),
             cwd_persist_task: Task::ready(()),
             restore_cwd_guard_until: None,
+            parked_agent_sessions: Vec::new(),
+            remembered_agent_sessions: Vec::new(),
             _session_release_subscription,
             renaming_group_id: None,
             rename_editor,
@@ -936,6 +1295,7 @@ impl TerminalListPanel {
                 None,
                 Some(index),
                 p_term.title,
+                None,
                 window,
                 cx,
             );
@@ -974,7 +1334,7 @@ impl TerminalListPanel {
             });
             self.active_group_id = id;
             for cwd in project_dirs {
-                self.spawn_terminal(id, Some(cwd), None, None, None, None, window, cx);
+                self.spawn_terminal(id, Some(cwd), None, None, None, None, None, window, cx);
             }
             self.save_session(cx);
             return;
@@ -996,7 +1356,7 @@ impl TerminalListPanel {
             restore_slots: Vec::new(),
         });
         self.active_group_id = id;
-        self.spawn_terminal(id, None, None, None, None, None, window, cx);
+        self.spawn_terminal(id, None, None, None, None, None, None, window, cx);
         self.save_session(cx);
     }
 
@@ -1132,7 +1492,32 @@ impl TerminalListPanel {
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
             group.collapsed = false;
         }
-        self.spawn_terminal(group_id, cwd, source, destination, None, None, window, cx);
+        if let Some(view) = self.take_parked_agent_session(cwd.as_deref(), cx) {
+            self.clear_pending_resume(cwd.as_deref());
+            self.add_terminal_to_group(group_id, view, None, cwd, cx);
+            self.defer_sync_active_group_to_pane(window, cx);
+            self.save_session(cx);
+            return;
+        }
+        if let Some((bin, session_cwd, template)) = self.take_pending_resume(cwd.as_deref()) {
+            let command = agent_command(template, bin);
+            self.spawn_terminal(
+                group_id,
+                session_cwd.or(cwd),
+                source,
+                destination,
+                None,
+                None,
+                Some(command),
+                window,
+                cx,
+            );
+            self.save_session(cx);
+            return;
+        }
+        self.spawn_terminal(
+            group_id, cwd, source, destination, None, None, None, window, cx,
+        );
         self.save_session(cx);
     }
 
@@ -1160,7 +1545,17 @@ impl TerminalListPanel {
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
             group.collapsed = false;
         }
-        self.spawn_terminal(group_id, cwd, Some(terminal_view), None, None, None, window, cx);
+        self.spawn_terminal(
+            group_id,
+            cwd,
+            Some(terminal_view),
+            None,
+            None,
+            None,
+            None,
+            window,
+            cx,
+        );
         self.save_session(cx);
     }
 
@@ -1177,6 +1572,7 @@ impl TerminalListPanel {
             .iter()
             .find(|g| g.id == group_id)
             .map(|g| g.layout_mode);
+        let agent_actions = panel.read(cx).agent_session_actions(group_id, cx);
         ContextMenu::build(window, cx, move |menu, _, _| {
             let view1 = panel.clone();
             let view2 = panel.clone();
@@ -1204,7 +1600,38 @@ impl TerminalListPanel {
                     view4.update(cx, |this, cx| {
                         this.new_terminal_in_group(group_id, window, cx);
                     });
-                })
+                });
+            let menu = if let Some(actions) = agent_actions {
+                let mut menu = menu.separator();
+                if actions.resume {
+                    let view = panel.clone();
+                    menu = menu.entry(i18n::t("resume_agent_session"), None, move |window, cx| {
+                        view.update(cx, |this, cx| {
+                            this.resume_agent_session(group_id, window, cx);
+                        });
+                    });
+                }
+                if actions.fork.is_some() {
+                    let view = panel.clone();
+                    menu = menu.entry(i18n::t("fork_agent_session"), None, move |window, cx| {
+                        view.update(cx, |this, cx| {
+                            this.fork_agent_session(group_id, window, cx);
+                        });
+                    });
+                }
+                if actions.past.is_some() {
+                    let view = panel.clone();
+                    menu = menu.entry(i18n::t("past_agent_sessions"), None, move |window, cx| {
+                        view.update(cx, |this, cx| {
+                            this.past_agent_sessions(group_id, window, cx);
+                        });
+                    });
+                }
+                menu
+            } else {
+                menu
+            };
+            let menu = menu
                 .separator()
                 .header(i18n::t("layout"));
             let mut menu = menu;
@@ -1303,7 +1730,7 @@ impl TerminalListPanel {
             restore_slots: Vec::new(),
         });
         self.switch_group(id, window, cx);
-        self.spawn_terminal(id, cwd, source, None, None, None, window, cx);
+        self.spawn_terminal(id, cwd, source, None, None, None, None, window, cx);
         self.save_session(cx);
     }
 
@@ -1403,6 +1830,7 @@ impl TerminalListPanel {
         destination: Option<Entity<Pane>>,
         restore_index: Option<usize>,
         restore_title: Option<String>,
+        init_command: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1465,6 +1893,26 @@ impl TerminalListPanel {
                     terminal_view.update(cx, |view, cx| {
                         view.set_custom_title(Some(title.to_string()), cx);
                     });
+                }
+
+                if let Some(command) = init_command.clone() {
+                    let startup = terminal.update(cx, |terminal, _cx| {
+                        terminal.start_init_command_startup_handshake()
+                    });
+                    let terminal = terminal.clone();
+                    cx.spawn(async move |_view, cx| {
+                        let timeout = cx.background_executor().timer(Duration::from_secs(5));
+                        futures::select_biased! {
+                            _ = startup.fuse() => {}
+                            _ = timeout.fuse() => {}
+                        }
+                        let mut input = command.into_bytes();
+                        input.push(b'\x0d');
+                        terminal.update(cx, |terminal, cx| {
+                            terminal.write_init_command_after_startup(input, cx);
+                        });
+                    })
+                    .detach();
                 }
 
                 this.add_terminal_to_group(
@@ -1655,7 +2103,7 @@ impl TerminalListPanel {
             });
         }
         let group_id = self.active_group_id;
-        self.spawn_terminal(group_id, Some(cwd), None, None, None, None, window, cx);
+        self.spawn_terminal(group_id, Some(cwd), None, None, None, None, None, window, cx);
         self.save_session(cx);
     }
 
@@ -2534,6 +2982,246 @@ impl TerminalListPanel {
         cx.notify();
     }
 
+    fn remember_agent_session(
+        &mut self,
+        agent_id: &'static str,
+        bin: &'static str,
+        cwd: Option<PathBuf>,
+    ) {
+        self.remembered_agent_sessions
+            .retain(|session| !(session.agent_id == agent_id && session.cwd == cwd));
+        self.remembered_agent_sessions
+            .push(RememberedAgentSession {
+                agent_id,
+                bin,
+                cwd,
+                pending_resume: true,
+            });
+        if self.remembered_agent_sessions.len() > REMEMBERED_AGENT_SESSION_LIMIT {
+            let overflow =
+                self.remembered_agent_sessions.len() - REMEMBERED_AGENT_SESSION_LIMIT;
+            self.remembered_agent_sessions.drain(0..overflow);
+        }
+    }
+
+    fn clear_pending_resume(&mut self, cwd: Option<&std::path::Path>) {
+        for session in &mut self.remembered_agent_sessions {
+            let matches = match cwd {
+                Some(cwd) => session.cwd.as_deref() == Some(cwd),
+                None => true,
+            };
+            if matches {
+                session.pending_resume = false;
+            }
+        }
+    }
+
+    /// Consumes the one-shot resume recorded when an agent terminal closed.
+    /// Returns the allowlisted binary, the session directory, and the resume
+    /// command template.
+    fn take_pending_resume(
+        &mut self,
+        cwd: Option<&std::path::Path>,
+    ) -> Option<(&'static str, Option<PathBuf>, &'static str)> {
+        let index = if let Some(cwd) = cwd {
+            self.remembered_agent_sessions.iter().rposition(|session| {
+                session.pending_resume
+                    && session.cwd.as_deref() == Some(cwd)
+                    && agent_by_id(session.agent_id)
+                        .and_then(|agent| agent.resume)
+                        .is_some()
+            })
+        } else {
+            self.remembered_agent_sessions.iter().rposition(|session| {
+                session.pending_resume
+                    && agent_by_id(session.agent_id)
+                        .and_then(|agent| agent.resume)
+                        .is_some()
+            })
+        }?;
+        let session = &mut self.remembered_agent_sessions[index];
+        session.pending_resume = false;
+        let template = agent_by_id(session.agent_id)?.resume?;
+        Some((session.bin, session.cwd.clone(), template))
+    }
+
+    fn group_agent_cwd(&self, group_id: GroupId, cx: &App) -> Option<PathBuf> {
+        let group = self.groups.iter().find(|group| group.id == group_id)?;
+        let view = group.terminals.last()?;
+        view.read(cx)
+            .terminal()
+            .read(cx)
+            .working_directory()
+            .or_else(|| {
+                self.terminal_spawn_cwds
+                    .get(&view.entity_id())
+                    .cloned()
+                    .flatten()
+            })
+    }
+
+    fn agent_session_actions(&self, group_id: GroupId, cx: &App) -> Option<AgentSessionActions> {
+        let cwd = self.group_agent_cwd(group_id, cx);
+        let live = self
+            .groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .and_then(|group| group.terminals.last())
+            .and_then(|view| coding_agent_from_view(view, cx));
+        let remembered = if let Some(cwd) = cwd.as_deref() {
+            self.remembered_agent_sessions
+                .iter()
+                .rfind(|session| session.cwd.as_deref() == Some(cwd))
+        } else {
+            self.remembered_agent_sessions.last()
+        };
+        let (agent, bin, action_cwd) = if let Some((agent, bin)) = live {
+            (agent, bin, cwd.clone())
+        } else if let Some(session) = remembered {
+            let agent = agent_by_id(session.agent_id)?;
+            (agent, session.bin, session.cwd.clone().or(cwd))
+        } else {
+            return None;
+        };
+        let has_parked = self.parked_agent_sessions.iter().any(|session| {
+            !session.view.read(cx).terminal().read(cx).has_exited()
+                && match action_cwd.as_deref() {
+                    Some(cwd) => session.cwd.as_deref() == Some(cwd),
+                    None => true,
+                }
+        });
+        let resume_command = agent.resume.map(|template| agent_command(template, bin));
+        let fork = agent.fork.map(|template| agent_command(template, bin));
+        let past = agent.past.map(|template| agent_command(template, bin));
+        if !has_parked && resume_command.is_none() && fork.is_none() && past.is_none() {
+            return None;
+        }
+        Some(AgentSessionActions {
+            cwd: action_cwd,
+            resume: has_parked || resume_command.is_some(),
+            resume_command,
+            fork,
+            past,
+        })
+    }
+
+    fn resume_agent_session(
+        &mut self,
+        group_id: GroupId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(actions) = self.agent_session_actions(group_id, cx) else {
+            return;
+        };
+        if let Some(view) = self.take_parked_agent_session(actions.cwd.as_deref(), cx) {
+            self.prepare_group_for_terminal(group_id, window, cx);
+            self.clear_pending_resume(actions.cwd.as_deref());
+            self.add_terminal_to_group(group_id, view, None, actions.cwd, cx);
+            self.defer_sync_active_group_to_pane(window, cx);
+            self.save_session(cx);
+            return;
+        }
+        if let Some(command) = actions.resume_command {
+            self.clear_pending_resume(actions.cwd.as_deref());
+            self.spawn_agent_command(group_id, actions.cwd, command, window, cx);
+        }
+    }
+
+    fn fork_agent_session(
+        &mut self,
+        group_id: GroupId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(actions) = self.agent_session_actions(group_id, cx) else {
+            return;
+        };
+        let Some(command) = actions.fork else {
+            return;
+        };
+        self.spawn_agent_command(group_id, actions.cwd, command, window, cx);
+    }
+
+    fn past_agent_sessions(
+        &mut self,
+        group_id: GroupId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(actions) = self.agent_session_actions(group_id, cx) else {
+            return;
+        };
+        let Some(command) = actions.past else {
+            return;
+        };
+        self.spawn_agent_command(group_id, actions.cwd, command, window, cx);
+    }
+
+    fn prepare_group_for_terminal(
+        &mut self,
+        group_id: GroupId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if group_id != self.active_group_id {
+            self.switch_group(group_id, window, cx);
+        }
+        if let Some(group) = self.groups.iter_mut().find(|group| group.id == group_id) {
+            group.collapsed = false;
+        }
+    }
+
+    fn spawn_agent_command(
+        &mut self,
+        group_id: GroupId,
+        cwd: Option<PathBuf>,
+        command: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.groups.iter().any(|group| group.id == group_id) {
+            return;
+        }
+        let source = self.active_terminal_view(cx);
+        self.prepare_group_for_terminal(group_id, window, cx);
+        self.spawn_terminal(
+            group_id,
+            cwd,
+            source,
+            None,
+            None,
+            None,
+            Some(command),
+            window,
+            cx,
+        );
+        self.save_session(cx);
+    }
+
+    fn take_parked_agent_session(
+        &mut self,
+        cwd: Option<&std::path::Path>,
+        cx: &App,
+    ) -> Option<Entity<TerminalView>> {
+        self.parked_agent_sessions.retain(|session| {
+            !session
+                .view
+                .read(cx)
+                .terminal()
+                .read(cx)
+                .has_exited()
+        });
+        let index = if let Some(cwd) = cwd {
+            self.parked_agent_sessions
+                .iter()
+                .rposition(|session| session.cwd.as_deref() == Some(cwd))
+        } else {
+            self.parked_agent_sessions.len().checked_sub(1)
+        }?;
+        Some(self.parked_agent_sessions.remove(index).view)
+    }
+
     fn remove_terminal_by_id(
         &mut self,
         item_id: EntityId,
@@ -2543,16 +3231,29 @@ impl TerminalListPanel {
         let mut changed = false;
         let mut emptied_group: Option<GroupId> = None;
         let mut removed_from_active_auto = false;
+        let mut parked: Option<ParkedAgentSession> = None;
+        let mut remembered: Option<(&'static str, &'static str, Option<PathBuf>)> = None;
         for group in &mut self.groups {
             if let Some(removed_ix) = group
                 .terminals
                 .iter()
                 .position(|tv| tv.entity_id() == item_id)
             {
-                // Drop the Entity so Terminal::Drop kills the PTY. Pane refs
-                // should already be gone when this runs after ItemRemoved.
-                let _dropped = group.terminals.remove(removed_ix);
-                self.terminal_spawn_cwds.remove(&item_id);
+                let removed = group.terminals.remove(removed_ix);
+                let remembered_cwd = self.terminal_spawn_cwds.remove(&item_id).flatten();
+                let cwd = remembered_cwd.or_else(|| {
+                    removed
+                        .read(cx)
+                        .terminal()
+                        .read(cx)
+                        .working_directory()
+                });
+                if let Some((agent, bin)) = coding_agent_from_view(&removed, cx) {
+                    remembered = Some((agent.id, bin, cwd.clone()));
+                }
+                if should_park_agent_session(&removed, cx) {
+                    parked = Some(ParkedAgentSession { view: removed, cwd });
+                }
                 if group.layout_mode == GroupLayoutMode::Manual {
                     if let Some(layout) = group.saved_layout.as_mut() {
                         Self::remap_layout_after_remove(layout, removed_ix);
@@ -2569,6 +3270,16 @@ impl TerminalListPanel {
                 changed = true;
                 break;
             }
+        }
+        if let Some(session) = parked {
+            self.parked_agent_sessions.push(session);
+            if self.parked_agent_sessions.len() > PARKED_AGENT_SESSION_LIMIT {
+                let overflow = self.parked_agent_sessions.len() - PARKED_AGENT_SESSION_LIMIT;
+                self.parked_agent_sessions.drain(0..overflow);
+            }
+        }
+        if let Some((agent_id, bin, cwd)) = remembered {
+            self.remember_agent_session(agent_id, bin, cwd);
         }
         if !changed {
             return;
@@ -2942,7 +3653,18 @@ impl Render for TerminalListPanel {
                                     .tooltip(Tooltip::text(i18n::t("file_list")))
                                     .on_click(|_, window, cx| {
                                         window.dispatch_action(
-                                            Box::new(zed_actions::file_list_panel::ToggleFocus),
+                                            Box::new(zed_actions::file_list_panel::ShowList),
+                                            cx,
+                                        );
+                                    }),
+                            )
+                            .child(
+                                IconButton::new("show-finder", IconName::FolderOpen)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text(i18n::t("finder")))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(zed_actions::file_list_panel::ShowFinder),
                                             cx,
                                         );
                                     }),
@@ -3076,6 +3798,79 @@ mod tests {
     use terminal::TerminalBuilder;
     use util::paths::PathStyle;
     use workspace::{AppState, MultiWorkspace};
+
+    #[test]
+    fn coding_agent_names_match_known_clis() {
+        assert!(is_coding_agent_name("claude"));
+        assert!(is_coding_agent_name("/usr/local/bin/codex"));
+        assert!(is_coding_agent_name("gemini.exe"));
+        assert!(is_coding_agent_name("claude-code"));
+        assert!(is_coding_agent_name("traecli"));
+        assert!(is_coding_agent_name("omp"));
+        assert!(is_coding_agent_name("prime-agent"));
+        assert!(is_coding_agent_name("qodercli"));
+        assert!(is_coding_agent_name("codebuddy"));
+        assert!(is_coding_agent_name("agy"));
+        assert!(is_coding_agent_name("cursor-agent"));
+        assert!(is_coding_agent_name("hermes"));
+        assert!(is_coding_agent_name("empryo"));
+        assert!(!is_coding_agent_name("zsh"));
+        assert!(!is_coding_agent_name("node"));
+        assert!(!is_coding_agent_name("pine"));
+        assert!(text_mentions_coding_agent("✳ Claude Code"));
+        assert!(text_mentions_coding_agent("Qwen Code"));
+        assert!(!text_mentions_coding_agent("bash"));
+        assert!(!text_mentions_coding_agent("install pi"));
+    }
+
+    #[test]
+    fn coding_agent_session_commands_follow_public_cli() {
+        let claude = agent_by_id("claude").unwrap();
+        assert_eq!(
+            agent_command(claude.resume.unwrap(), claude.bin),
+            "claude --continue"
+        );
+        assert_eq!(
+            agent_command(claude.past.unwrap(), claude.bin),
+            "claude --resume"
+        );
+        assert_eq!(
+            agent_command(claude.fork.unwrap(), claude.bin),
+            "claude --continue --fork-session"
+        );
+
+        let codex = agent_by_id("codex").unwrap();
+        assert_eq!(
+            agent_command(codex.resume.unwrap(), "codex"),
+            "codex resume --last"
+        );
+        assert_eq!(agent_command(codex.past.unwrap(), "codex"), "codex resume");
+        assert_eq!(agent_command(codex.fork.unwrap(), "codex"), "codex fork");
+
+        let trae = agent_by_id("trae").unwrap();
+        assert!(trae.resume.is_some() && trae.fork.is_some() && trae.past.is_none());
+        assert_eq!(invocation_bin(trae, "trae"), "trae");
+
+        let opencode = agent_by_id("opencode").unwrap();
+        assert_eq!(
+            agent_command(opencode.fork.unwrap(), opencode.bin),
+            "opencode --continue --fork"
+        );
+        assert!(opencode.past.is_none());
+
+        let omp = agent_by_id("omp").unwrap();
+        assert!(omp.resume.is_some() && omp.past.is_some() && omp.fork.is_none());
+
+        let gemini = agent_by_id("gemini").unwrap();
+        assert!(gemini.resume.is_some() && gemini.fork.is_none() && gemini.past.is_none());
+
+        for id in [
+            "grok", "crush", "antigravity", "hermes", "aider", "copilot", "kimi", "pi",
+        ] {
+            let agent = agent_by_id(id).unwrap();
+            assert!(agent.resume.is_none() && agent.fork.is_none() && agent.past.is_none());
+        }
+    }
 
     fn collect_panes(node: &GroupLayoutNode, out: &mut Vec<Vec<usize>>) {
         match node {

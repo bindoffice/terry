@@ -2933,6 +2933,11 @@ impl Terminal {
         }
     }
 
+    /// Whether the process attached to this terminal has exited.
+    pub fn has_exited(&self) -> bool {
+        self.child_exited.is_some()
+    }
+
     /// Force-refreshes the foreground process cwd. Prefer this when spawning a
     /// sibling terminal that should inherit the live shell directory.
     pub fn latest_working_directory(&self) -> Option<PathBuf> {
