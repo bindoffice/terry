@@ -146,8 +146,8 @@ fn main() {
         release_channel::init(app_version, cx);
         update_checker::init(cx);
 
-        // A few seconds after startup, quietly check whether a newer Terry
-        // release exists; the result is surfaced by the status bar item.
+        // A few seconds after startup, quietly check for a newer Terry release
+        // and download it when one is available.
         let check_delay = std::time::Duration::from_secs(5);
         let background_executor = cx.background_executor().clone();
         cx.spawn(async move |cx| {

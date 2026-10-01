@@ -41,6 +41,9 @@ pub struct PanelStatusButton {
     pub action: Box<dyn Action>,
     /// Highlight this button while its panel is the open dock panel.
     pub selected: bool,
+    /// When true, show after every panel button instead of right after this
+    /// panel's own button. Use for actions that belong after the mode switches.
+    pub trailing: bool,
 }
 
 pub use proto::PanelId;
@@ -1264,6 +1267,7 @@ impl Render for PanelButtons {
         let dock_entity = self.dock.clone();
         let workspace = dock.workspace.clone();
         let mut extras_after: Vec<(usize, gpui::AnyElement)> = Vec::new();
+        let mut trailing_extras: Vec<gpui::AnyElement> = Vec::new();
         let mut visible_index = 0usize;
         let mut buttons: Vec<_> = dock
             .panel_entries
@@ -1291,6 +1295,7 @@ impl Render for PanelButtons {
                 let focus_handle_for_extra = dock.focus_handle(cx);
                 for extra in entry.panel.extra_status_buttons(window, cx) {
                     let selected = panel_open && extra.selected;
+                    let trailing = extra.trailing;
                     let action = if selected {
                         dock.toggle_action()
                     } else {
@@ -1301,29 +1306,31 @@ impl Render for PanelButtons {
                     } else {
                         extra.tooltip.into()
                     };
-                    extras_after.push((
-                        visible_index,
-                        IconButton::new(extra.id, extra.icon)
-                            .icon_size(IconSize::Small)
-                            .toggle_state(selected)
-                            .tab_index(0isize)
-                            .aria_label(extra.tooltip)
-                            .on_click({
-                                let action = action.boxed_clone();
-                                let focus_handle = focus_handle_for_extra.clone();
-                                move |_, window, cx| {
-                                    window.focus(&focus_handle, cx);
-                                    window.dispatch_action(action.boxed_clone(), cx);
-                                }
+                    let button = IconButton::new(extra.id, extra.icon)
+                        .icon_size(IconSize::Small)
+                        .toggle_state(selected)
+                        .tab_index(0isize)
+                        .aria_label(extra.tooltip)
+                        .on_click({
+                            let action = action.boxed_clone();
+                            let focus_handle = focus_handle_for_extra.clone();
+                            move |_, window, cx| {
+                                window.focus(&focus_handle, cx);
+                                window.dispatch_action(action.boxed_clone(), cx);
+                            }
+                        })
+                        .when(!selected, move |this| {
+                            let action = action.boxed_clone();
+                            this.tooltip(move |_window, cx| {
+                                Tooltip::for_action(tooltip.clone(), &*action, cx)
                             })
-                            .when(!selected, move |this| {
-                                let action = action.boxed_clone();
-                                this.tooltip(move |_window, cx| {
-                                    Tooltip::for_action(tooltip.clone(), &*action, cx)
-                                })
-                            })
-                            .into_any_element(),
-                    ));
+                        })
+                        .into_any_element();
+                    if trailing {
+                        trailing_extras.push(button);
+                    } else {
+                        extras_after.push((visible_index, button));
+                    }
                 }
                 let (action, tooltip) = if is_active_button {
                     let action = dock.toggle_action();
@@ -1472,6 +1479,7 @@ impl Render for PanelButtons {
             let insert_at = (index + 1).min(buttons.len());
             buttons.insert(insert_at, element);
         }
+        buttons.extend(trailing_extras);
 
         if dock_position == DockPosition::Right {
             buttons.reverse();

@@ -1,5 +1,5 @@
 //! Download a GitHub release asset and install it over the running app when
-//! that app is a packaged build. The check itself never starts a download.
+//! that app is a packaged build.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

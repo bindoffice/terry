@@ -862,6 +862,7 @@ impl Panel for FileListPanel {
             tooltip: i18n::t_str("finder"),
             action: Box::new(ShowFinder),
             selected: self.view_mode == FileViewMode::Finder,
+            trailing: false,
         }]
     }
 

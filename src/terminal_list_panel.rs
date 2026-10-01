@@ -3799,6 +3799,7 @@ impl Panel for TerminalListPanel {
                 tooltip: i18n::t_str("new_group"),
                 action: Box::new(NewGroup),
                 selected: false,
+                trailing: true,
             },
             PanelStatusButton {
                 id: "new-terminal",
@@ -3806,6 +3807,7 @@ impl Panel for TerminalListPanel {
                 tooltip: i18n::t_str("new_terminal"),
                 action: Box::new(NewTerminal),
                 selected: false,
+                trailing: true,
             },
         ]
     }

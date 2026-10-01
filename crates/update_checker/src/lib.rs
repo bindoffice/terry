@@ -1,5 +1,5 @@
-//! Update checker that polls the GitHub Releases API. A newer release is only
-//! downloaded after the user clicks the update button.
+//! Update checker that polls the GitHub Releases API. When a newer release is
+//! found, the matching package is downloaded and installed automatically.
 
 mod download;
 
@@ -66,9 +66,9 @@ pub enum UpdateStatus {
     Checking,
     /// The running build is the newest release.
     UpToDate,
-    /// A newer version is available. Nothing is downloaded until the user clicks.
+    /// A newer version is available and will download automatically.
     UpdateAvailable(UpdateInfo),
-    /// The user clicked update and the package is downloading.
+    /// The matching release package is downloading.
     Downloading {
         /// Release being downloaded.
         info: UpdateInfo,
@@ -198,11 +198,14 @@ pub fn init(cx: &mut App) {
 }
 
 /// Starts an update check; the result lands in [`UpdateCheckerState`].
+/// When a newer release is found, downloading starts right away.
 pub fn check_for_updates(cx: &mut App) {
     let already_checking = cx.read_global::<UpdateCheckerState, _>(|state, _| {
         matches!(
             state.status,
-            UpdateStatus::Checking | UpdateStatus::Downloading { .. }
+            UpdateStatus::Checking
+                | UpdateStatus::Downloading { .. }
+                | UpdateStatus::RestartRequired { .. }
         )
     });
     if already_checking {
@@ -216,16 +219,19 @@ pub fn check_for_updates(cx: &mut App) {
     let cx = cx.to_async();
     cx.spawn(async move |cx| {
         let result = fetch_latest_release(http_client.as_ref()).await;
-        let status = match result {
+        let (status, should_download) = match result {
             Ok(release) if release.version > current_version => {
-                UpdateStatus::UpdateAvailable(release)
+                (UpdateStatus::UpdateAvailable(release), true)
             }
-            Ok(_) => UpdateStatus::UpToDate,
-            Err(error) => UpdateStatus::Failed(format!("{error:#}")),
+            Ok(_) => (UpdateStatus::UpToDate, false),
+            Err(error) => (UpdateStatus::Failed(format!("{error:#}")), false),
         };
         let transient = matches!(status, UpdateStatus::UpToDate | UpdateStatus::Failed(_));
         cx.update(|cx| {
             cx.update_global::<UpdateCheckerState, _>(|state, _| state.set_status(status));
+            if should_download {
+                download_update(cx);
+            }
         });
 
         // Transient statuses (up-to-date / failed) disappear after a while.
@@ -239,7 +245,7 @@ pub fn check_for_updates(cx: &mut App) {
     .detach();
 }
 
-/// Downloads and installs the release the user clicked. Checks never call this.
+/// Downloads and installs the release currently marked available.
 pub fn download_update(cx: &mut App) {
     let info = match &cx.global::<UpdateCheckerState>().status {
         UpdateStatus::UpdateAvailable(info) => info.clone(),
@@ -324,7 +330,6 @@ pub fn download_update(cx: &mut App) {
                             false
                         }
                         Ok(Ok(download::InstallOutcome::PackageReady(path))) => {
-                            cx.open_with_system(&path);
                             let info = info.clone();
                             cx.update_global::<UpdateCheckerState, _>(|state, _| {
                                 state.set_status(UpdateStatus::PackageReady { info, path });
