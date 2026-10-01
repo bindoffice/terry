@@ -974,6 +974,8 @@ pub mod terminal_list_panel {
             ToggleFocus,
             /// Creates a new terminal in the active group.
             NewTerminal,
+            /// Creates a new terminal group with a first shell.
+            NewGroup,
         ]
     );
 }

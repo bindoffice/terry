@@ -11,9 +11,9 @@ use ui::{
     right_click_menu,
 };
 use workspace::Workspace;
-use workspace::dock::{DockPosition, Panel, PanelEvent};
+use workspace::dock::{DockPosition, Panel, PanelEvent, PanelStatusButton};
 use workspace::{ItemHandle, Member, Pane, PaneAxis, PaneGroup};
-use zed_actions::terminal_list_panel::{NewTerminal, ToggleFocus};
+use zed_actions::terminal_list_panel::{NewGroup, NewTerminal, ToggleFocus};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -585,6 +585,14 @@ pub fn init(cx: &mut App) {
             // Workspace update, and new_terminal reads workspace for the active pane.
             window.defer(cx, move |window, cx| {
                 panel.update(cx, |panel, cx| panel.new_terminal(window, cx));
+            });
+        });
+        workspace.register_action(|workspace, _: &NewGroup, window, cx| {
+            let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
+                return;
+            };
+            window.defer(cx, move |window, cx| {
+                panel.update(cx, |panel, cx| panel.create_group(window, cx));
             });
         });
         // Welcome page and default keymaps dispatch workspace::NewTerminal.
@@ -3781,6 +3789,25 @@ impl Panel for TerminalListPanel {
 
     fn toggle_action(&self) -> Box<dyn Action> {
         Box::new(ToggleFocus)
+    }
+
+    fn extra_status_buttons(&self, _window: &Window, _cx: &App) -> Vec<PanelStatusButton> {
+        vec![
+            PanelStatusButton {
+                id: "new-group",
+                icon: IconName::FolderAdd,
+                tooltip: i18n::t_str("new_group"),
+                action: Box::new(NewGroup),
+                selected: false,
+            },
+            PanelStatusButton {
+                id: "new-terminal",
+                icon: IconName::Plus,
+                tooltip: i18n::t_str("new_terminal"),
+                action: Box::new(NewTerminal),
+                selected: false,
+            },
+        ]
     }
 
     fn starts_open(&self, _window: &Window, _cx: &App) -> bool {
