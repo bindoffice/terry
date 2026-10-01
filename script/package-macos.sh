@@ -106,27 +106,74 @@ sign_app() {
   codesign -dv --verbose=2 "$app_path" 2>&1 | sed -n 's/^/    /p' | head -20
 }
 
-notarize_zip_if_configured() {
+write_zip() {
+  local app_path="$1"
+  local zip_path="$2"
+  rm -f "$zip_path"
+  (
+    cd "$(dirname "$app_path")"
+    ditto -c -k --sequesterRsrc --keepParent "$(basename "$app_path")" "$zip_path"
+  )
+}
+
+# Developer ID alone is not enough to distribute: Gatekeeper rejects a
+# downloaded app whose notarization ticket was never stapled. Submit the zip,
+# staple the ticket onto the .app, then pack again so the ticket ships inside
+# the archive (the notarized zip's hash changes once the ticket is added).
+notarize_and_staple() {
   local zip_path="$1"
-  local identity="$2"
+  local app_path="$2"
+  local identity="$3"
 
   if [[ "$identity" == "-" ]]; then
     return
   fi
   if [[ -z "${APPLE_NOTARIZATION_KEY:-}" || -z "${APPLE_NOTARIZATION_KEY_ID:-}" || -z "${APPLE_NOTARIZATION_ISSUER_ID:-}" ]]; then
+    if [[ "${REQUIRE_SIGNING:-false}" == "true" ]]; then
+      echo "error: macOS signing is required, but notarization credentials are missing." >&2
+      echo "  Set APPLE_NOTARIZATION_KEY (.p8), APPLE_NOTARIZATION_KEY_ID, and APPLE_NOTARIZATION_ISSUER_ID." >&2
+      echo "  A Developer ID signature without a stapled ticket is blocked by Gatekeeper." >&2
+      exit 1
+    fi
     echo "==> Skipping notarization (APPLE_NOTARIZATION_* not set)"
     return
   fi
 
   echo "==> Notarizing $zip_path…"
-  local key_file
+  local key_file attempt
   key_file="$(mktemp)"
+  chmod 600 "$key_file"
   printf '%s\n' "$APPLE_NOTARIZATION_KEY" >"$key_file"
-  xcrun notarytool submit "$zip_path" --wait \
+  if ! xcrun notarytool submit "$zip_path" --wait \
     --key "$key_file" \
     --key-id "$APPLE_NOTARIZATION_KEY_ID" \
-    --issuer "$APPLE_NOTARIZATION_ISSUER_ID"
+    --issuer "$APPLE_NOTARIZATION_ISSUER_ID"; then
+    rm -f "$key_file"
+    echo "error: notarization failed" >&2
+    exit 1
+  fi
   rm -f "$key_file"
+
+  echo "==> Stapling notarization ticket onto $app_path…"
+  for attempt in 1 2 3 4 5; do
+    if xcrun stapler staple "$app_path"; then
+      break
+    fi
+    if [[ "$attempt" -eq 5 ]]; then
+      echo "error: failed to staple the notarization ticket" >&2
+      exit 1
+    fi
+    echo "==> Ticket not available yet (attempt ${attempt}/5); retrying in 15s…"
+    sleep 15
+  done
+  xcrun stapler validate "$app_path"
+  codesign --verify --deep --strict --verbose=2 "$app_path"
+
+  echo "==> Re-packing stapled app…"
+  write_zip "$app_path" "$zip_path"
+  if command -v syspolicy_check >/dev/null 2>&1; then
+    syspolicy_check distribution "$app_path"
+  fi
 }
 
 echo "==> Ensuring cargo-bundle…"
@@ -203,18 +250,14 @@ mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 ZIP_NAME="Terry-${VERSION}-macos-${ARCH_LABEL}.zip"
 ZIP_PATH="${OUT_DIR}/${ZIP_NAME}"
-rm -f "$ZIP_PATH"
-(
-  cd "$(dirname "$APP_PATH")"
-  ditto -c -k --sequesterRsrc --keepParent "$(basename "$APP_PATH")" "$ZIP_PATH"
-)
+write_zip "$APP_PATH" "$ZIP_PATH"
 
 if [[ ! -f "$ZIP_PATH" ]]; then
   echo "error: zip was not created at $ZIP_PATH" >&2
   exit 1
 fi
 
-notarize_zip_if_configured "$ZIP_PATH" "$SIGN_IDENTITY"
+notarize_and_staple "$ZIP_PATH" "$APP_PATH" "$SIGN_IDENTITY"
 
 echo "==> Wrote $ZIP_PATH"
 echo "$ZIP_PATH"

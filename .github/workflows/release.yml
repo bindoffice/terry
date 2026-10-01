@@ -196,6 +196,23 @@ jobs:
           echo "MACOS_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
           echo "Imported signing identity: $IDENTITY"
 
+      - name: Check macOS notarization credentials
+        if: matrix.package == 'macos' && env.REQUIRE_SIGNING == 'true'
+        env:
+          APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${APPLE_NOTARIZATION_KEY}" || -z "${APPLE_NOTARIZATION_KEY_ID}" || -z "${APPLE_NOTARIZATION_ISSUER_ID}" ]]; then
+            echo "::error::macOS distribution requires a stapled notarization ticket. " \
+              "Set APPLE_NOTARIZATION_KEY (App Store Connect API .p8), " \
+              "APPLE_NOTARIZATION_KEY_ID, and APPLE_NOTARIZATION_ISSUER_ID. " \
+              "A Developer ID signature without that ticket is blocked by Gatekeeper." >&2
+            exit 1
+          fi
+
       - name: Package macOS
         if: matrix.package == 'macos'
         shell: bash
