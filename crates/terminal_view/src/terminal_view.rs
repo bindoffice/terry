@@ -65,6 +65,42 @@ use zed_actions::{agent::AddSelectionToThread, assistant::InlineAssist};
 
 struct ImeState {
     marked_text: String,
+    /// Selection within `marked_text`, in UTF-16 code units. The system IME
+    /// treats a selection outside this string as a broken composition and
+    /// then drops further keystrokes.
+    selection: std::ops::Range<usize>,
+}
+
+fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+fn slice_utf16(text: &str, start: usize, end: usize) -> String {
+    let units: Vec<u16> = text
+        .encode_utf16()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
+#[cfg(test)]
+mod ime_text_tests {
+    use super::{slice_utf16, utf16_len};
+
+    #[test]
+    fn slice_utf16_keeps_cjk_boundaries() {
+        assert_eq!(utf16_len("你好"), 2);
+        assert_eq!(slice_utf16("你好", 0, 1), "你");
+        assert_eq!(slice_utf16("你好", 1, 2), "好");
+        assert_eq!(slice_utf16("a你", 1, 2), "你");
+    }
+
+    #[test]
+    fn slice_utf16_clips_past_the_end() {
+        assert_eq!(slice_utf16("ab", 1, 8), "b");
+        assert_eq!(slice_utf16("ab", 4, 6), "");
+    }
 }
 
 fn viewport_line_for_point(point: Point, display_offset: usize) -> Option<usize> {
@@ -377,11 +413,30 @@ impl TerminalView {
     }
 
     /// Sets the marked (pre-edit) text from the IME.
-    pub(crate) fn set_marked_text(&mut self, text: String, cx: &mut Context<Self>) {
+    ///
+    /// `selection` is relative to `text`, in UTF-16 code units, matching
+    /// `setMarkedText:selectedRange:`.
+    pub(crate) fn set_marked_text(
+        &mut self,
+        text: String,
+        selection: Option<StdRange<usize>>,
+        cx: &mut Context<Self>,
+    ) {
         if text.is_empty() {
             return self.clear_marked_text(cx);
         }
-        self.ime_state = Some(ImeState { marked_text: text });
+        let len = utf16_len(&text);
+        let selection = selection
+            .map(|range| {
+                let start = range.start.min(len);
+                let end = range.end.min(len).max(start);
+                start..end
+            })
+            .unwrap_or(len..len);
+        self.ime_state = Some(ImeState {
+            marked_text: text,
+            selection,
+        });
         cx.notify();
     }
 
@@ -389,7 +444,35 @@ impl TerminalView {
     pub(crate) fn marked_text_range(&self) -> Option<StdRange<usize>> {
         self.ime_state
             .as_ref()
-            .map(|state| 0..state.marked_text.encode_utf16().count())
+            .map(|state| 0..utf16_len(&state.marked_text))
+    }
+
+    /// Selection within the marked text, in UTF-16 code units.
+    pub(crate) fn ime_selection(&self) -> Option<StdRange<usize>> {
+        self.ime_state.as_ref().map(|state| state.selection.clone())
+    }
+
+    /// Document text for an IME query. The terminal has no backing buffer, so
+    /// the only text the input system can read back is the current composition.
+    /// Returning `None` makes `attributedSubstringForProposedRange` nil, and
+    /// several Chinese IMEs then abandon the composition.
+    pub(crate) fn ime_text_for_range(
+        &self,
+        range: StdRange<usize>,
+        adjusted_range: &mut Option<StdRange<usize>>,
+    ) -> String {
+        let text = self
+            .ime_state
+            .as_ref()
+            .map(|state| state.marked_text.as_str())
+            .unwrap_or("");
+        let len = utf16_len(text);
+        let start = range.start.min(len);
+        let end = range.end.min(len).max(start);
+        if start != range.start || end != range.end {
+            *adjusted_range = Some(start..end);
+        }
+        slice_utf16(text, start, end)
     }
 
     /// Clears the marked (pre-edit) text state.
@@ -1408,6 +1491,10 @@ impl TerminalView {
             terminal.focus_out();
             terminal.set_cursor_shape(CursorShape::Hollow);
         });
+        // A stale marked range keeps the platform window on the composing path,
+        // so the next keystrokes are handed to an IME session that has already
+        // ended and never reach the terminal.
+        self.clear_marked_text(cx);
         cx.notify();
     }
 }

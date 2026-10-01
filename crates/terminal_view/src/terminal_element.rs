@@ -1586,13 +1586,21 @@ impl InputHandler for TerminalInputHandler {
         &mut self,
         _ignore_disabled_input: bool,
         _: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> Option<UTF16Selection> {
         // Always return a valid selection for IME positioning,
         // even in ALT_SCREEN mode (fullscreen TUI apps like opencode, vim, etc.)
         // The terminal still has a cursor position that should be used for IME candidate window placement.
+        // While composing, the selection has to sit inside the marked text.
+        // Reporting 0..0 against a longer marked range makes some IMEs discard
+        // the rest of the composition.
+        let range = self
+            .terminal_view
+            .read(cx)
+            .ime_selection()
+            .unwrap_or(0..0);
         Some(UTF16Selection {
-            range: 0..0,
+            range,
             reversed: false,
         })
     }
@@ -1607,12 +1615,16 @@ impl InputHandler for TerminalInputHandler {
 
     fn text_for_range(
         &mut self,
-        _: std::ops::Range<usize>,
-        _: &mut Option<std::ops::Range<usize>>,
+        range_utf16: std::ops::Range<usize>,
+        adjusted_range: &mut Option<std::ops::Range<usize>>,
         _: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) -> Option<String> {
-        None
+        Some(
+            self.terminal_view
+                .read(cx)
+                .ime_text_for_range(range_utf16, adjusted_range),
+        )
     }
 
     fn replace_text_in_range(
@@ -1641,12 +1653,12 @@ impl InputHandler for TerminalInputHandler {
         &mut self,
         _range_utf16: Option<std::ops::Range<usize>>,
         new_text: &str,
-        _new_marked_range: Option<std::ops::Range<usize>>,
+        new_selected_range: Option<std::ops::Range<usize>>,
         _window: &mut Window,
         cx: &mut App,
     ) {
         self.terminal_view.update(cx, |view, view_cx| {
-            view.set_marked_text(new_text.to_string(), view_cx);
+            view.set_marked_text(new_text.to_string(), new_selected_range, view_cx);
         });
     }
 
@@ -1664,7 +1676,38 @@ impl InputHandler for TerminalInputHandler {
     ) -> Option<Bounds<Pixels>> {
         let term_bounds = self.terminal_view.read(cx).terminal_bounds(cx);
 
-        let mut bounds = self.cursor_bounds?;
+        // The cursor rect is missing when it sits in scrollback. A 0×0
+        // firstRect makes some IMEs throw away the keystroke instead of
+        // opening the candidate window.
+        let mut bounds = self.cursor_bounds.unwrap_or_else(|| {
+            let line_height = term_bounds.line_height;
+            let mut origin = term_bounds.bounds.origin;
+            origin.y += (term_bounds.bounds.size.height - line_height).max(px(0.));
+            Bounds {
+                origin,
+                size: size(term_bounds.cell_width.max(px(1.)), line_height.max(px(1.))),
+            }
+        });
+
+        let top = term_bounds.bounds.origin.y;
+        let bottom = (term_bounds.bounds.origin.y + term_bounds.bounds.size.height
+            - bounds.size.height)
+            .max(top);
+        if bounds.origin.y < top {
+            bounds.origin.y = top;
+        } else if bounds.origin.y > bottom {
+            bounds.origin.y = bottom;
+        }
+        let left = term_bounds.bounds.origin.x;
+        let right = (term_bounds.bounds.origin.x + term_bounds.bounds.size.width
+            - bounds.size.width)
+            .max(left);
+        if bounds.origin.x < left {
+            bounds.origin.x = left;
+        } else if bounds.origin.x > right {
+            bounds.origin.x = right;
+        }
+
         let offset_x = term_bounds.cell_width * range_utf16.start as f32;
         bounds.origin.x += offset_x;
 
