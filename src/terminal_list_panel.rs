@@ -1408,6 +1408,39 @@ impl TerminalListPanel {
         self.new_terminal_with_destination(None, window, cx);
     }
 
+    /// Opens a new shell in `cwd` and shows it in the active group.
+    /// Does not resume a parked agent session.
+    pub fn open_shell_at(
+        &mut self,
+        cwd: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let group_id = self.active_group_id;
+        if !self.groups.iter().any(|group| group.id == group_id) {
+            return;
+        }
+        if let Some(group) = self.groups.iter_mut().find(|group| group.id == group_id) {
+            group.collapsed = false;
+        }
+        let init_command = cwd.to_str().map(|path| {
+            let quoted = path.replace('\'', "'\\''");
+            format!("cd '{quoted}'")
+        });
+        self.spawn_terminal(
+            group_id,
+            Some(cwd),
+            None,
+            self.display_pane_entity(cx),
+            None,
+            None,
+            init_command,
+            window,
+            cx,
+        );
+        self.save_session(cx);
+    }
+
     /// Pin the pane that should receive the next spawned terminal.
     pub fn pin_spawn_pane(&mut self, pane: Entity<Pane>) {
         self.pending_spawn_pane = Some(pane.downgrade());

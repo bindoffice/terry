@@ -732,7 +732,7 @@ impl OutlinePanel {
                     .expect("have a &mut Workspace"),
                 window,
                 move |outline_panel, workspace, event, window, cx| {
-                    if let workspace::Event::ActiveItemChanged = event {
+                    if let workspace::Event::ActiveItemChanged { .. } = event {
                         if let Some((new_active_item, new_active_editor)) =
                             workspace_active_editor(workspace.read(cx), cx)
                         {

@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    Action, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    Render, SharedString, Subscription, TaskExt, WeakEntity, Window, div, px,
+    Action, AnyElement, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
+    IntoElement, Render, SharedString, Subscription, TaskExt, WeakEntity, Window, div, px,
 };
 use ui::{IconButton, IconName, Label, LabelSize, Tooltip, prelude::*};
 use workspace::Workspace;
@@ -67,6 +67,10 @@ pub struct FileListPanel {
     finder_size: Option<PanelSizeState>,
     /// Mode whose width is currently applied to the dock.
     applied_mode: Option<FileViewMode>,
+    /// Terminal last observed, so a title refresh can be told apart from a
+    /// real directory or selection change.
+    followed_item: Option<EntityId>,
+    followed_cwd: Option<PathBuf>,
     _workspace_subscription: Subscription,
 }
 
@@ -74,8 +78,8 @@ impl FileListPanel {
     pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let _workspace_subscription = cx.subscribe(&workspace, |this, _, event, cx| {
-            if let workspace::Event::ActiveItemChanged = event {
-                this.update_from_active_item(cx);
+            if let workspace::Event::ActiveItemChanged { activated } = event {
+                this.update_from_active_item(*activated, cx);
             }
             cx.notify();
         });
@@ -89,6 +93,8 @@ impl FileListPanel {
             list_size: None,
             finder_size: None,
             applied_mode: None,
+            followed_item: None,
+            followed_cwd: None,
             _workspace_subscription,
         };
         panel.schedule_size_load(cx);
@@ -175,16 +181,34 @@ impl FileListPanel {
         }
     }
 
-    fn update_from_active_item(&mut self, cx: &mut Context<Self>) {
-        if let Some(workspace) = self.workspace.upgrade() {
-            if let Some(active_item) = workspace.read(cx).active_item(cx) {
-                if let Some(terminal_view) = active_item.downcast::<terminal_view::TerminalView>() {
-                    if let Some(cwd) = terminal_view.read(cx).terminal().read(cx).working_directory() {
-                        self.current_dir = cwd;
-                        cx.notify();
-                    }
-                }
-            }
+    fn update_from_active_item(&mut self, activated: bool, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let Some(active_item) = workspace.read(cx).active_item(cx) else {
+            return;
+        };
+        let Some(terminal_view) = active_item.downcast::<terminal_view::TerminalView>() else {
+            return;
+        };
+        let item_id = active_item.item_id();
+        let cwd = terminal_view
+            .read(cx)
+            .terminal()
+            .read(cx)
+            .working_directory();
+        let unseen = self.followed_item.is_none();
+        let unchanged = self.followed_item == Some(item_id) && self.followed_cwd == cwd;
+        self.followed_item = Some(item_id);
+        self.followed_cwd = cwd.clone();
+        // Sidebar drags resize the terminal and refresh its title without a
+        // new selection. Keep the folder Finder is already showing.
+        if self.view_mode == FileViewMode::Finder && !activated && (unchanged || unseen) {
+            return;
+        }
+        if let Some(cwd) = cwd {
+            self.current_dir = cwd;
+            cx.notify();
         }
     }
 
@@ -222,6 +246,22 @@ impl FileListPanel {
             );
         }
         entries
+    }
+
+    fn open_terminal_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let cwd = self.current_dir.clone();
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            let Some(panel) = workspace.panel::<crate::terminal_list_panel::TerminalListPanel>(cx)
+            else {
+                return;
+            };
+            panel.update(cx, |panel, cx| {
+                panel.open_shell_at(cwd, window, cx);
+            });
+        });
     }
 
     fn navigate_up(&mut self, cx: &mut Context<Self>) {
@@ -349,6 +389,16 @@ impl Render for FileListPanel {
                                         this.navigate_up(cx);
                                     })),
                             )
+                            .when(self.view_mode == FileViewMode::Finder, |this| {
+                                this.child(
+                                    IconButton::new("finder-new-terminal", IconName::Plus)
+                                        .icon_size(IconSize::Small)
+                                        .tooltip(Tooltip::text(i18n::t("new_terminal")))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_terminal_here(window, cx);
+                                        })),
+                                )
+                            })
                             .child(
                                 IconButton::new("refresh-files", IconName::ArrowCircle)
                                     .icon_size(IconSize::Small)

@@ -1295,7 +1295,9 @@ pub enum Event {
     ItemAdded {
         item: Box<dyn ItemHandle>,
     },
-    ActiveItemChanged,
+    /// `activated` is set when the user focused or selected the item.
+    /// Title refreshes, including those caused by resizing a terminal, leave it false.
+    ActiveItemChanged { activated: bool },
     ItemRemoved {
         item_id: EntityId,
     },
@@ -5598,6 +5600,10 @@ impl Workspace {
         });
         if self.active_pane != pane {
             self.set_active_pane(&pane, window, cx);
+        } else {
+            // Clicking back into the already-active pane (for example the
+            // terminal beside Finder) should still count as selecting it.
+            cx.emit(Event::ActiveItemChanged { activated: true });
         }
 
         if self.last_active_center_pane.is_none() {
@@ -5748,7 +5754,7 @@ impl Workspace {
                 serialize_workspace = false;
             }
             pane::Event::RemovedItem { item } => {
-                cx.emit(Event::ActiveItemChanged);
+                cx.emit(Event::ActiveItemChanged { activated: true });
         if let Some(dir) = self.active_item(cx).and_then(|item| item.directory_for_new_file(cx)) {
             self.last_active_directory = Some(dir);
         }
@@ -6225,7 +6231,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        cx.emit(Event::ActiveItemChanged);
+        cx.emit(Event::ActiveItemChanged {
+            activated: focus_changed,
+        });
         let active_entry = self.active_project_path(cx);
         self.project.update(cx, |project, cx| {
             project.set_active_path(active_entry.clone(), cx)
