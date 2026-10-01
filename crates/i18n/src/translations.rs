@@ -53,6 +53,9 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
                 "Interface language. Defaults to the system language.",
             );
             m.insert("language_system", "System");
+            m.insert("settings_tab_general", "General");
+            m.insert("settings_tab_editor", "Editor");
+            m.insert("settings_tab_keyboard", "Keyboard");
             m.insert("appearance", "Appearance");
             m.insert(
                 "appearance_description",
@@ -72,6 +75,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("keymap_bindings_count", "shortcuts");
             m.insert("open_keymap_file", "Open Keymap File");
             m.insert("vim_mode", "Vim Mode");
+            m.insert(
+                "vim_mode_description",
+                "Use Vim keybindings in the editor.",
+            );
                         m.insert("menu_file", "File");
             m.insert("open", "Open…");
             m.insert("open_recent", "Open Recent…");
@@ -239,6 +246,9 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("ui_language", "语言");
             m.insert("ui_language_description", "界面语言。默认跟随系统语言。");
             m.insert("language_system", "跟随系统");
+            m.insert("settings_tab_general", "通用");
+            m.insert("settings_tab_editor", "编辑器");
+            m.insert("settings_tab_keyboard", "快捷键");
             m.insert("appearance", "外观");
             m.insert("appearance_description", "界面与终端的主题、字体和字号。");
             m.insert("font_family", "字体");
@@ -252,6 +262,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("keymap_bindings_count", "个快捷键");
             m.insert("open_keymap_file", "打开快捷键配置文件");
             m.insert("vim_mode", "Vim 模式");
+            m.insert("vim_mode_description", "在编辑器中使用 Vim 键绑定。");
             m.insert("menu_file", "文件");
             m.insert("open", "打开…");
             m.insert("open_recent", "打开最近项目…");

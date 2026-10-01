@@ -1,6 +1,6 @@
 use fs::Fs;
 use gpui::{
-    Action, App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement,
+    Action, AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement,
     ParentElement, Render, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, div,
     px,
 };
@@ -9,9 +9,11 @@ use strum::VariantArray;
 use theme::ActiveTheme;
 use ui::{
     Button, ButtonSize, ButtonStyle, Color, ContextMenu, DropdownMenu, IconPosition, Label,
-    LabelSize, prelude::*,
+    LabelSize, Switch, ToggleButtonGroup, ToggleButtonGroupStyle, ToggleButtonSimple, ToggleState,
+    prelude::*,
 };
 use util::ResultExt;
+use vim_mode_setting::VimModeSetting;
 
 /// Must stay aligned with [`UiLanguage`] variant declaration order.
 const LANGUAGE_LABELS: &[&str] = &[
@@ -38,8 +40,45 @@ const LANGUAGE_LABELS: &[&str] = &[
     "Українська",
 ];
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    General,
+    Appearance,
+    Editor,
+    Keyboard,
+    Agent,
+}
+
+impl SettingsTab {
+    const ALL: [Self; 5] = [
+        Self::General,
+        Self::Appearance,
+        Self::Editor,
+        Self::Keyboard,
+        Self::Agent,
+    ];
+
+    fn label(self) -> String {
+        match self {
+            Self::General => i18n::t("settings_tab_general"),
+            Self::Appearance => i18n::t("appearance"),
+            Self::Editor => i18n::t("settings_tab_editor"),
+            Self::Keyboard => i18n::t("settings_tab_keyboard"),
+            Self::Agent => i18n::t("agent"),
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|tab| *tab == self)
+            .unwrap_or(0)
+    }
+}
+
 pub struct SettingsWindow {
     focus_handle: FocusHandle,
+    active_tab: SettingsTab,
     language_menu: Entity<ContextMenu>,
     font_size_menu: Entity<ContextMenu>,
     font_family_menu: Entity<ContextMenu>,
@@ -57,6 +96,7 @@ impl SettingsWindow {
             .detach();
         Self {
             focus_handle,
+            active_tab: SettingsTab::General,
             language_menu,
             font_size_menu,
             font_family_menu,
@@ -85,6 +125,219 @@ impl SettingsWindow {
             .unwrap_or_else(|| i18n::t("language_system"))
             .into()
     }
+
+    fn select_tab(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
+        if self.active_tab != tab {
+            self.active_tab = tab;
+            cx.notify();
+        }
+    }
+
+    fn render_tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let active = self.active_tab;
+        ToggleButtonGroup::single_row(
+            "settings-tabs",
+            [
+                ToggleButtonSimple::new(SettingsTab::General.label(), cx.listener(|this, _, _, cx| {
+                    this.select_tab(SettingsTab::General, cx);
+                })),
+                ToggleButtonSimple::new(
+                    SettingsTab::Appearance.label(),
+                    cx.listener(|this, _, _, cx| {
+                        this.select_tab(SettingsTab::Appearance, cx);
+                    }),
+                ),
+                ToggleButtonSimple::new(SettingsTab::Editor.label(), cx.listener(|this, _, _, cx| {
+                    this.select_tab(SettingsTab::Editor, cx);
+                })),
+                ToggleButtonSimple::new(
+                    SettingsTab::Keyboard.label(),
+                    cx.listener(|this, _, _, cx| {
+                        this.select_tab(SettingsTab::Keyboard, cx);
+                    }),
+                ),
+                ToggleButtonSimple::new(SettingsTab::Agent.label(), cx.listener(|this, _, _, cx| {
+                    this.select_tab(SettingsTab::Agent, cx);
+                })),
+            ],
+        )
+        .selected_index(active.index())
+        .style(ToggleButtonGroupStyle::Outlined)
+        .label_size(LabelSize::Small)
+        .auto_width()
+        .into_any_element()
+    }
+
+    fn render_general_tab(&self, cx: &App) -> AnyElement {
+        let language_label = Self::current_language_label(cx);
+        settings_section(
+            i18n::t("ui_language"),
+            i18n::t("ui_language_description"),
+            DropdownMenu::new("ui-language", language_label, self.language_menu.clone())
+                .style(ui::DropdownStyle::Outlined)
+                .trigger_size(ButtonSize::Medium)
+                .into_any_element(),
+        )
+    }
+
+    fn render_appearance_tab(&self, cx: &App) -> AnyElement {
+        let current_font_size = theme_settings::ThemeSettings::get_global(cx).buffer_font_size(cx);
+        let current_font_family_raw = theme_settings::ThemeSettings::get_global(cx)
+            .buffer_font
+            .family
+            .clone();
+        let current_font_family = if current_font_family_raw.as_ref() == ".SystemUIFont" {
+            SharedString::from(i18n::t("font_system"))
+        } else {
+            current_font_family_raw
+        };
+
+        v_flex()
+            .gap_4()
+            .child(settings_section(
+                i18n::t("appearance"),
+                i18n::t("appearance_description"),
+                v_flex()
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        Label::new(i18n::t("font_family"))
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(
+                                        DropdownMenu::new(
+                                            "ui-font-family",
+                                            current_font_family,
+                                            self.font_family_menu.clone(),
+                                        )
+                                        .style(ui::DropdownStyle::Outlined)
+                                        .trigger_size(ButtonSize::Medium),
+                                    ),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        Label::new(i18n::t("font_size"))
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(
+                                        DropdownMenu::new(
+                                            "ui-font-size",
+                                            format!("{}px", f32::from(current_font_size)),
+                                            self.font_size_menu.clone(),
+                                        )
+                                        .style(ui::DropdownStyle::Outlined)
+                                        .trigger_size(ButtonSize::Medium),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        Button::new("select-theme", i18n::t("select_theme"))
+                            .style(ButtonStyle::Outlined)
+                            .size(ButtonSize::Medium)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(
+                                    zed_actions::theme_selector::Toggle::default().boxed_clone(),
+                                    cx,
+                                );
+                            }),
+                    )
+                    .into_any_element(),
+            ))
+            .into_any_element()
+    }
+
+    fn render_editor_tab(&self, cx: &App) -> AnyElement {
+        let vim_enabled = VimModeSetting::is_enabled(cx);
+        let toggle_state = if vim_enabled {
+            ToggleState::Selected
+        } else {
+            ToggleState::Unselected
+        };
+        settings_section(
+            i18n::t("vim_mode"),
+            i18n::t("vim_mode_description"),
+            Switch::new("vim-mode", toggle_state)
+                .label(i18n::t("vim_mode"))
+                .on_click(|state, _window, cx| {
+                    let enabled = *state == ToggleState::Selected;
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content.vim_mode = Some(enabled);
+                        if enabled {
+                            content.helix_mode = Some(false);
+                        }
+                    });
+                })
+                .into_any_element(),
+        )
+    }
+
+    fn render_keyboard_tab(&self, _cx: &App) -> AnyElement {
+        settings_section(
+            i18n::t("custom_shortcuts"),
+            i18n::t("keymap_settings_description"),
+            Button::new("open-keymaps", i18n::t("keymap_settings"))
+                .style(ButtonStyle::Outlined)
+                .size(ButtonSize::Medium)
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(zed_actions::OpenKeymap.boxed_clone(), cx);
+                })
+                .into_any_element(),
+        )
+    }
+
+    fn render_agent_tab(&self, _cx: &App) -> AnyElement {
+        settings_section(
+            i18n::t("llm_providers"),
+            i18n::t("llm_providers_description"),
+            Button::new("open-llm-providers", i18n::t("llm_providers"))
+                .style(ButtonStyle::Outlined)
+                .size(ButtonSize::Medium)
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(
+                        Box::new(crate::llm_provider_settings::OpenLlmProviderSettings),
+                        cx,
+                    );
+                })
+                .into_any_element(),
+        )
+    }
+
+    fn render_active_tab(&self, cx: &App) -> AnyElement {
+        match self.active_tab {
+            SettingsTab::General => self.render_general_tab(cx),
+            SettingsTab::Appearance => self.render_appearance_tab(cx),
+            SettingsTab::Editor => self.render_editor_tab(cx),
+            SettingsTab::Keyboard => self.render_keyboard_tab(cx),
+            SettingsTab::Agent => self.render_agent_tab(cx),
+        }
+    }
+}
+
+fn settings_section(
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    control: AnyElement,
+) -> AnyElement {
+    v_flex()
+        .gap_1()
+        .child(Label::new(title))
+        .child(
+            Label::new(description)
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        )
+        .child(control)
+        .into_any_element()
 }
 
 impl Focusable for SettingsWindow {
@@ -104,18 +357,6 @@ impl Render for SettingsWindow {
         self.font_family_menu = build_font_family_menu(window, cx);
         self.font_size_menu = build_font_size_menu(window, cx);
 
-        let language_label = Self::current_language_label(cx);
-        let current_font_size = theme_settings::ThemeSettings::get_global(cx).buffer_font_size(cx);
-        let current_font_family_raw = theme_settings::ThemeSettings::get_global(cx)
-            .buffer_font
-            .family
-            .clone();
-        let current_font_family = if current_font_family_raw.as_ref() == ".SystemUIFont" {
-            SharedString::from(i18n::t("font_system"))
-        } else {
-            current_font_family_raw
-        };
-
         div()
             .id("terry-settings")
             .key_context("SettingsWindow")
@@ -127,147 +368,21 @@ impl Render for SettingsWindow {
             .text_color(cx.theme().colors().text)
             .child(
                 div()
+                    .px_4()
+                    .pt_3()
+                    .pb_2()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(self.render_tab_bar(cx)),
+            )
+            .child(
+                div()
                     .id("terry-settings-scroll")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
                     .p_4()
-                    .gap_4()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(Label::new(i18n::t("ui_language")))
-                            .child(
-                                Label::new(i18n::t("ui_language_description"))
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .child(
-                                DropdownMenu::new(
-                                    "ui-language",
-                                    language_label,
-                                    self.language_menu.clone(),
-                                )
-                                .style(ui::DropdownStyle::Outlined)
-                                .trigger_size(ButtonSize::Medium),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(Label::new(i18n::t("appearance")))
-                            .child(
-                                Label::new(i18n::t("appearance_description"))
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        v_flex()
-                                            .gap_1()
-                                            .child(
-                                                Label::new(i18n::t("font_family"))
-                                                    .size(LabelSize::Small)
-                                                    .color(Color::Muted),
-                                            )
-                                            .child(
-                                                DropdownMenu::new(
-                                                    "ui-font-family",
-                                                    current_font_family.clone(),
-                                                    self.font_family_menu.clone(),
-                                                )
-                                                .style(ui::DropdownStyle::Outlined)
-                                                .trigger_size(ButtonSize::Medium),
-                                            ),
-                                    )
-                                    .child(
-                                        v_flex()
-                                            .gap_1()
-                                            .child(
-                                                Label::new(i18n::t("font_size"))
-                                                    .size(LabelSize::Small)
-                                                    .color(Color::Muted),
-                                            )
-                                            .child(
-                                                DropdownMenu::new(
-                                                    "ui-font-size",
-                                                    format!("{}px", f32::from(current_font_size)),
-                                                    self.font_size_menu.clone(),
-                                                )
-                                                .style(ui::DropdownStyle::Outlined)
-                                                .trigger_size(ButtonSize::Medium),
-                                            ),
-                                    ),
-                            )
-                            .child(
-                                Button::new("select-theme", i18n::t("select_theme"))
-                                    .style(ButtonStyle::Outlined)
-                                    .size(ButtonSize::Medium)
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(
-                                            zed_actions::theme_selector::Toggle::default()
-                                                .boxed_clone(),
-                                            cx,
-                                        );
-                                    }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(Label::new(i18n::t("custom_shortcuts")))
-                            .child(
-                                Label::new(i18n::t("keymap_settings_description"))
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .child(
-                                Button::new("open-keymaps", i18n::t("keymap_settings"))
-                                    .style(ButtonStyle::Outlined)
-                                    .size(ButtonSize::Medium)
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(
-                                            zed_actions::OpenKeymap.boxed_clone(),
-                                            cx,
-                                        );
-                                    }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(Label::new(i18n::t("llm_providers")))
-                            .child(
-                                Label::new(i18n::t("llm_providers_description"))
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .child(
-                                Button::new("open-llm-providers", i18n::t("llm_providers"))
-                                    .style(ButtonStyle::Outlined)
-                                    .size(ButtonSize::Medium)
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(
-                                            Box::new(
-                                                crate::llm_provider_settings::OpenLlmProviderSettings,
-                                            ),
-                                            cx,
-                                        );
-                                    }),
-                            ),
-                    ),
+                    .child(self.render_active_tab(cx)),
             )
     }
 }
@@ -403,9 +518,9 @@ fn open_settings_window(cx: &mut App) {
                 is_movable: true,
                 kind: gpui::WindowKind::Normal,
                 window_background: cx.theme().window_background_appearance(),
-                window_bounds: Some(WindowBounds::centered(gpui::size(px(520.), px(560.)), cx)),
+                window_bounds: Some(WindowBounds::centered(gpui::size(px(640.), px(560.)), cx)),
                 window_min_size: Some(gpui::Size {
-                    width: px(400.),
+                    width: px(480.),
                     height: px(420.),
                 }),
                 ..Default::default()
