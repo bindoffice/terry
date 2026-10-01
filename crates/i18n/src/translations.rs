@@ -39,6 +39,8 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "Refresh");
             m.insert("file_list", "File List");
             m.insert("finder", "Finder");
+            m.insert("finder_list_view", "List View");
+            m.insert("finder_icon_view", "Icon View");
             m.insert("open_item", "Open");
             m.insert("open_in_default_app", "Open in Default App");
             m.insert("new_terminal_here", "New Terminal Here");
@@ -228,6 +230,8 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "刷新");
             m.insert("file_list", "文件列表");
             m.insert("finder", "文件夹");
+            m.insert("finder_list_view", "列表视图");
+            m.insert("finder_icon_view", "图标视图");
             m.insert("open_item", "打开");
             m.insert("open_in_default_app", "用默认应用打开");
             m.insert("new_terminal_here", "在此打开终端");
