@@ -66,31 +66,38 @@ impl FileListPanel {
     }
 
     fn collect_entries(&self) -> Vec<FileEntry> {
-        let Ok(read_dir) = std::fs::read_dir(&self.current_dir) else {
-            return Vec::new();
+        let mut entries = match std::fs::read_dir(&self.current_dir) {
+            Ok(read_dir) => read_dir
+                .filter_map(|entry| entry.ok())
+                .map(|entry| {
+                    let path = entry.path();
+                    let is_dir = path.is_dir();
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    FileEntry {
+                        path,
+                        name: SharedString::from(name),
+                        is_dir,
+                    }
+                })
+                .collect(),
+            Err(_) => Vec::new(),
         };
-        let mut entries: Vec<FileEntry> = read_dir
-            .filter_map(|entry| entry.ok())
-            .map(|entry| {
-                let path = entry.path();
-                let is_dir = path.is_dir();
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                FileEntry {
-                    path,
-                    name: SharedString::from(name),
-                    is_dir,
-                }
-            })
-            .collect();
         // Directories first, then alphabetical.
-        entries.sort_by(|a, b| {
-            b.is_dir
-                .cmp(&a.is_dir)
-                .then_with(|| a.name.cmp(&b.name))
-        });
+        entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+        // Keep ".." above every folder so it is not sorted in with the names.
+        if let Some(parent) = self.current_dir.parent() {
+            entries.insert(
+                0,
+                FileEntry {
+                    path: parent.to_path_buf(),
+                    name: "..".into(),
+                    is_dir: true,
+                },
+            );
+        }
         entries
     }
 
@@ -236,7 +243,10 @@ impl Render for FileListPanel {
                     .children(entries.into_iter().enumerate().map(|(index, entry)| {
                         let colors = theme.colors().clone();
                         let is_dir = entry.is_dir;
-                        let icon = if is_dir {
+                        let is_parent = entry.name.as_ref() == "..";
+                        let icon = if is_parent {
+                            IconName::ArrowUp
+                        } else if is_dir {
                             IconName::Folder
                         } else {
                             IconName::File
