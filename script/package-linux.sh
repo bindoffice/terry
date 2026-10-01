@@ -7,9 +7,16 @@ cd "$ROOT"
 
 TARGET="${1:-}"
 if [[ -z "${VERSION:-}" ]]; then
-  VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+  REF="${GITHUB_REF_NAME:-}"
+  REF="${REF#v}"
+  if [[ "$REF" =~ ^[0-9]{8}$ ]]; then
+    VERSION="$REF"
+  else
+    VERSION="$(date +%Y%m%d)"
+  fi
 fi
 VERSION="${VERSION:-0.0.0}"
+export TERRY_VERSION="$VERSION"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
 if [[ -z "$TARGET" ]]; then

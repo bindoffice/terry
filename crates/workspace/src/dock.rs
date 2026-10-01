@@ -29,6 +29,18 @@ pub enum PanelEvent {
     ZoomOut,
     Activate,
     Close,
+    /// The panel's status-bar buttons changed (for example the selected mode).
+    StatusButtonsChanged,
+}
+
+/// An extra status-bar button shown beside a panel's own button.
+pub struct PanelStatusButton {
+    pub id: &'static str,
+    pub icon: ui::IconName,
+    pub tooltip: &'static str,
+    pub action: Box<dyn Action>,
+    /// Highlight this button while its panel is the open dock panel.
+    pub selected: bool,
 }
 
 pub use proto::PanelId;
@@ -63,6 +75,14 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     fn icon(&self, window: &Window, cx: &App) -> Option<ui::IconName>;
     fn icon_tooltip(&self, window: &Window, cx: &App) -> Option<&'static str>;
     fn toggle_action(&self) -> Box<dyn Action>;
+    /// When false, the panel's own status button stays unselected even if this
+    /// panel is the open one. Extra buttons can take that highlight instead.
+    fn primary_status_button_selected(&self, _window: &Window, _cx: &App) -> bool {
+        true
+    }
+    fn extra_status_buttons(&self, _window: &Window, _cx: &App) -> Vec<PanelStatusButton> {
+        Vec::new()
+    }
     fn icon_label(&self, _window: &Window, _: &App) -> Option<String> {
         None
     }
@@ -117,6 +137,8 @@ pub trait PanelHandle: Send + Sync {
     fn icon(&self, window: &Window, cx: &App) -> Option<ui::IconName>;
     fn icon_tooltip(&self, window: &Window, cx: &App) -> Option<&'static str>;
     fn toggle_action(&self, window: &Window, cx: &App) -> Box<dyn Action>;
+    fn primary_status_button_selected(&self, window: &Window, cx: &App) -> bool;
+    fn extra_status_buttons(&self, window: &Window, cx: &App) -> Vec<PanelStatusButton>;
     fn icon_label(&self, window: &Window, cx: &App) -> Option<String>;
     fn panel_focus_handle(&self, cx: &App) -> FocusHandle;
     fn to_any(&self) -> AnyView;
@@ -227,6 +249,14 @@ where
 
     fn toggle_action(&self, _: &Window, cx: &App) -> Box<dyn Action> {
         self.read(cx).toggle_action()
+    }
+
+    fn primary_status_button_selected(&self, window: &Window, cx: &App) -> bool {
+        self.read(cx).primary_status_button_selected(window, cx)
+    }
+
+    fn extra_status_buttons(&self, window: &Window, cx: &App) -> Vec<PanelStatusButton> {
+        self.read(cx).extra_status_buttons(window, cx)
     }
 
     fn icon_label(&self, window: &Window, cx: &App) -> Option<String> {
@@ -705,6 +735,7 @@ impl Dock {
                             this.set_open(false, window, cx);
                         }
                     }
+                    PanelEvent::StatusButtonsChanged => cx.notify(),
                 },
             ),
         ];
@@ -1232,6 +1263,8 @@ impl Render for PanelButtons {
 
         let dock_entity = self.dock.clone();
         let workspace = dock.workspace.clone();
+        let mut extras_after: Vec<(usize, gpui::AnyElement)> = Vec::new();
+        let mut visible_index = 0usize;
         let mut buttons: Vec<_> = dock
             .panel_entries
             .iter()
@@ -1252,7 +1285,46 @@ impl Render for PanelButtons {
                 let dock_for_menu = dock_entity.clone();
                 let workspace_for_menu = workspace.clone();
 
-                let is_active_button = Some(i) == active_index && is_open;
+                let panel_open = Some(i) == active_index && is_open;
+                let is_active_button =
+                    panel_open && entry.panel.primary_status_button_selected(window, cx);
+                let focus_handle_for_extra = dock.focus_handle(cx);
+                for extra in entry.panel.extra_status_buttons(window, cx) {
+                    let selected = panel_open && extra.selected;
+                    let action = if selected {
+                        dock.toggle_action()
+                    } else {
+                        extra.action
+                    };
+                    let tooltip: SharedString = if selected {
+                        format!("Close {} Dock", dock.position.label()).into()
+                    } else {
+                        extra.tooltip.into()
+                    };
+                    extras_after.push((
+                        visible_index,
+                        IconButton::new(extra.id, extra.icon)
+                            .icon_size(IconSize::Small)
+                            .toggle_state(selected)
+                            .tab_index(0isize)
+                            .aria_label(extra.tooltip)
+                            .on_click({
+                                let action = action.boxed_clone();
+                                let focus_handle = focus_handle_for_extra.clone();
+                                move |_, window, cx| {
+                                    window.focus(&focus_handle, cx);
+                                    window.dispatch_action(action.boxed_clone(), cx);
+                                }
+                            })
+                            .when(!selected, move |this| {
+                                let action = action.boxed_clone();
+                                this.tooltip(move |_window, cx| {
+                                    Tooltip::for_action(tooltip.clone(), &*action, cx)
+                                })
+                            })
+                            .into_any_element(),
+                    ));
+                }
                 let (action, tooltip) = if is_active_button {
                     let action = dock.toggle_action();
 
@@ -1269,6 +1341,7 @@ impl Render for PanelButtons {
                 let focus_handle = dock.focus_handle(cx);
                 let icon_label = entry.panel.icon_label(window, cx);
 
+                visible_index += 1;
                 Some(
                     right_click_menu(name)
                         .menu(move |window, cx| {
@@ -1389,10 +1462,16 @@ impl Render for PanelButtons {
                                     .and_then(|label| label.parse::<usize>().ok()),
                                 |this, count| this.child(CountBadge::new(count)),
                             )
-                        }),
+                        })
+                        .into_any_element(),
                 )
             })
             .collect();
+
+        for (index, element) in extras_after.into_iter().rev() {
+            let insert_at = (index + 1).min(buttons.len());
+            buttons.insert(insert_at, element);
+        }
 
         if dock_position == DockPosition::Right {
             buttons.reverse();

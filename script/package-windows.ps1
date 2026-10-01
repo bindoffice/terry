@@ -9,9 +9,14 @@ $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $Root
 
 if (-not $Version -or $Version -eq "") {
-    $line = Get-Content "Cargo.toml" | Where-Object { $_ -match '^version\s*=\s*"' } | Select-Object -First 1
-    if ($line -match '"([^"]+)"') { $Version = $Matches[1] } else { $Version = "0.0.0" }
+    $ref = $env:GITHUB_REF_NAME
+    if ($ref -match '^v?([0-9]{8})$') {
+        $Version = $Matches[1]
+    } else {
+        $Version = Get-Date -Format yyyyMMdd
+    }
 }
+$env:TERRY_VERSION = $Version
 
 # Avoid '+' and other path-unfriendly chars in zip names.
 $Version = ($Version -replace '[+\\/:*?"<>|]', '-')

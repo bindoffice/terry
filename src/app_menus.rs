@@ -1,4 +1,10 @@
-use gpui::{App, Menu, MenuItem, OsAction, actions};
+use gpui::{
+    App, AppContext as _, Context, FocusHandle, Focusable, Menu, MenuItem, OsAction,
+    Render, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, img, px,
+};
+use theme::ActiveTheme;
+use ui::{Color, Headline, Label, LabelSize, prelude::*};
+use util::ResultExt;
 
 actions!(
     app_menus,
@@ -31,22 +37,13 @@ pub fn init(cx: &mut App) {
     });
 
     cx.on_action(|_: &zed_actions::About, cx| {
-        let version = env!("CARGO_PKG_VERSION");
-        let message = format!("Terry {version}");
-        if let Some(handle) = cx.active_window() {
-            let _ = handle.update(cx, |_root, window, cx| {
-                let _ = window.prompt(
-                    gpui::PromptLevel::Info,
-                    &message,
-                    Some(i18n::t_str("about_terry_description")),
-                    &[i18n::t_str("ok")],
-                    cx,
-                );
-            });
-        }
+        open_about_window(cx);
     });
 
     cx.observe_new(|workspace: &mut workspace::Workspace, _, _| {
+        workspace.register_action(|_, _: &zed_actions::About, _window, cx| {
+            open_about_window(cx);
+        });
         workspace
             .register_action(|_, _: &Minimize, window, _| {
                 window.minimize_window();
@@ -59,6 +56,101 @@ pub fn init(cx: &mut App) {
             });
     })
     .detach();
+}
+
+struct AboutWindow {
+    focus_handle: FocusHandle,
+}
+
+impl AboutWindow {
+    fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+        }
+    }
+}
+
+impl Focusable for AboutWindow {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for AboutWindow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        let version = env!("TERRY_VERSION");
+        v_flex()
+            .id("terry-about")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .bg(cx.theme().colors().background)
+            .text_color(cx.theme().colors().text)
+            .child(
+                img("images/terry_logo.png")
+                    .size(rems_from_px(128.))
+                    .rounded_xl()
+                    .overflow_hidden(),
+            )
+            .child(Headline::new("Terry"))
+            .child(
+                Label::new(version)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                div()
+                    .max_w(px(280.))
+                    .text_center()
+                    .child(
+                        Label::new(i18n::t("about_terry_description"))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
+            )
+    }
+}
+
+fn open_about_window(cx: &mut App) {
+    if let Some(existing) = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<AboutWindow>())
+    {
+        existing
+            .update(cx, |_, window, _| {
+                window.activate_window();
+            })
+            .log_err();
+        return;
+    }
+
+    cx.defer(move |cx| {
+        cx.open_window(
+            WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: Some(i18n::t("about_terry").into()),
+                    appears_transparent: false,
+                    traffic_light_position: None,
+                }),
+                focus: true,
+                show: true,
+                is_movable: true,
+                kind: gpui::WindowKind::Normal,
+                window_background: cx.theme().window_background_appearance(),
+                window_bounds: Some(WindowBounds::centered(gpui::size(px(360.), px(420.)), cx)),
+                window_min_size: Some(gpui::Size {
+                    width: px(320.),
+                    height: px(360.),
+                }),
+                ..Default::default()
+            },
+            |_window, cx| cx.new(|cx| AboutWindow::new(cx)),
+        )
+        .log_err();
+    });
 }
 
 pub fn app_menus(_cx: &App) -> Vec<Menu> {

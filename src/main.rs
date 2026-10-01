@@ -63,7 +63,13 @@ fn main() {
     // not wait on a fresh multi-second `zsh -lic` capture before first paint.
     util::shell_env::apply_cached_environment();
 
-    let app_version = AppVersion::load(env!("CARGO_PKG_VERSION"), None, None);
+    // Product version is the build date, `YYYYMMDD` (for example 20261001).
+    // Semver only accepts dotted numbers, so the date is stored as `YYYYMMDD.0.0`.
+    let app_version = AppVersion::load(
+        &format!("{}.0.0", env!("TERRY_VERSION")),
+        None,
+        None,
+    );
 
     let app =
         Application::with_platform(gpui_platform::current_platform(false)).with_assets(Assets);
@@ -163,7 +169,7 @@ fn main() {
 
         let user_agent = format!(
             "Terry/{} ({}; {})",
-            env!("CARGO_PKG_VERSION"),
+            env!("TERRY_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH
         );

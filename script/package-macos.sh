@@ -7,9 +7,16 @@ cd "$ROOT"
 
 TARGET="${1:-}"
 if [[ -z "${VERSION:-}" ]]; then
-  VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+  REF="${GITHUB_REF_NAME:-}"
+  REF="${REF#v}"
+  if [[ "$REF" =~ ^[0-9]{8}$ ]]; then
+    VERSION="$REF"
+  else
+    VERSION="$(date +%Y%m%d)"
+  fi
 fi
 VERSION="${VERSION:-0.0.0}"
+export TERRY_VERSION="$VERSION"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 ENTITLEMENTS="${ROOT}/resources/terry.entitlements"
 
@@ -240,6 +247,19 @@ fi
 if [[ -f resources/AppIcon.icns ]]; then
   mkdir -p "${APP_PATH}/Contents/Resources"
   cp resources/AppIcon.icns "${APP_PATH}/Contents/Resources/AppIcon.icns"
+fi
+
+# Finder's short version must be major.minor.patch. Keep the date build
+# number as CFBundleVersion (20261001) and the dotted form as the short version.
+if [[ "$VERSION" =~ ^([0-9]{4})([0-9]{2})([0-9]{2})$ ]]; then
+  YEAR="${BASH_REMATCH[1]}"
+  MONTH=$((10#${BASH_REMATCH[2]}))
+  DAY=$((10#${BASH_REMATCH[3]}))
+  PLIST="${APP_PATH}/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${YEAR}.${MONTH}.${DAY}" "$PLIST" \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string ${YEAR}.${MONTH}.${DAY}" "$PLIST"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "$PLIST" \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string ${VERSION}" "$PLIST"
 fi
 
 SIGN_IDENTITY="$(resolve_signing_identity)"

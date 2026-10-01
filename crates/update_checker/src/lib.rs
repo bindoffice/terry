@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
 use futures::AsyncReadExt;
-use gpui::{actions, App, Context, Empty, EventEmitter, Global, Subscription, Window};
+use gpui::{actions, App, Context, EventEmitter, Global, Subscription, Window};
 use http_client::{AsyncBody, HttpClient};
 use release_channel::AppVersion;
 use semver::Version;
@@ -132,8 +132,41 @@ impl Default for UpdateCheckerState {
 impl Global for UpdateCheckerState {}
 
 /// Parses a GitHub release tag (with or without a leading `v`) as semver.
+/// Date tags such as `v20261001` become `20261001.0.0` so they compare in
+/// calendar order.
 pub fn parse_github_version(tag: &str) -> Option<Version> {
-    Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
+    let tag = tag.strip_prefix('v').unwrap_or(tag);
+    if let Some(date) = date_version(tag) {
+        return Some(Version::new(date, 0, 0));
+    }
+    Version::parse(tag).ok()
+}
+
+/// `YYYYMMDD` when `version` was produced from a date tag, otherwise the
+/// semver text.
+pub fn display_version(version: &Version) -> String {
+    if version.minor == 0
+        && version.patch == 0
+        && version.pre.is_empty()
+        && (10_000_000..100_000_000).contains(&version.major)
+    {
+        version.major.to_string()
+    } else {
+        version.to_string()
+    }
+}
+
+fn date_version(tag: &str) -> Option<u64> {
+    let bytes = tag.as_bytes();
+    if bytes.len() != 8 || !bytes.iter().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let month: u8 = tag[4..6].parse().ok()?;
+    let day: u8 = tag[6..8].parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    tag.parse().ok()
 }
 
 /// Parses the body of a GitHub "latest release" API response.
@@ -350,7 +383,14 @@ impl Render for UpdateStatusItem {
         let status = cx.global::<UpdateCheckerState>().status.clone();
 
         let element: gpui::AnyElement = match status {
-            UpdateStatus::Idle => Empty.into_any_element(),
+            UpdateStatus::Idle => {
+                let version = display_version(&AppVersion::global(cx));
+                Button::new("app-version", version)
+                    .label_size(LabelSize::Small)
+                    .tooltip(Tooltip::text(i18n::t("check_for_updates")))
+                    .on_click(|_, _window, cx| check_for_updates(cx))
+                    .into_any_element()
+            }
             UpdateStatus::Checking => Button::new(
                 "update-checking",
                 i18n::t("checking_for_updates"),
@@ -360,7 +400,7 @@ impl Render for UpdateStatusItem {
             .into_any_element(),
             UpdateStatus::UpdateAvailable(release) => Button::new(
                 "update-available",
-                format!("v{}", release.version),
+                display_version(&release.version),
             )
             .style(ButtonStyle::Filled)
             .label_size(LabelSize::Small)
@@ -392,7 +432,7 @@ impl Render for UpdateStatusItem {
             )
             .style(ButtonStyle::Filled)
             .label_size(LabelSize::Small)
-            .tooltip(Tooltip::text(format!("v{}", info.version)))
+            .tooltip(Tooltip::text(display_version(&info.version)))
             .on_click(|_, _window, cx| restart_to_update(cx))
             .into_any_element(),
             UpdateStatus::PackageReady { info, path } => {
@@ -400,7 +440,7 @@ impl Render for UpdateStatusItem {
                 Button::new("update-package-ready", i18n::t("open_update_package"))
                     .style(ButtonStyle::Filled)
                     .label_size(LabelSize::Small)
-                    .tooltip(Tooltip::text(format!("v{}", info.version)))
+                    .tooltip(Tooltip::text(display_version(&info.version)))
                     .on_click(move |_, _window, cx| {
                         cx.open_with_system(&path);
                     })
@@ -492,6 +532,21 @@ mod tests {
         );
         assert!(parse_github_version("not-a-version").is_none());
         assert!(parse_github_version("").is_none());
+        assert_eq!(
+            parse_github_version("v20261001").unwrap(),
+            Version::new(20261001, 0, 0)
+        );
+        assert_eq!(
+            parse_github_version("20261002").unwrap(),
+            Version::new(20261002, 0, 0)
+        );
+        assert!(parse_github_version("v20261301").is_none());
+        assert!(parse_github_version("v20261001").unwrap() < parse_github_version("20261002").unwrap());
+        assert_eq!(
+            display_version(&Version::new(20261001, 0, 0)),
+            "20261001"
+        );
+        assert_eq!(display_version(&Version::new(1, 2, 3)), "1.2.3");
     }
 
     #[test]
