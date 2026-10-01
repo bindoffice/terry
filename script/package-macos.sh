@@ -146,7 +146,7 @@ notarize_and_staple() {
     return
   fi
 
-  echo "==> Notarizing $zip_path…"
+  echo "==> Notarizing ${zip_path}…"
   local key_file attempt
   key_file="$(mktemp)"
   chmod 600 "$key_file"
@@ -161,7 +161,7 @@ notarize_and_staple() {
   fi
   rm -f "$key_file"
 
-  echo "==> Stapling notarization ticket onto $app_path…"
+  echo "==> Stapling notarization ticket onto ${app_path}…"
   for attempt in 1 2 3 4 5; do
     if xcrun stapler staple "$app_path"; then
       break
