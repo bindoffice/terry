@@ -39,6 +39,14 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "Refresh");
             m.insert("file_list", "File List");
             m.insert("finder", "Finder");
+            m.insert("open_item", "Open");
+            m.insert("open_in_default_app", "Open in Default App");
+            m.insert("new_terminal_here", "New Terminal Here");
+            m.insert("copy_path", "Copy Path");
+            m.insert("copy_name", "Copy Name");
+            m.insert("new_folder", "New Folder");
+            m.insert("delete", "Delete");
+            m.insert("delete_confirm", "Delete");
             m.insert("ui_language", "Language");
             m.insert(
                 "ui_language_description",
@@ -220,6 +228,14 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("refresh", "刷新");
             m.insert("file_list", "文件列表");
             m.insert("finder", "文件夹");
+            m.insert("open_item", "打开");
+            m.insert("open_in_default_app", "用默认应用打开");
+            m.insert("new_terminal_here", "在此打开终端");
+            m.insert("copy_path", "复制路径");
+            m.insert("copy_name", "复制名称");
+            m.insert("new_folder", "新建文件夹");
+            m.insert("delete", "删除");
+            m.insert("delete_confirm", "确认删除");
             m.insert("ui_language", "语言");
             m.insert("ui_language_description", "界面语言。默认跟随系统语言。");
             m.insert("language_system", "跟随系统");

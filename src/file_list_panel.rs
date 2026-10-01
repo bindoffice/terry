@@ -1,13 +1,16 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui::{
-    Action, AnyElement, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    IntoElement, Render, SharedString, Subscription, TaskExt, WeakEntity, Window, div, px,
+    Action, AnyElement, App, ClipboardItem, Context, Entity, EntityId, EventEmitter, FocusHandle,
+    Focusable, IntoElement, PromptLevel, Render, SharedString, Subscription, TaskExt, WeakEntity,
+    Window, div, px,
 };
-use ui::{IconButton, IconName, Label, LabelSize, Tooltip, prelude::*};
+use ui::{
+    ContextMenu, IconButton, IconName, Label, LabelSize, Tooltip, prelude::*, right_click_menu,
+};
 use workspace::Workspace;
-use workspace::dock::{DockPosition, Panel, PanelEvent, PanelSizeState, PanelStatusButton};
 use workspace::OpenOptions;
+use workspace::dock::{DockPosition, Panel, PanelEvent, PanelSizeState, PanelStatusButton};
 use zed_actions::file_list_panel::{ShowFinder, ShowList, ToggleFocus};
 
 pub fn init(cx: &mut App) {
@@ -49,10 +52,39 @@ enum FileViewMode {
     Finder,
 }
 
+#[derive(Clone)]
 struct FileEntry {
     path: PathBuf,
     name: SharedString,
     is_dir: bool,
+}
+
+impl FileEntry {
+    fn is_parent_row(&self) -> bool {
+        self.name.as_ref() == ".."
+    }
+
+    fn terminal_cwd(&self) -> PathBuf {
+        if self.is_dir {
+            self.path.clone()
+        } else {
+            self.path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| self.path.clone())
+        }
+    }
+
+    fn create_target_dir(&self) -> PathBuf {
+        if self.is_dir && !self.is_parent_row() {
+            self.path.clone()
+        } else {
+            self.path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| self.path.clone())
+        }
+    }
 }
 
 pub struct FileListPanel {
@@ -249,19 +281,7 @@ impl FileListPanel {
     }
 
     fn open_terminal_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let cwd = self.current_dir.clone();
-        let Some(workspace) = self.workspace.upgrade() else {
-            return;
-        };
-        workspace.update(cx, |workspace, cx| {
-            let Some(panel) = workspace.panel::<crate::terminal_list_panel::TerminalListPanel>(cx)
-            else {
-                return;
-            };
-            panel.update(cx, |panel, cx| {
-                panel.open_shell_at(cwd, window, cx);
-            });
-        });
+        self.open_terminal_at(self.current_dir.clone(), window, cx);
     }
 
     fn navigate_up(&mut self, cx: &mut Context<Self>) {
@@ -306,6 +326,198 @@ impl FileListPanel {
                 .open_abs_path(path, OpenOptions::default(), window, cx)
                 .detach_and_log_err(cx);
         });
+    }
+
+    fn open_with_system(&self, path: &Path, cx: &App) {
+        cx.open_with_system(path);
+    }
+
+    fn reveal_in_file_manager(&self, path: &Path, cx: &App) {
+        cx.reveal_path(path);
+    }
+
+    fn copy_path(&self, path: &Path, cx: &mut App) {
+        cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
+    }
+
+    fn copy_name(&self, name: &str, cx: &mut App) {
+        cx.write_to_clipboard(ClipboardItem::new_string(name.to_string()));
+    }
+
+    fn open_terminal_at(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let Some(panel) = workspace
+            .read(cx)
+            .panel::<crate::terminal_list_panel::TerminalListPanel>(cx)
+        else {
+            return;
+        };
+        panel.update(cx, |panel, cx| {
+            panel.open_shell_at(cwd, window, cx);
+        });
+    }
+
+    fn unique_child_path(parent: &Path, base: &str) -> PathBuf {
+        let candidate = parent.join(base);
+        if !candidate.exists() {
+            return candidate;
+        }
+        for index in 2..10_000 {
+            let candidate = parent.join(format!("{base} {index}"));
+            if !candidate.exists() {
+                return candidate;
+            }
+        }
+        parent.join(format!("{base} {}", uuid::Uuid::new_v4()))
+    }
+
+    fn create_new_file_in(
+        &mut self,
+        parent: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = Self::unique_child_path(&parent, "untitled");
+        if std::fs::File::create(&path).is_ok() {
+            self.open_file(path, window, cx);
+            cx.notify();
+        }
+    }
+
+    fn create_new_folder_in(&mut self, parent: PathBuf, cx: &mut Context<Self>) {
+        let path = Self::unique_child_path(&parent, "untitled folder");
+        if std::fs::create_dir(&path).is_ok() {
+            cx.notify();
+        }
+    }
+
+    fn delete_entry(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let message = format!("{} \"{}\"?", i18n::t("delete_confirm"), name);
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &message,
+            None,
+            &[i18n::t_str("delete"), i18n::t_str("cancel")],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let delete_result = cx
+                .background_spawn(async move {
+                    if path.is_dir() {
+                        std::fs::remove_dir_all(path)
+                    } else {
+                        std::fs::remove_file(path)
+                    }
+                })
+                .await;
+            if delete_result.is_ok() {
+                this.update(cx, |_, cx| cx.notify()).ok();
+            }
+        })
+        .detach();
+    }
+
+    fn build_finder_context_menu(
+        panel: Entity<Self>,
+        entry: FileEntry,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<ContextMenu> {
+        let is_parent = entry.is_parent_row();
+        let reveal_label = ui::utils::reveal_in_file_manager_label(false);
+        ContextMenu::build(window, cx, move |menu, _, _| {
+            let open_panel = panel.clone();
+            let open_entry = entry.clone();
+            let mut menu = menu.entry(i18n::t("open_item"), None, move |window, cx| {
+                open_panel.update(cx, |this, cx| {
+                    this.entry_clicked(open_entry.clone(), window, cx);
+                });
+            });
+
+            if !is_parent {
+                let system_panel = panel.clone();
+                let system_path = entry.path.clone();
+                menu = menu.entry(i18n::t("open_in_default_app"), None, move |_window, cx| {
+                    system_panel.update(cx, |this, cx| {
+                        this.open_with_system(&system_path, cx);
+                    });
+                });
+            }
+
+            let reveal_panel = panel.clone();
+            let reveal_path = entry.path.clone();
+            menu = menu.entry(reveal_label, None, move |_window, cx| {
+                reveal_panel.update(cx, |this, cx| {
+                    this.reveal_in_file_manager(&reveal_path, cx);
+                });
+            });
+
+            let terminal_panel = panel.clone();
+            let terminal_cwd = entry.terminal_cwd();
+            menu = menu
+                .separator()
+                .entry(i18n::t("new_terminal_here"), None, move |window, cx| {
+                    terminal_panel.update(cx, |this, cx| {
+                        this.open_terminal_at(terminal_cwd.clone(), window, cx);
+                    });
+                });
+
+            let copy_path_panel = panel.clone();
+            let copy_path = entry.path.clone();
+            let copy_name_panel = panel.clone();
+            let copy_name = entry.name.to_string();
+            menu = menu
+                .separator()
+                .entry(i18n::t("copy_path"), None, move |_window, cx| {
+                    copy_path_panel.update(cx, |this, cx| {
+                        this.copy_path(&copy_path, cx);
+                    });
+                })
+                .entry(i18n::t("copy_name"), None, move |_window, cx| {
+                    copy_name_panel.update(cx, |this, cx| {
+                        this.copy_name(&copy_name, cx);
+                    });
+                });
+
+            if !is_parent {
+                let create_dir = entry.create_target_dir();
+                let new_file_panel = panel.clone();
+                let new_file_dir = create_dir.clone();
+                let new_folder_panel = panel.clone();
+                let new_folder_dir = create_dir;
+                menu = menu
+                    .separator()
+                    .entry(i18n::t("new_file"), None, move |window, cx| {
+                        new_file_panel.update(cx, |this, cx| {
+                            this.create_new_file_in(new_file_dir.clone(), window, cx);
+                        });
+                    })
+                    .entry(i18n::t("new_folder"), None, move |_window, cx| {
+                        new_folder_panel.update(cx, |this, cx| {
+                            this.create_new_folder_in(new_folder_dir.clone(), cx);
+                        });
+                    });
+
+                let delete_panel = panel.clone();
+                let delete_path = entry.path.clone();
+                menu = menu.separator().entry(i18n::t("delete"), None, move |window, cx| {
+                    delete_panel.update(cx, |this, cx| {
+                        this.delete_entry(delete_path.clone(), window, cx);
+                    });
+                });
+            }
+
+            menu
+        })
     }
 
     fn dir_label(&self) -> SharedString {
@@ -501,6 +713,7 @@ fn render_finder_grid(
     theme: std::sync::Arc<theme::Theme>,
     cx: &mut Context<FileListPanel>,
 ) -> AnyElement {
+    let panel = cx.entity();
     h_flex()
         .id("finder")
         .flex_1()
@@ -518,27 +731,47 @@ fn render_finder_grid(
             } else {
                 Color::Muted
             };
-            v_flex()
-                .id(index)
-                .w(px(108.))
-                .items_center()
-                .gap_1()
-                .px_1()
-                .py_2()
-                .rounded_md()
-                .cursor_pointer()
-                .hover(|style| style.bg(colors.element_hover))
-                .child(ui::Icon::new(icon).size(IconSize::XLarge).color(icon_color))
-                .child(
-                    div().w(px(96.)).text_center().child(
-                        Label::new(entry.name.clone())
-                            .size(LabelSize::XSmall)
-                            .truncate(),
-                    ),
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
+            let panel = panel.clone();
+            let menu_entry = entry.clone();
+            let label = entry.name.clone();
+            let on_click = cx.listener({
+                let entry = entry.clone();
+                move |this, _, window, cx| {
                     entry_clicked(this, &entry, window, cx);
-                }))
+                }
+            });
+            right_click_menu(format!("finder-rc-{index}"))
+                .trigger(move |_is_open, _window, _cx| {
+                    v_flex()
+                        .id(index)
+                        .w(px(108.))
+                        .items_center()
+                        .gap_1()
+                        .px_1()
+                        .py_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(colors.element_hover))
+                        .child(ui::Icon::new(icon).size(IconSize::XLarge).color(icon_color))
+                        .child(
+                            div().w(px(96.)).text_center().child(
+                                Label::new(label).size(LabelSize::XSmall).truncate(),
+                            ),
+                        )
+                        .on_click(on_click)
+                })
+                .menu({
+                    let panel = panel.clone();
+                    move |window, cx| {
+                        FileListPanel::build_finder_context_menu(
+                            panel.clone(),
+                            menu_entry.clone(),
+                            window,
+                            cx,
+                        )
+                    }
+                })
+                .into_any_element()
         }))
         .into_any_element()
 }
