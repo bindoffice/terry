@@ -26,6 +26,7 @@ It is built on [Zed](https://zed.dev)’s GPUI stack, but focused on terminals, 
 - **AI Agent** — Chat with LLMs in a side panel; run commands and tools with configurable profiles
 - **MCP** — Connect Model Context Protocol servers to extend agent capabilities
 - **Files panel** — Browse the project tree alongside your terminals
+- **Editor** — Open text from the files panel, or with New File / Open File; files share tabs and splits with terminals. Vim mode is on by default, with in-file search and go to line. Markdown can be previewed, and images open in a viewer
 - **Settings & themes** — Customize shell, appearance, agent models, and more
 - **i18n** — UI strings available in multiple locales (including English and Chinese)
 
@@ -82,8 +83,8 @@ resources/           # App icons and desktop metadata
 
 ## Relationship to Zed
 
-Terry reuses substantial code from the [Zed](https://github.com/zed-industries/zed) editor (GPUI, workspace, terminal, agent infrastructure).  
-The product goal is different: a **lightweight terminal + agent workspace**, not a general-purpose code editor.
+Terry reuses substantial code from the [Zed](https://github.com/zed-industries/zed) editor (GPUI, workspace, terminal, editor, agent infrastructure).  
+The product goal is different: a **terminal, file, and agent workspace** with an editor for the files you open, not a full IDE.
 
 ## License
 

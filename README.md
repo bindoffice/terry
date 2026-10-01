@@ -26,6 +26,7 @@
 - **AI Agent** — 侧边栏与大模型对话，通过可配置的 Profile 调用命令与工具
 - **MCP** — 接入 Model Context Protocol 服务器，扩展 Agent 能力
 - **文件面板** — 在终端旁浏览项目目录树
+- **编辑器** — 从文件面板，或通过「新建文件 / 打开文件」打开文本，与终端共用标签页和分屏。默认开启 Vim 模式，支持文件内搜索和跳转到行；Markdown 可预览，图片可直接查看
 - **设置与主题** — 自定义 Shell、外观、Agent 模型等
 - **国际化** — 界面支持多语言（含中英文）
 
@@ -82,8 +83,8 @@ resources/           # 应用图标与桌面元数据
 
 ## 与 Zed 的关系
 
-Terry 大量复用了 [Zed](https://github.com/zed-industries/zed) 编辑器的代码（GPUI、工作区、终端、Agent 基础设施等）。  
-产品定位不同：面向 **轻量级终端 + Agent 工作区**，而非通用代码编辑器。
+Terry 大量复用了 [Zed](https://github.com/zed-industries/zed) 编辑器的代码（GPUI、工作区、终端、编辑器、Agent 基础设施等）。  
+产品定位不同：面向 **终端、文件与 Agent 工作区**，并带一个用来改文件的编辑器，而不是完整的 IDE。
 
 ## 许可证
 
