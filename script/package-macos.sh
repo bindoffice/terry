@@ -176,9 +176,11 @@ notarize_and_staple() {
   fi
 }
 
-echo "==> Ensuring cargo-bundle…"
-if ! command -v cargo-bundle >/dev/null 2>&1 && ! cargo bundle --help >/dev/null 2>&1; then
-  cargo install cargo-bundle --locked
+echo "==> Ensuring cargo-bundle 0.12.0…"
+# 0.12 moved osx_minimum_system_version under [package.metadata.bundle.osx].
+BUNDLE_VER="$(cargo bundle --version 2>/dev/null || true)"
+if [[ "$BUNDLE_VER" != *"0.12.0"* ]]; then
+  cargo install cargo-bundle --version 0.12.0 --locked --force
 fi
 
 echo "==> Building terry ($TARGET)…"

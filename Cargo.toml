@@ -17,8 +17,10 @@ path = "src/main.rs"
 name = "Terry"
 identifier = "dev.terry.Terry"
 icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
-osx_minimum_system_version = "11.0"
 category = "public.app-category.developer-tools"
+
+[package.metadata.bundle.osx]
+minimum_system_version = "11.0"
 
 [dependencies]
 anyhow.workspace = true
