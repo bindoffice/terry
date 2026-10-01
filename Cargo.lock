@@ -16346,10 +16346,12 @@ name = "update_checker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs 6.0.0",
  "futures 0.3.32",
  "gpui",
  "http_client",
  "i18n",
+ "log",
  "release_channel",
  "semver",
  "serde",

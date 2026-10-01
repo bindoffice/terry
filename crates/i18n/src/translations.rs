@@ -113,6 +113,9 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("up_to_date", "Up to date");
             m.insert("update_available", "Update available");
             m.insert("update_check_failed", "Update check failed");
+            m.insert("downloading_update", "Downloading update");
+            m.insert("restart_to_update", "Restart to update");
+            m.insert("open_update_package", "Open installer");
             m.insert("ok", "OK");
             m.insert("services", "Services");
             m.insert("hide_terry", "Hide Terry");
@@ -290,6 +293,9 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("up_to_date", "已是最新版本");
             m.insert("update_available", "发现新版本");
             m.insert("update_check_failed", "检查更新失败");
+            m.insert("downloading_update", "正在下载更新");
+            m.insert("restart_to_update", "重启以完成更新");
+            m.insert("open_update_package", "打开安装包");
             m.insert("ok", "好");
             m.insert("services", "服务");
             m.insert("hide_terry", "隐藏 Terry");
