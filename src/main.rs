@@ -2,6 +2,7 @@ mod app_icon;
 mod app_menus;
 mod app_title_bar;
 mod file_list_panel;
+mod ipc;
 mod keymap_settings;
 mod llm_provider_settings;
 mod settings_window;
@@ -56,6 +57,13 @@ fn main() {
         return;
     }
 
+    // CLI subcommands (`terry new-tab`, `terry send-text`, ...) talk to an
+    // already-running instance over IPC and must never boot the GUI.
+    if let Some(exit_code) = ipc::run_cli_subcommand(&std::env::args().skip(1).collect::<Vec<_>>())
+    {
+        std::process::exit(exit_code);
+    }
+
     zlog::init();
     zlog::init_output_stderr();
 
@@ -70,8 +78,11 @@ fn main() {
     let app =
         Application::with_platform(gpui_platform::current_platform(false)).with_assets(Assets);
 
-    // Start IPC Server
-    let (ipc_port, ipc_token) = session::ipc_server::start_ipc_server().unwrap();
+    // Start IPC Server. Handlers forward work to the GUI through this
+    // channel because the gpui AsyncApp is not Send.
+    let (ipc_requests_tx, ipc_requests_rx) =
+        futures::channel::mpsc::unbounded::<session::ipc_server::IpcRequest>();
+    let (ipc_port, ipc_token) = session::ipc_server::start_ipc_server(ipc_requests_tx).unwrap();
     let ipc_info = serde_json::json!({
         "port": ipc_port,
         "token": ipc_token
@@ -225,6 +236,9 @@ fn main() {
             session: app_session,
         });
         AppState::set_global(app_state.clone(), cx);
+
+        // Apply IPC requests (new-tab / send-text) arriving from CLI clients.
+        ipc::init(ipc_requests_rx, cx);
 
         theme_settings::init(LoadThemes::All(Box::new(Assets)), cx);
         Assets.load_fonts(cx).log_err();

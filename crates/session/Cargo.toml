@@ -19,6 +19,7 @@ test-support = [
 
 [dependencies]
 db.workspace = true
+futures.workspace = true
 gpui.workspace = true
 uuid.workspace = true
 util.workspace = true
