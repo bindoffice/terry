@@ -1478,6 +1478,19 @@ impl PlatformWindow for MacWindow {
             .detach();
     }
 
+    fn hide(&self) {
+        let this = self.0.lock();
+        let window = this.native_window;
+        let closed = this.closed.clone();
+        this.foreground_executor
+            .spawn(async move {
+                if_window_not_closed(closed, || unsafe {
+                    let _: () = msg_send![window, orderOut: nil];
+                })
+            })
+            .detach();
+    }
+
     fn request_attention(&self) {
         if self.is_active() {
             return;

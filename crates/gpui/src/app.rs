@@ -46,7 +46,7 @@ use crate::{
     Action, ActionBuildError, ActionRegistry, Any, AnyView, AnyWindowHandle, AppContext, Arena,
     ArenaBox, Asset, AssetSource, BackgroundExecutor, Bounds, ClipboardItem, CursorStyle,
     DispatchPhase, DisplayId, EventEmitter, FocusHandle, FocusMap, ForegroundExecutor, Global,
-    KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, Menu, MenuItem, OwnedMenu,
+    GlobalHotkey, KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, Menu, MenuItem, OwnedMenu,
     PathPromptOptions, Pixels, Platform, PlatformDisplay, PlatformKeyboardLayout,
     PlatformKeyboardMapper, Point, Priority, PromptBuilder, PromptButton, PromptHandle,
     PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation, ScreenCaptureSource,
@@ -1461,6 +1461,26 @@ impl App {
                     callback(response, &mut app.borrow_mut());
                 }
             }));
+    }
+
+    /// Registers a handler invoked when a platform-global hotkey is pressed.
+    ///
+    /// Global hotkeys fire regardless of which window or application has
+    /// keyboard focus; the handler runs on the main thread. macOS only: on
+    /// other platforms this is a no-op and the handler is never invoked.
+    pub fn on_global_hotkey<F>(&self, hotkey: GlobalHotkey, mut callback: F)
+    where
+        F: 'static + FnMut(&mut App),
+    {
+        let this = self.this.clone();
+        self.platform.on_global_hotkey(
+            hotkey,
+            Box::new(move || {
+                if let Some(app) = this.upgrade() {
+                    callback(&mut app.borrow_mut());
+                }
+            }),
+        );
     }
 
     /// Returns the full pathname of the current app bundle.

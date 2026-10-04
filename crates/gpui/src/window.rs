@@ -5328,6 +5328,13 @@ impl Window {
         self.platform_window.activate();
     }
 
+    /// Hides the current window without closing it. It can be shown again
+    /// via [`Window::activate_window`]. No-op on platforms without a hide
+    /// implementation.
+    pub fn hide(&self) {
+        self.platform_window.hide();
+    }
+
     /// Requests that the operating system draw attention to this window.
     pub fn request_attention(&self) {
         self.platform_window.request_attention();

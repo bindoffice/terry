@@ -121,6 +121,24 @@ pub fn guess_compositor() -> &'static str {
     }
 }
 
+/// A platform-global hotkey, e.g. ctrl+backtick, that fires regardless of
+/// which application has keyboard focus.
+///
+/// The encoding is platform-specific. On macOS, `key_code` is a Carbon
+/// virtual key code (e.g. `kVK_ANSI_Grave` = 0x32) and `modifiers` is a
+/// Carbon modifier mask (`cmdKey`, `shiftKey`, `optionKey`, `controlKey`
+/// bits, from HIToolbox/Events.h).
+///
+/// Global hotkeys are currently only supported on macOS; on other platforms
+/// [`Platform::on_global_hotkey`] is a no-op and the callback never fires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GlobalHotkey {
+    /// Platform-specific virtual key code (Carbon virtual key code on macOS).
+    pub key_code: u32,
+    /// Platform-specific modifier mask (Carbon modifier mask on macOS).
+    pub modifiers: u32,
+}
+
 #[expect(missing_docs)]
 pub trait Platform: 'static {
     fn background_executor(&self) -> BackgroundExecutor;
@@ -192,6 +210,15 @@ pub trait Platform: 'static {
     fn on_quit(&self, callback: Box<dyn FnMut()>);
     fn on_reopen(&self, callback: Box<dyn FnMut()>);
     fn on_system_wake(&self, callback: Box<dyn FnMut()>);
+
+    /// Registers a callback invoked whenever the given global hotkey is
+    /// pressed, regardless of which application has keyboard focus. The
+    /// callback is invoked on the main thread.
+    ///
+    /// Currently only implemented on macOS (via Carbon
+    /// `RegisterEventHotKey`, which requires no extra permissions); other
+    /// platforms never invoke the callback.
+    fn on_global_hotkey(&self, _hotkey: GlobalHotkey, _callback: Box<dyn FnMut()>) {}
 
     // Mobile platform methods. On mobile the OS owns the application
     // lifecycle: apps are backgrounded, foregrounded, and killed at the
@@ -815,6 +842,10 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn activate(&self);
     /// Requests that the operating system draw attention to this window.
     fn request_attention(&self) {}
+    /// Hides the window without closing it. It can be shown again via
+    /// [`PlatformWindow::activate`]. Default: no-op on platforms without a
+    /// hide implementation.
+    fn hide(&self) {}
     fn is_active(&self) -> bool;
     fn is_hovered(&self) -> bool;
     fn background_appearance(&self) -> WindowBackgroundAppearance;

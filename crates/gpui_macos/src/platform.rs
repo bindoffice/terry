@@ -29,8 +29,8 @@ use dispatch2::DispatchQueue;
 use futures::channel::oneshot;
 use gpui::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, ForegroundExecutor,
-    KeyContext, Keymap, Menu, MenuItem, OsMenu, OwnedMenu, PathPromptOptions, Platform,
-    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
+    GlobalHotkey, KeyContext, Keymap, Menu, MenuItem, OsMenu, OwnedMenu, PathPromptOptions,
+    Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
     PlatformWindow, Result, SystemMenuType, Task, ThermalState, WindowAppearance, WindowKind,
     WindowParams, popup::PopupNotSupportedError,
 };
@@ -48,6 +48,7 @@ use ptr::null_mut;
 use semver::Version;
 use std::{
     cell::Cell,
+    collections::HashMap,
     ffi::{CStr, OsStr, c_void},
     os::{raw::c_char, unix::ffi::OsStrExt},
     path::{Path, PathBuf},
@@ -190,6 +191,11 @@ pub(crate) struct MacPlatformState {
     /// Mirrors `[NSCursor setHiddenUntilMouseMoves:]` state, which AppKit doesn't expose.
     cursor_visible: Arc<AtomicBool>,
     system_notifications: crate::system_notifications::SystemNotificationState,
+    /// Registered global hotkey callbacks, keyed by the synthetic hotkey ID
+    /// passed to `RegisterEventHotKey`.
+    global_hotkeys: HashMap<u32, Box<dyn FnMut()>>,
+    next_global_hotkey_id: u32,
+    global_hotkey_handler_installed: bool,
 }
 
 impl MacPlatform {
@@ -237,6 +243,9 @@ impl MacPlatform {
             keyboard_mapper,
             cursor_visible: Arc::new(AtomicBool::new(true)),
             system_notifications: crate::system_notifications::SystemNotificationState::new(),
+            global_hotkeys: HashMap::new(),
+            next_global_hotkey_id: 0,
+            global_hotkey_handler_installed: false,
         }))
     }
 
@@ -741,6 +750,54 @@ impl Platform for MacPlatform {
 
     fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>) {
         self.0.lock().open_urls = Some(callback);
+    }
+
+    fn on_global_hotkey(&self, hotkey: GlobalHotkey, callback: Box<dyn FnMut()>) {
+        {
+            let mut state = self.0.lock();
+            if !state.global_hotkey_handler_installed {
+                // Mark installed before dropping the lock so concurrent
+                // registrations don't double-install; reverted on failure.
+                state.global_hotkey_handler_installed = true;
+                drop(state);
+                let status = unsafe { install_global_hotkey_handler(self) };
+                if status != carbon_hotkey::noErr {
+                    log::error!("failed to install global hotkey event handler: OSStatus {status}");
+                    self.0.lock().global_hotkey_handler_installed = false;
+                    return;
+                }
+            }
+        }
+
+        let id = {
+            let mut state = self.0.lock();
+            let id = state.next_global_hotkey_id;
+            state.next_global_hotkey_id += 1;
+            state.global_hotkeys.insert(id, callback);
+            id
+        };
+
+        unsafe {
+            let status = carbon_hotkey::RegisterEventHotKey(
+                hotkey.key_code,
+                hotkey.modifiers,
+                carbon_hotkey::EventHotKeyID {
+                    signature: carbon_hotkey::HOTKEY_SIGNATURE,
+                    id,
+                },
+                carbon_hotkey::GetApplicationEventTarget(),
+                0,
+                ptr::null_mut(),
+            );
+            if status != carbon_hotkey::noErr {
+                log::error!(
+                    "failed to register global hotkey (key_code {:#x}, modifiers {:#x}): OSStatus {status}",
+                    hotkey.key_code,
+                    hotkey.modifiers
+                );
+                self.0.lock().global_hotkeys.remove(&id);
+            }
+        }
     }
 
     fn prompt_for_paths(
@@ -1535,4 +1592,170 @@ mod security {
     pub const errSecSuccess: OSStatus = 0;
     pub const errSecUserCanceled: OSStatus = -128;
     pub const errSecItemNotFound: OSStatus = -25300;
+}
+
+/// Minimal Carbon HIToolbox bindings for global hotkey registration.
+///
+/// Global hotkeys (`RegisterEventHotKey` + `InstallEventHandler` on the
+/// application event target) are delivered system-wide and, unlike
+/// `CGEventTap`, require no accessibility permissions.
+mod carbon_hotkey {
+    #![allow(non_upper_case_globals, dead_code)]
+
+    use std::ffi::c_void;
+
+    pub type EventHandlerCallRef = *mut c_void;
+    pub type EventHandlerRef = *mut c_void;
+    pub type EventRef = *mut c_void;
+    pub type EventTargetRef = *mut c_void;
+    pub type EventHotKeyRef = *mut c_void;
+    pub type EventHandlerUPP =
+        Option<unsafe extern "C" fn(EventHandlerCallRef, EventRef, *mut c_void) -> i32>;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct EventTypeSpec {
+        pub event_class: u32,
+        pub event_kind: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct EventHotKeyID {
+        pub signature: u32,
+        pub id: u32,
+    }
+
+    /// Arbitrary signature to distinguish our hotkeys ('HOTK').
+    pub const HOTKEY_SIGNATURE: u32 = 0x484F544B;
+    pub const noErr: i32 = 0;
+    /// `kEventClassKeyboard` ('keyb') from HIToolbox/Events.h.
+    pub const kEventClassKeyboard: u32 = 0x6B657962;
+    /// `kEventHotKeyPressed` from HIToolbox/Events.h.
+    pub const kEventHotKeyPressed: u32 = 5;
+    /// `kEventParamDirectObject` ('----') from HIToolbox/CarbonEvents.h.
+    pub const kEventParamDirectObject: u32 = 0x2D2D2D2D;
+    /// `typeEventHotKeyID` ('hkid') from HIToolbox/CarbonEvents.h.
+    pub const typeEventHotKeyID: u32 = 0x686B6964;
+
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        pub fn InstallEventHandler(
+            target: EventTargetRef,
+            handler: EventHandlerUPP,
+            num_types: u32,
+            types: *const EventTypeSpec,
+            user_data: *mut c_void,
+            out_ref: *mut EventHandlerRef,
+        ) -> i32;
+        pub fn RemoveEventHandler(handler_ref: EventHandlerRef) -> i32;
+        pub fn RegisterEventHotKey(
+            hot_key_code: u32,
+            hot_key_modifiers: u32,
+            hot_key_id: EventHotKeyID,
+            target: EventTargetRef,
+            options: u32,
+            out_ref: *mut EventHotKeyRef,
+        ) -> i32;
+        pub fn UnregisterEventHotKey(hot_key: EventHotKeyRef) -> i32;
+        pub fn GetApplicationEventTarget() -> EventTargetRef;
+        #[allow(clippy::too_many_arguments)]
+        pub fn GetEventParameter(
+            in_event: EventRef,
+            in_name: u32,
+            in_desired_type: u32,
+            out_actual_type: *mut u32,
+            in_buffer_size: u32,
+            out_buffer_size: *mut u32,
+            out_data: *mut c_void,
+        ) -> i32;
+    }
+}
+
+/// Installs the Carbon event handler that receives `kEventHotKeyPressed`
+/// events for all registered global hotkeys.
+///
+/// # Safety
+///
+/// `platform` is stored as the handler's user-data pointer. It must live as
+/// long as the handler, i.e. for the rest of the process: `MacPlatform` sits
+/// inside the `Rc<AppCell>` owned by the running `Application` and is not
+/// dropped until after `app.run()` returns (see `MacPlatform::run`, which
+/// clears the equivalent delegate ivar after the run loop exits). No events
+/// are delivered to the handler after the run loop stops.
+unsafe fn install_global_hotkey_handler(platform: &MacPlatform) -> i32 {
+    unsafe {
+        let event_types = [carbon_hotkey::EventTypeSpec {
+            event_class: carbon_hotkey::kEventClassKeyboard,
+            event_kind: carbon_hotkey::kEventHotKeyPressed,
+        }];
+        let mut handler_ref: carbon_hotkey::EventHandlerRef = ptr::null_mut();
+        carbon_hotkey::InstallEventHandler(
+            carbon_hotkey::GetApplicationEventTarget(),
+            Some(handle_global_hotkey_event),
+            1,
+            event_types.as_ptr(),
+            platform as *const MacPlatform as *mut c_void,
+            &mut handler_ref,
+        )
+    }
+}
+
+/// Carbon event handler for global hotkeys. Called on the main thread from
+/// within `[NSApplication sendEvent:]`.
+unsafe extern "C" fn handle_global_hotkey_event(
+    _call_ref: carbon_hotkey::EventHandlerCallRef,
+    event: carbon_hotkey::EventRef,
+    user_data: *mut c_void,
+) -> i32 {
+    if user_data.is_null() {
+        return carbon_hotkey::noErr;
+    }
+    // SAFETY: user_data is the MacPlatform pointer queued in
+    // `install_global_hotkey_handler` (see its lifetime notes).
+    let platform = unsafe { &*(user_data as *const MacPlatform) };
+
+    let mut hot_key_id = carbon_hotkey::EventHotKeyID {
+        signature: 0,
+        id: 0,
+    };
+    let status = unsafe {
+        carbon_hotkey::GetEventParameter(
+            event,
+            carbon_hotkey::kEventParamDirectObject,
+            carbon_hotkey::typeEventHotKeyID,
+            ptr::null_mut(),
+            std::mem::size_of::<carbon_hotkey::EventHotKeyID>() as u32,
+            ptr::null_mut(),
+            &mut hot_key_id as *mut carbon_hotkey::EventHotKeyID as *mut c_void,
+        )
+    };
+    if status != carbon_hotkey::noErr {
+        return status;
+    }
+
+    // Defer to the top of the run loop: the App RefCell may already be
+    // borrowed inside sendEvent: (same pattern as on_thermal_state_change /
+    // on_system_wake above).
+    let context = Box::into_raw(Box::new((platform as *const MacPlatform, hot_key_id.id)));
+    unsafe {
+        DispatchQueue::main().exec_async_f(context as *mut c_void, fire_global_hotkey);
+    }
+    carbon_hotkey::noErr
+}
+
+/// Runs the registered callback for `hot_key_id` on the main thread.
+extern "C" fn fire_global_hotkey(context: *mut c_void) {
+    // SAFETY: context was created by Box::into_raw in
+    // `handle_global_hotkey_event` and is consumed exactly once here.
+    let (platform, id) = *unsafe { Box::from_raw(context as *mut (*const MacPlatform, u32)) };
+    let platform = unsafe { &*platform };
+    let mut state = platform.0.lock();
+    // Take the callback out before invoking it so a re-entrant invocation
+    // can't double-fire; restore it afterwards (same pattern as reopen/quit).
+    if let Some(mut callback) = state.global_hotkeys.remove(&id) {
+        drop(state);
+        callback();
+        platform.0.lock().global_hotkeys.insert(id, callback);
+    }
 }

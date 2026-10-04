@@ -5,6 +5,7 @@ mod file_list_panel;
 mod ipc;
 mod keymap_settings;
 mod llm_provider_settings;
+mod quake_terminal;
 mod settings_window;
 mod status_bar_items;
 mod terminal_list_panel;
@@ -276,6 +277,7 @@ fn main() {
         });
         vim::init(cx);
         terminal_view::init(cx);
+        quake_terminal::init(cx);
         command_palette::init(cx);
         go_to_line::init(cx);
         outline::init(cx);
