@@ -1416,9 +1416,9 @@ fn regex_search_for_query(query: &SearchQuery) -> Option<Search> {
         if str == "." {
             return None;
         }
-        Search::new(str)
+        Search::with_case_sensitivity(str, query.case_sensitive())
     } else {
-        Search::new(&regex::escape(str))
+        Search::with_case_sensitivity(&regex::escape(str), query.case_sensitive())
     }
 }
 
@@ -2178,7 +2178,7 @@ impl SearchableItem for TerminalView {
 
     fn supported_options(&self) -> SearchOptions {
         SearchOptions {
-            case: false,
+            case: true,
             word: false,
             regex: true,
             replacement: false,

@@ -30,16 +30,27 @@ pub struct RegexSearch {
 }
 
 impl RegexSearch {
-    /// Build the forward and backward search DFAs.
+    /// Build the forward and backward search DFAs, using smartcase
+    /// (case-insensitive unless the pattern contains uppercase characters).
     pub fn new(search: &str) -> Result<RegexSearch, Box<BuildError>> {
+        let has_uppercase = search.chars().any(|c| c.is_uppercase());
+        Self::with_case_insensitivity(search, !has_uppercase)
+    }
+
+    /// Build the forward and backward search DFAs with an explicit
+    /// case-insensitivity setting.
+    pub fn with_case_insensitivity(
+        search: &str,
+        case_insensitive: bool,
+    ) -> Result<RegexSearch, Box<BuildError>> {
         // Setup configs for both DFA directions.
         //
         // Bounds are based on Regex's meta engine:
         // https://github.com/rust-lang/regex/blob/061ee815ef2c44101dba7b0b124600fcb03c1912/regex-automata/src/meta/wrappers.rs#L581-L599
-        let has_uppercase = search.chars().any(|c| c.is_uppercase());
-        let syntax_config = SyntaxConfig::new().case_insensitive(!has_uppercase);
-        let config =
-            Config::new().minimum_cache_clear_count(Some(3)).minimum_bytes_per_state(Some(10));
+        let syntax_config = SyntaxConfig::new().case_insensitive(case_insensitive);
+        let config = Config::new()
+            .minimum_cache_clear_count(Some(3))
+            .minimum_bytes_per_state(Some(10));
         let max_size = config.get_cache_capacity();
         let thompson_config = ThompsonConfig::new().nfa_size_limit(Some(max_size));
 

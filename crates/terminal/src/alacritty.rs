@@ -392,6 +392,16 @@ impl Search {
         })
     }
 
+    /// Build a search with an explicit case-sensitivity setting, overriding
+    /// the default smartcase behavior.
+    pub fn with_case_sensitivity(search: &str, case_sensitive: bool) -> Option<Self> {
+        Some(Self {
+            search: AlacrittySearch {
+                search: RegexSearch::with_case_insensitivity(search, !case_sensitive).ok()?,
+            },
+        })
+    }
+
     fn into_alacritty(self) -> RegexSearch {
         self.search.search
     }
