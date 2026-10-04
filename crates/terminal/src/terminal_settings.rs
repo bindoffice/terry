@@ -55,6 +55,10 @@ pub struct TerminalSettings {
     pub image_display: bool,
     /// Maximum bytes the image pool may hold.
     pub max_image_memory: usize,
+    /// Whether Terry automatically injects its shell integration scripts into
+    /// supported shells (zsh, fish) so prompt marks (OSC 133) and working
+    /// directory reports (OSC 7) work out of the box.
+    pub shell_integration: bool,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -146,6 +150,7 @@ impl settings::Settings for TerminalSettings {
             bell: user_content.bell.unwrap_or_default(),
             image_display: user_content.image_display.unwrap_or_default(),
             max_image_memory: user_content.max_image_memory.unwrap_or(512 * 1024 * 1024),
+            shell_integration: user_content.shell_integration.unwrap_or(true),
         }
     }
 }

@@ -1607,6 +1607,27 @@ where
                 unhandled(params);
             }
 
+            // Shell integration (VS Code `OSC 633`): same A-F commands as
+            // `OSC 133`, so they feed into the same handler.
+            b"633" => {
+                if params.len() >= 2 && !params[1].is_empty() {
+                    let command = params[1][0] as char;
+                    let payload = if params.len() > 2 {
+                        let joined = params[2..]
+                            .iter()
+                            .flat_map(|x| str::from_utf8(x))
+                            .collect::<Vec<&str>>()
+                            .join(";");
+                        (!joined.is_empty()).then_some(joined)
+                    } else {
+                        None
+                    };
+                    self.handler.shell_integration(command, payload);
+                    return;
+                }
+                unhandled(params);
+            }
+
             // Set clipboard.
             b"52" => {
                 if params.len() < 3 {

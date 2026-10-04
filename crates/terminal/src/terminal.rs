@@ -2,6 +2,8 @@ mod mappings;
 
 mod alacritty;
 mod pty_info;
+#[cfg(unix)]
+mod shell_integration;
 pub mod terminal_settings;
 
 #[cfg(not(windows))]
@@ -1098,6 +1100,14 @@ impl TerminalBuilder {
             Ok(signal_mask) => Some(signal_mask),
             Err(error) => return Task::ready(Err(error)),
         };
+        // Computed on the calling thread, since settings can only be read
+        // outside the spawned future. Only regular interactive terminals get
+        // the integration: task runs are non-interactive, and the headless
+        // (`no_pty`) path never renders a prompt.
+        #[cfg(unix)]
+        let inject_shell_integration = task.is_none()
+            && !no_pty
+            && TerminalSettings::try_get(cx).is_some_and(|settings| settings.shell_integration);
         let fut = async move {
             // Remove SHLVL so the spawned shell initializes it to 1, matching
             // the behavior of standalone terminal emulators like iTerm2/Kitty/Alacritty.
@@ -1181,6 +1191,22 @@ impl TerminalBuilder {
             // way we use the return value, but would become incorrect if we
             // supported remoting into windows.
             let shell_kind = shell.shell_kind(cfg!(windows));
+
+            // Terry shell integration: inject environment variables so
+            // supported shells load our scripts, which emit OSC 133 prompt
+            // marks and OSC 7 working directory reports.
+            #[cfg(unix)]
+            if inject_shell_integration {
+                let integration_program = match &shell_params {
+                    Some(params) => params.program.clone(),
+                    None => util::shell::get_system_shell(),
+                };
+                if let Err(error) =
+                    shell_integration::inject_shell_integration_env(&mut env, &integration_program)
+                {
+                    log::warn!("Failed to set up shell integration: {error:#}");
+                }
+            }
 
             let scrolling_history = if task.is_some() {
                 // Tasks like `cargo build --all` may produce a lot of output, ergo allow maximum scrolling.

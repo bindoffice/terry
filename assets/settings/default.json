@@ -2114,6 +2114,11 @@
     // Older images are evicted once this budget is exceeded.
     // Default: 536870912 (512 MiB)
     "max_image_memory": 536870912,
+    // Whether to automatically set up Terry's shell integration for supported
+    // shells (zsh and fish): prompt marks (OSC 133) and working directory
+    // tracking (OSC 7) work without touching your dotfiles.
+    // Default: true
+    "shell_integration": true,
   },
   "code_actions_on_format": {},
   // Settings related to running tasks.

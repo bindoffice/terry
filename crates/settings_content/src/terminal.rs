@@ -201,6 +201,14 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: 536870912 (512 MiB)
     pub max_image_memory: Option<usize>,
+    /// Whether to automatically set up Terry's shell integration for supported
+    /// shells (zsh and fish). The injected scripts emit OSC 133 prompt marks
+    /// and OSC 7 working directory reports, which enable prompt navigation
+    /// (`ctrl-shift-up`). Bash users can source the script manually, see the
+    /// documentation.
+    ///
+    /// Default: true
+    pub shell_integration: Option<bool>,
 }
 
 /// Shell configuration to open the terminal with.
