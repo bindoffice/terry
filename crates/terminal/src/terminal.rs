@@ -703,6 +703,12 @@ pub enum Event {
     /// The working directory reported via `OSC 7` changed. Re-read
     /// [`Terminal::working_directory`] to pick up the new value.
     CwdChanged,
+    /// A keystroke was accepted on the terminal's keyboard-input path (paste
+    /// deliberately never emits this, to avoid large clipboard payloads
+    /// fanning out to every terminal in a broadcast group). The panel relays
+    /// it to the terminal's broadcast-group peers so each terminal interprets
+    /// it in its own mode.
+    UserInput(Keystroke),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

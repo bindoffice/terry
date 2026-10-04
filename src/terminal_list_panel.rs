@@ -1,5 +1,6 @@
 use editor::{Editor, MultiBufferOffset};
 use futures::FutureExt;
+use gpui::Keystroke;
 use gpui::{
     Action, AnyElement, App, Axis, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
     Render, SharedString, Subscription, Task, TaskExt, WeakEntity, Window, div, px,
@@ -16,6 +17,7 @@ use workspace::{ItemHandle, Member, Pane, PaneAxis, PaneGroup};
 use zed_actions::terminal_list_panel::{NewGroup, NewTerminal, ToggleFocus};
 
 use serde::{Deserialize, Serialize};
+use settings::Settings;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
@@ -564,6 +566,9 @@ struct PersistedGroup {
     layout: Option<GroupLayoutNode>,
     #[serde(default)]
     layout_mode: Option<GroupLayoutMode>,
+    /// Older session files lack this key; defaults to false.
+    #[serde(default)]
+    broadcast_input: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -595,6 +600,19 @@ pub fn init(cx: &mut App) {
                 panel.update(cx, |panel, cx| panel.create_group(window, cx));
             });
         });
+        workspace.register_action(
+            |workspace, _: &terminal_view::ToggleBroadcastInput, window, cx| {
+                let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
+                    return;
+                };
+                window.defer(cx, move |_, cx| {
+                    panel.update(cx, |panel, cx| {
+                        let group_id = panel.active_group_id;
+                        panel.toggle_broadcast_input(group_id, cx);
+                    });
+                });
+            },
+        );
         // Welcome page and default keymaps dispatch workspace::NewTerminal.
         // Terry has no TerminalPanel dock, so that handler no-ops — route here.
         // Registered before terminal_view::init so we run first in the bubble phase.
@@ -627,6 +645,9 @@ struct TerminalGroup {
     saved_layout: Option<GroupLayoutNode>,
     /// Auto-tiling layout mode. `Manual` keeps user-managed splits.
     layout_mode: GroupLayoutMode,
+    /// When on, keystrokes accepted by any terminal in the group are relayed
+    /// to every other terminal in it (broadcast input).
+    broadcast_input: bool,
     /// How many terminals this group had in the session file (restore waits).
     session_terminal_count: Option<usize>,
     /// Session restore slots keyed by persisted index so async spawn completion
@@ -690,6 +711,8 @@ pub struct TerminalListPanel {
     terminal_spawn_cwds: HashMap<EntityId, Option<PathBuf>>,
     /// Keeps cwd-tracking subscriptions alive for each terminal.
     _terminal_cwd_subscriptions: Vec<Subscription>,
+    /// Keeps broadcast-relay subscriptions alive for each terminal view.
+    _broadcast_subscriptions: Vec<Subscription>,
     /// Debounced disk write after a terminal cwd change.
     cwd_persist_task: Task<()>,
     /// After session restore, ignore process-info reports of `$HOME` that would
@@ -791,6 +814,7 @@ impl TerminalListPanel {
             owns_workspace_session,
             terminal_spawn_cwds: HashMap::default(),
             _terminal_cwd_subscriptions: Vec::new(),
+            _broadcast_subscriptions: Vec::new(),
             cwd_persist_task: Task::ready(()),
             restore_cwd_guard_until: None,
             parked_agent_sessions: Vec::new(),
@@ -1109,6 +1133,7 @@ impl TerminalListPanel {
                 terminals: Vec::new(),
                 layout,
                 layout_mode: Some(group.layout_mode),
+                broadcast_input: group.broadcast_input,
             };
 
             for (term_ix, view_ent) in group.terminals.iter().enumerate() {
@@ -1276,6 +1301,7 @@ impl TerminalListPanel {
                 has_unread: false,
                 saved_layout: layout,
                 layout_mode: p_group.layout_mode.unwrap_or_default(),
+                broadcast_input: p_group.broadcast_input,
                 session_terminal_count: Some(term_count),
                 restore_slots: vec![None; term_count],
             });
@@ -1337,6 +1363,7 @@ impl TerminalListPanel {
                 has_unread: false,
                 saved_layout: None,
                 layout_mode: GroupLayoutMode::Manual,
+                broadcast_input: false,
                 session_terminal_count: None,
                 restore_slots: Vec::new(),
             });
@@ -1360,6 +1387,7 @@ impl TerminalListPanel {
             has_unread: false,
             saved_layout: None,
             layout_mode: GroupLayoutMode::Manual,
+            broadcast_input: false,
             session_terminal_count: None,
             restore_slots: Vec::new(),
         });
@@ -1617,6 +1645,11 @@ impl TerminalListPanel {
             .find(|g| g.id == group_id)
             .map(|g| g.layout_mode);
         let agent_actions = panel.read(cx).agent_session_actions(group_id, cx);
+        let broadcast_input = panel
+            .read(cx)
+            .groups
+            .iter()
+            .any(|g| g.id == group_id && g.broadcast_input);
         ContextMenu::build(window, cx, move |menu, _, _| {
             let view1 = panel.clone();
             let view2 = panel.clone();
@@ -1693,6 +1726,17 @@ impl TerminalListPanel {
                     });
                 });
             }
+            let checked = if broadcast_input { "\u{2713} " } else { "" };
+            let panel = panel.clone();
+            menu = menu.separator().entry(
+                format!("{checked}{}", i18n::t("broadcast_input")),
+                None,
+                move |_, cx| {
+                    panel.update(cx, |this, cx| {
+                        this.toggle_broadcast_input(group_id, cx);
+                    });
+                },
+            );
             if can_delete {
                 menu.separator()
                     .entry(i18n::t("delete_group"), None, move |window, cx| {
@@ -1768,6 +1812,7 @@ impl TerminalListPanel {
             has_unread: false,
             saved_layout: None,
             layout_mode: GroupLayoutMode::Manual,
+            broadcast_input: false,
             session_terminal_count: None,
             restore_slots: Vec::new(),
         });
@@ -2140,12 +2185,23 @@ impl TerminalListPanel {
                 has_unread: false,
                 saved_layout: None,
                 layout_mode: GroupLayoutMode::Manual,
+                broadcast_input: false,
                 session_terminal_count: None,
                 restore_slots: Vec::new(),
             });
         }
         let group_id = self.active_group_id;
-        self.spawn_terminal(group_id, Some(cwd), None, None, None, None, None, window, cx);
+        self.spawn_terminal(
+            group_id,
+            Some(cwd),
+            None,
+            None,
+            None,
+            None,
+            None,
+            window,
+            cx,
+        );
         self.save_session(cx);
     }
 
@@ -2210,6 +2266,20 @@ impl TerminalListPanel {
             },
         ));
 
+        // Broadcast relay: accepted keystrokes from this view are forwarded to
+        // its group peers while the group's broadcast-input flag is on. The
+        // sender already consumed the keystroke on its own input path, so it
+        // is never echoed back through here.
+        self._broadcast_subscriptions.push(cx.subscribe(
+            &terminal_view,
+            move |this, sender, event: &terminal::Event, cx| {
+                let terminal::Event::UserInput(keystroke) = event else {
+                    return;
+                };
+                this.forward_broadcast(&sender, keystroke, cx);
+            },
+        ));
+
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
             if let Some(index) = restore_index {
                 if group.restore_slots.len() <= index {
@@ -2233,6 +2303,61 @@ impl TerminalListPanel {
             }
         }
         cx.notify();
+    }
+
+    /// Toggles a group's broadcast-input mode. When on, keystrokes accepted by
+    /// any terminal in the group are relayed to every other terminal in it.
+    fn toggle_broadcast_input(&mut self, group_id: GroupId, cx: &mut Context<Self>) {
+        let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) else {
+            return;
+        };
+        group.broadcast_input = !group.broadcast_input;
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Relays `keystroke` from `sender` to every other terminal in its group
+    /// while that group's broadcast-input flag is on.
+    ///
+    /// Forwards the keystroke itself rather than bytes so each peer resolves
+    /// it through its own mode: a plain shell, vi mode, or a vim running
+    /// inside the PTY all interpret the same key independently.
+    fn forward_broadcast(
+        &mut self,
+        sender: &Entity<TerminalView>,
+        keystroke: &Keystroke,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group) = self.groups.iter().find(|g| {
+            g.broadcast_input
+                && g.terminals
+                    .iter()
+                    .any(|t| t.entity_id() == sender.entity_id())
+        }) else {
+            return;
+        };
+        let peers = group.terminals.clone();
+        let option_as_meta =
+            terminal::terminal_settings::TerminalSettings::get_global(cx).option_as_meta;
+        for peer in peers {
+            if peer.entity_id() == sender.entity_id() {
+                continue;
+            }
+            peer.update(cx, |view, cx| {
+                let (handled, vi_mode_enabled) = view.terminal().update(cx, |term, _cx| {
+                    (
+                        term.try_keystroke(keystroke, option_as_meta),
+                        term.vi_mode_enabled(),
+                    )
+                });
+                // Mirror TerminalView::process_keystroke: vi-mode navigation
+                // only mutates local cursor state, so an explicit notify is
+                // required to re-render.
+                if handled && vi_mode_enabled {
+                    cx.notify();
+                }
+            });
+        }
     }
 
     /// Shows only the active group's terminals across all center panes.
@@ -4078,6 +4203,7 @@ mod tests {
                         has_unread: false,
                         saved_layout: None,
                         layout_mode: GroupLayoutMode::Manual,
+                        broadcast_input: false,
                         session_terminal_count: None,
                         restore_slots: Vec::new(),
                     });
@@ -4198,6 +4324,7 @@ mod tests {
                         has_unread: false,
                         saved_layout: None,
                         layout_mode: GroupLayoutMode::Manual,
+                        broadcast_input: false,
                         session_terminal_count: None,
                         restore_slots: Vec::new(),
                     });

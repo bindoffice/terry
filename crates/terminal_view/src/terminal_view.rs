@@ -136,6 +136,9 @@ actions!(
         RerunTask,
         /// Scrolls to the most recent shell prompt (requires OSC 133 shell integration).
         JumpToPreviousPrompt,
+        /// Toggles broadcast input for the active terminal group: keystrokes
+        /// accepted by any terminal in the group are relayed to its peers.
+        ToggleBroadcastInput,
     ]
 );
 
@@ -1404,6 +1407,10 @@ fn subscribe_for_terminal_events(
                     // anything that surfaces the directory (e.g. tab title).
                     cx.emit(ItemEvent::UpdateTab);
                 }
+                Event::UserInput(_) => {
+                    // Broadcast relay is handled by the terminal list panel's
+                    // subscription to this view; nothing to do here.
+                }
             }
         },
     );
@@ -1451,6 +1458,15 @@ impl TerminalView {
 
         if handled && vi_mode_enabled {
             cx.notify();
+        }
+
+        // Broadcast relay: surface accepted keystrokes to the panel, which
+        // forwards them to the terminal's broadcast-group peers. Emitted only
+        // for real key input — paste goes through `paste`/`paste_text` and
+        // intentionally never broadcasts, to keep large clipboard payloads
+        // from storming every terminal in the group.
+        if handled {
+            cx.emit(Event::UserInput(keystroke.clone()));
         }
 
         handled
