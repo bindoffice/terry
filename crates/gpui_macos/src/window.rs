@@ -1,8 +1,9 @@
 use crate::{
     BoolExt, MacDisplay, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
     TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,
-    kTISPropertyInputSourceID, kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceLanguages,
-    kTISPropertyInputSourceType, kTISTypeKeyboardInputMode, ns_string, renderer,
+    kTISPropertyInputSourceID, kTISPropertyInputSourceIsASCIICapable,
+    kTISPropertyInputSourceLanguages, kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
+    ns_string, renderer,
 };
 #[cfg(any(test, feature = "test-support"))]
 use anyhow::Result;

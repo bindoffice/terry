@@ -65,11 +65,7 @@ fn main() {
 
     // Product version is the build date, `YYYYMMDD` (for example 20261001).
     // Semver only accepts dotted numbers, so the date is stored as `YYYYMMDD.0.0`.
-    let app_version = AppVersion::load(
-        &format!("{}.0.0", env!("TERRY_VERSION")),
-        None,
-        None,
-    );
+    let app_version = AppVersion::load(&format!("{}.0.0", env!("TERRY_VERSION")), None, None);
 
     let app =
         Application::with_platform(gpui_platform::current_platform(false)).with_assets(Assets);
@@ -462,11 +458,7 @@ fn configure_terry_tab_bar(
                     if let Some(workspace) = pane.read(cx).workspace().upgrade() {
                         if let Some(panel) = workspace.read(cx).panel::<TerminalListPanel>(cx) {
                             panel.update(cx, |panel, cx| {
-                                panel.new_terminal_with_destination(
-                                    Some(pane.clone()),
-                                    window,
-                                    cx,
-                                );
+                                panel.new_terminal_with_destination(Some(pane.clone()), window, cx);
                             });
                             return;
                         }
@@ -493,8 +485,7 @@ fn configure_terry_tab_bar(
             .child(
                 PopoverMenu::new("pane-tab-bar-popover-menu")
                     .trigger_with_tooltip(
-                        IconButton::new("pane-menu", IconName::Menu)
-                            .icon_size(ui::IconSize::Small),
+                        IconButton::new("pane-menu", IconName::Menu).icon_size(ui::IconSize::Small),
                         Tooltip::text(i18n::t("new_ellipsis")),
                     )
                     .anchor(Anchor::TopRight)
@@ -514,9 +505,8 @@ fn configure_terry_tab_bar(
                                         if let Some(workspace) =
                                             pane_entity.read(cx).workspace().upgrade()
                                         {
-                                            if let Some(panel) = workspace
-                                                .read(cx)
-                                                .panel::<TerminalListPanel>(cx)
+                                            if let Some(panel) =
+                                                workspace.read(cx).panel::<TerminalListPanel>(cx)
                                             {
                                                 panel.update(cx, |panel, cx| {
                                                     panel.new_terminal_with_destination(
@@ -529,9 +519,7 @@ fn configure_terry_tab_bar(
                                             }
                                         }
                                         window.dispatch_action(
-                                            Box::new(
-                                                zed_actions::terminal_list_panel::NewTerminal,
-                                            ),
+                                            Box::new(zed_actions::terminal_list_panel::NewTerminal),
                                             cx,
                                         );
                                     })
@@ -565,15 +553,9 @@ fn configure_terry_tab_bar(
                                     i18n::t("split_right"),
                                     SplitRight::default().boxed_clone(),
                                 )
-                                .action(
-                                    i18n::t("split_left"),
-                                    SplitLeft::default().boxed_clone(),
-                                )
+                                .action(i18n::t("split_left"), SplitLeft::default().boxed_clone())
                                 .action(i18n::t("split_up"), SplitUp::default().boxed_clone())
-                                .action(
-                                    i18n::t("split_down"),
-                                    SplitDown::default().boxed_clone(),
-                                )
+                                .action(i18n::t("split_down"), SplitDown::default().boxed_clone())
                             }
                         })
                         .into()

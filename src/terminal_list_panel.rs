@@ -1418,12 +1418,7 @@ impl TerminalListPanel {
 
     /// Opens a new shell in `cwd` and shows it in the active group.
     /// Does not resume a parked agent session.
-    pub fn open_shell_at(
-        &mut self,
-        cwd: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn open_shell_at(&mut self, cwd: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let group_id = self.active_group_id;
         if !self.groups.iter().any(|group| group.id == group_id) {
             return;
@@ -1557,7 +1552,15 @@ impl TerminalListPanel {
             return;
         }
         self.spawn_terminal(
-            group_id, cwd, source, destination, None, None, None, window, cx,
+            group_id,
+            cwd,
+            source,
+            destination,
+            None,
+            None,
+            None,
+            window,
+            cx,
         );
         self.save_session(cx);
     }
@@ -1672,9 +1675,7 @@ impl TerminalListPanel {
             } else {
                 menu
             };
-            let menu = menu
-                .separator()
-                .header(i18n::t("layout"));
+            let menu = menu.separator().header(i18n::t("layout"));
             let mut menu = menu;
             for mode in [
                 GroupLayoutMode::Manual,
@@ -2957,11 +2958,7 @@ impl TerminalListPanel {
                 let still_visible = self
                     .center_panes(cx)
                     .iter()
-                    .any(|pane| {
-                        pane.read(cx)
-                            .items()
-                            .any(|item| item.item_id() == *item_id)
-                    });
+                    .any(|pane| pane.read(cx).items().any(|item| item.item_id() == *item_id));
                 if still_visible {
                     cx.notify();
                     return;
@@ -3031,16 +3028,14 @@ impl TerminalListPanel {
     ) {
         self.remembered_agent_sessions
             .retain(|session| !(session.agent_id == agent_id && session.cwd == cwd));
-        self.remembered_agent_sessions
-            .push(RememberedAgentSession {
-                agent_id,
-                bin,
-                cwd,
-                pending_resume: true,
-            });
+        self.remembered_agent_sessions.push(RememberedAgentSession {
+            agent_id,
+            bin,
+            cwd,
+            pending_resume: true,
+        });
         if self.remembered_agent_sessions.len() > REMEMBERED_AGENT_SESSION_LIMIT {
-            let overflow =
-                self.remembered_agent_sessions.len() - REMEMBERED_AGENT_SESSION_LIMIT;
+            let overflow = self.remembered_agent_sessions.len() - REMEMBERED_AGENT_SESSION_LIMIT;
             self.remembered_agent_sessions.drain(0..overflow);
         }
     }
@@ -3245,14 +3240,8 @@ impl TerminalListPanel {
         cwd: Option<&std::path::Path>,
         cx: &App,
     ) -> Option<Entity<TerminalView>> {
-        self.parked_agent_sessions.retain(|session| {
-            !session
-                .view
-                .read(cx)
-                .terminal()
-                .read(cx)
-                .has_exited()
-        });
+        self.parked_agent_sessions
+            .retain(|session| !session.view.read(cx).terminal().read(cx).has_exited());
         let index = if let Some(cwd) = cwd {
             self.parked_agent_sessions
                 .iter()
@@ -3282,13 +3271,8 @@ impl TerminalListPanel {
             {
                 let removed = group.terminals.remove(removed_ix);
                 let remembered_cwd = self.terminal_spawn_cwds.remove(&item_id).flatten();
-                let cwd = remembered_cwd.or_else(|| {
-                    removed
-                        .read(cx)
-                        .terminal()
-                        .read(cx)
-                        .working_directory()
-                });
+                let cwd = remembered_cwd
+                    .or_else(|| removed.read(cx).terminal().read(cx).working_directory());
                 if let Some((agent, bin)) = coding_agent_from_view(&removed, cx) {
                     remembered = Some((agent.id, bin, cwd.clone()));
                 }
@@ -3856,8 +3840,8 @@ mod tests {
     use super::*;
     use gpui::{TestAppContext, WindowHandle};
     use project::Project;
-    use terminal::terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape};
     use terminal::TerminalBuilder;
+    use terminal::terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape};
     use util::paths::PathStyle;
     use workspace::{AppState, MultiWorkspace};
 
@@ -3927,7 +3911,14 @@ mod tests {
         assert!(gemini.resume.is_some() && gemini.fork.is_none() && gemini.past.is_none());
 
         for id in [
-            "grok", "crush", "antigravity", "hermes", "aider", "copilot", "kimi", "pi",
+            "grok",
+            "crush",
+            "antigravity",
+            "hermes",
+            "aider",
+            "copilot",
+            "kimi",
+            "pi",
         ] {
             let agent = agent_by_id(id).unwrap();
             assert!(agent.resume.is_none() && agent.fork.is_none() && agent.past.is_none());
@@ -4257,9 +4248,7 @@ mod tests {
     /// terminal count even when `saved_layout` is stale (spawn between
     /// re-flows); otherwise the next load prunes the newest terminals.
     #[gpui::test]
-    async fn write_session_serializes_fresh_layout_for_auto_tiling_groups(
-        cx: &mut TestAppContext,
-    ) {
+    async fn write_session_serializes_fresh_layout_for_auto_tiling_groups(cx: &mut TestAppContext) {
         // Isolate session-file writes from the real data directory.
         ensure_test_data_dir();
 

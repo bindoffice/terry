@@ -4066,8 +4066,7 @@ mod tests {
             // line); pinning the viewport to the start of the burst offsets
             // it by 61 - 40 = 21 lines from the bottom.
             assert_eq!(
-                terminal.last_content.display_offset,
-                21,
+                terminal.last_content.display_offset, 21,
                 "viewport should show the beginning of the burst",
             );
             assert!(
@@ -4082,8 +4081,7 @@ mod tests {
             terminal.content_dirty = true;
             terminal.sync(window, cx);
             assert_eq!(
-                terminal.last_content.display_offset,
-                22,
+                terminal.last_content.display_offset, 22,
                 "small output should keep following the bottom",
             );
         });
@@ -4093,8 +4091,7 @@ mod tests {
             terminal.scroll_to_top();
             terminal.sync(window, cx);
             assert_eq!(
-                terminal.last_content.display_offset,
-                62,
+                terminal.last_content.display_offset, 62,
                 "scrolling to the top should stick",
             );
 
@@ -4108,8 +4105,7 @@ mod tests {
             // The viewport stays put: display_offset grows with the scrollback
             // so the same content remains visible (topmost line unchanged).
             assert_eq!(
-                terminal.last_content.display_offset,
-                112,
+                terminal.last_content.display_offset, 112,
                 "new output should not yank a scrolled-away viewport",
             );
         });
