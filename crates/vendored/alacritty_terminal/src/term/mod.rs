@@ -356,6 +356,16 @@ pub struct Term<T> {
     /// The point of the currently open prompt (set by `OSC 133;A`, cleared by
     /// `OSC 133;B`). Pushed into [`Self::prompt_marks`] once closed.
     active_prompt_mark: Option<Point>,
+
+    /// The point where the currently running command started (`OSC 133;C`).
+    command_start: Option<Point>,
+
+    /// Grid range covering the previous command's input and output, from
+    /// `OSC 133;C` through `OSC 133;D`.
+    last_command_range: Option<(Point, Point)>,
+
+    /// Exit code reported for the previous command (`OSC 133;D;<code>`).
+    last_exit_code: Option<i64>,
 }
 
 /// Maximum number of shell prompt marks retained in [`Term::prompt_marks`].
@@ -488,6 +498,9 @@ impl<T> Term<T> {
             images: ImageState::new(),
             prompt_marks: VecDeque::new(),
             active_prompt_mark: None,
+            command_start: None,
+            last_command_range: None,
+            last_exit_code: None,
         }
     }
 
@@ -2093,9 +2106,20 @@ impl<T: EventListener> Handler for Term<T> {
                 self.finish_active_prompt();
                 self.push_prompt_mark(self.grid.cursor.point);
             }
-            // Command/output boundaries: tracked for future use (e.g. "clear
-            // output"), nothing to record yet.
-            'C' | 'D' => {}
+            // Command start: remember where the command's input begins.
+            'C' => self.command_start = Some(self.grid.cursor.point),
+            // Command end: record the input/output range and the exit code,
+            // then notify the UI ("copy last command output", status display).
+            'D' => {
+                let end = self.grid.cursor.point;
+                let start = self.command_start.take().unwrap_or(end);
+                self.last_command_range = Some((start, end));
+                let code = payload
+                    .as_deref()
+                    .and_then(|payload| payload.trim().parse::<i64>().ok());
+                self.last_exit_code = code;
+                self.event_proxy.send_event(Event::CommandFinished(code));
+            }
             // Run the command on the current line (clickable prompt).
             'E' => debug!("OSC 133;E (run command on current line) is not supported yet"),
             _ => debug!("Unhandled OSC 133 command: {command}"),
@@ -2109,6 +2133,9 @@ impl<T: EventListener> Handler for Term<T> {
         if matches!(mode, ansi::ClearMode::All) {
             self.prompt_marks.clear();
             self.active_prompt_mark = None;
+            self.command_start = None;
+            self.last_command_range = None;
+            self.last_exit_code = None;
         }
         let bg = self.grid.cursor.template.bg;
 
@@ -2202,6 +2229,9 @@ impl<T: EventListener> Handler for Term<T> {
     fn reset_state(&mut self) {
         self.prompt_marks.clear();
         self.active_prompt_mark = None;
+        self.command_start = None;
+        self.last_command_range = None;
+        self.last_exit_code = None;
         if self.mode.contains(TermMode::ALT_SCREEN) {
             mem::swap(&mut self.grid, &mut self.inactive_grid);
         }
@@ -2772,6 +2802,18 @@ impl<T> Term<T> {
     /// The most recent prompt mark, if any.
     pub fn last_prompt_mark(&self) -> Option<Point> {
         self.prompt_marks.back().copied()
+    }
+
+    /// Exit code reported for the previously finished command
+    /// (`OSC 133;D;<code>`), if any.
+    pub fn last_exit_code(&self) -> Option<i64> {
+        self.last_exit_code
+    }
+
+    /// Grid range covering the previously finished command's input and
+    /// output (`OSC 133;C` through `OSC 133;D`), if any.
+    pub fn last_command_range(&self) -> Option<(Point, Point)> {
+        self.last_command_range
     }
 
     /// Close the currently open prompt and push it onto the marks list.
@@ -4232,6 +4274,94 @@ mod tests {
         // `F` marks the full prompt at the current position (with metadata).
         // Note: a bare LF preserves the column, so the cursor sits at (1, 5).
         processor.advance(&mut term, b"\x1b]133;F;T=full\x1b\\");
+        let marks = term.prompt_marks().copied().collect::<Vec<_>>();
+        assert_eq!(
+            marks,
+            vec![
+                Point::new(Line(0), Column(0)),
+                Point::new(Line(1), Column(5))
+            ]
+        );
+        assert_eq!(
+            term.last_prompt_mark(),
+            Some(Point::new(Line(1), Column(5)))
+        );
+
+        // Clearing the screen resets the marks.
+        processor.advance(&mut term, b"\x1b[2J");
+        assert!(term.prompt_marks().next().is_none());
+        assert_eq!(term.last_prompt_mark(), None);
+    }
+
+    #[test]
+    fn osc133_command_lifecycle_tracked() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize::new(80, 24),
+            RecordingListener(events.clone()),
+        );
+        let mut processor = crate::vte::ansi::Processor::<crate::vte::ansi::StdSyncHandler>::new();
+
+        // Prompt at (0, 0), then the user types `echo hi` and presses enter.
+        processor.advance(&mut term, b"\x1b]133;A\x07");
+        processor.advance(&mut term, b"echo hi\r\n");
+        // Command starts at (1, 0) and prints its output.
+        processor.advance(&mut term, b"\x1b]133;C\x07");
+        processor.advance(&mut term, b"hi\r\n");
+        // Command finishes with exit code 42; the cursor sits at (2, 0).
+        processor.advance(&mut term, b"\x1b]133;D;42\x07");
+
+        assert_eq!(term.last_exit_code(), Some(42));
+        let (start, end) = term.last_command_range().unwrap();
+        assert_eq!(start, Point::new(Line(1), Column(0)));
+        assert_eq!(end, Point::new(Line(2), Column(0)));
+        assert_eq!(term.bounds_to_string(start, end), "hi");
+
+        assert_eq!(events.lock().unwrap().len(), 1);
+        match &events.lock().unwrap()[0] {
+            Event::CommandFinished(code) => assert_eq!(*code, Some(42)),
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        // A finality mark without a parseable code still emits an event.
+        processor.advance(&mut term, b"\x1b]133;A\x07");
+        processor.advance(&mut term, b"\x1b]133;C\x07");
+        processor.advance(&mut term, b"\x1b]133;D\x07");
+        assert_eq!(term.last_exit_code(), None);
+        match &events.lock().unwrap()[1] {
+            Event::CommandFinished(code) => assert_eq!(*code, None),
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        // Clearing the screen invalidates the tracked range and code.
+        processor.advance(&mut term, b"\x1b[2J");
+        assert_eq!(term.last_command_range(), None);
+        assert_eq!(term.last_exit_code(), None);
+    }
+
+    #[test]
+    fn osc633_prompt_marks_recorded() {
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize::new(80, 24),
+            RecordingListener(Arc::new(Mutex::new(Vec::new()))),
+        );
+        let mut processor = crate::vte::ansi::Processor::<crate::vte::ansi::StdSyncHandler>::new();
+
+        // VS Code's variant of OSC 133: prompt starts at (0, 0) and ends after
+        // `hello\n`.
+        processor.advance(&mut term, b"\x1b]633;A\x07");
+        processor.advance(&mut term, b"hello\n");
+        processor.advance(&mut term, b"\x1b]633;B\x07");
+        assert_eq!(
+            term.prompt_marks().copied().collect::<Vec<_>>(),
+            vec![Point::new(Line(0), Column(0))]
+        );
+
+        // `F` marks the full prompt at the current position (with metadata),
+        // like its OSC 133 counterpart.
+        processor.advance(&mut term, b"\x1b]633;F;T=full\x1b\\");
         let marks = term.prompt_marks().copied().collect::<Vec<_>>();
         assert_eq!(
             marks,

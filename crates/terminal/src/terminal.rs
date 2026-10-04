@@ -67,10 +67,10 @@ use crate::alacritty::{
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
     append_text_to_term, apply_config, clear_saved_screen, content_text, display_offset,
     display_only_term_config, find_all_visible_links, find_from_terminal_point, full_content_range,
-    last_non_empty_lines, last_prompt_mark as last_term_prompt_mark, make_content, new_term,
-    open_pty, prompt_marks as term_prompt_marks, pty_options, pty_term_config, resize,
-    screen_lines, scroll_display, scroll_to_point, search_matches, selection_text,
-    set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
+    last_command_output_text, last_non_empty_lines, last_prompt_mark as last_term_prompt_mark,
+    make_content, new_term, open_pty, prompt_marks as term_prompt_marks, pty_options,
+    pty_term_config, resize, screen_lines, scroll_display, scroll_to_point, search_matches,
+    selection_text, set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
     spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
     update_selection as update_term_selection, update_selection_to_vi_cursor,
     update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
@@ -703,6 +703,9 @@ pub enum Event {
     /// The working directory reported via `OSC 7` changed. Re-read
     /// [`Terminal::working_directory`] to pick up the new value.
     CwdChanged,
+    /// The shell reported that a command finished (`OSC 133;D`), carrying its
+    /// exit code if the shell provided one.
+    LastCommandFinished(Option<i64>),
     /// A keystroke was accepted on the terminal's keyboard-input path (paste
     /// deliberately never emits this, to avoid large clipboard payloads
     /// fanning out to every terminal in a broadcast group). The panel relays
@@ -770,6 +773,7 @@ pub(crate) enum TerminalBackendEvent {
     Bell,
     Exit,
     ChildExit(ExitStatus),
+    CommandFinished(Option<i64>),
 }
 
 impl fmt::Debug for TerminalBackendEvent {
@@ -792,6 +796,7 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::Bell => f.write_str("Bell"),
             Self::Exit => f.write_str("Exit"),
             Self::ChildExit(status) => write!(f, "ChildExit({status})"),
+            Self::CommandFinished(code) => write!(f, "CommandFinished({code:?})"),
         }
     }
 }
@@ -1041,6 +1046,7 @@ impl TerminalBuilder {
             vi_mode_enabled: false,
             is_remote_terminal: false,
             osc7_cwd: None,
+            last_exit_code: None,
             last_mouse_move_time: Instant::now(),
             last_hyperlink_search_position: None,
             mouse_down_hyperlink: None,
@@ -1350,6 +1356,7 @@ impl TerminalBuilder {
                 vi_mode_enabled: false,
                 is_remote_terminal,
                 osc7_cwd: None,
+                last_exit_code: None,
                 last_mouse_move_time: Instant::now(),
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
@@ -1539,6 +1546,9 @@ pub struct Terminal {
     /// Working directory reported by the shell via `OSC 7`. Used for remote
     /// terminals where the client cannot inspect the remote shell's process.
     osc7_cwd: Option<PathBuf>,
+    /// Exit code of the most recently finished shell-integration command
+    /// (`OSC 133;D`), if the shell reported one.
+    last_exit_code: Option<i64>,
     last_mouse_move_time: Instant,
     last_hyperlink_search_position: Option<GpuiPoint<Pixels>>,
     mouse_down_hyperlink: Option<HyperlinkMatch>,
@@ -1703,6 +1713,10 @@ impl Terminal {
             }
             TerminalBackendEvent::ChildExit(exit_status) => {
                 self.register_task_finished(Some(exit_status), cx);
+            }
+            TerminalBackendEvent::CommandFinished(code) => {
+                self.last_exit_code = code;
+                cx.emit(Event::LastCommandFinished(code));
             }
         }
     }
@@ -2516,6 +2530,26 @@ impl Terminal {
     pub fn get_content(&self) -> String {
         let term = self.term.lock_unfair();
         content_text(&term)
+    }
+
+    /// Exit code of the most recently finished shell-integration command
+    /// (`OSC 133;D`), if the shell reported one.
+    pub fn last_exit_code(&self) -> Option<i64> {
+        self.last_exit_code
+    }
+
+    /// Copy the previous command's input/output (tracked via `OSC 133;C/D`
+    /// shell integration markers). No-op if the shell hasn't reported a
+    /// finished command yet.
+    pub fn copy_last_command_output(&mut self, cx: &mut Context<Self>) {
+        let text = {
+            let term = self.term.lock_unfair();
+            last_command_output_text(&term)
+        };
+        if let Some(text) = text {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            cx.notify();
+        }
     }
 
     pub fn last_n_non_empty_lines(&self, n: usize) -> Vec<String> {

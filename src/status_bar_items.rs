@@ -42,29 +42,42 @@ impl ActiveTerminalContext {
             .upgrade()
             .and_then(|panel| panel.read(cx).active_group_name());
 
-        let terminal_title = self.active_terminal.as_ref().and_then(|tv| {
+        let terminal_info = self.active_terminal.as_ref().and_then(|tv| {
             let tv = tv.upgrade()?;
             let view = tv.read(cx);
-            Some(
+            let terminal = view.terminal().read(cx);
+            Some((
                 view.custom_title()
                     .map(|title| title.to_string())
-                    .unwrap_or_else(|| view.terminal().read(cx).title(true)),
-            )
+                    .unwrap_or_else(|| terminal.title(true)),
+                terminal.last_exit_code(),
+            ))
         });
+        let (terminal_title, exit_code) = terminal_info
+            .map(|(title, code)| (Some(title), code))
+            .unwrap_or_else(|| (None, None));
+
+        // Only surface failures; `exit 0` is the norm and would just add noise.
+        let exit_suffix = match exit_code {
+            Some(0) | None => String::new(),
+            Some(code) => format!(" · exit {code}"),
+        };
 
         match (group_name, terminal_title) {
             (Some(group), Some(title)) if !title.is_empty() && title != group.as_ref() => {
-                let label = format!("{group} · {title}");
+                let label = format!("{group} · {title}{exit_suffix}");
                 self.tooltip = Some(label.clone().into());
                 self.label = Some(label.into());
             }
             (Some(group), _) => {
-                self.tooltip = Some(group.clone());
-                self.label = Some(group);
+                let label = format!("{group}{exit_suffix}");
+                self.tooltip = Some(label.clone().into());
+                self.label = Some(label.into());
             }
             (None, Some(title)) if !title.is_empty() => {
-                self.tooltip = Some(title.clone().into());
-                self.label = Some(title.into());
+                let label = format!("{title}{exit_suffix}");
+                self.tooltip = Some(label.clone().into());
+                self.label = Some(label.into());
             }
             _ => self.clear(),
         }
@@ -87,7 +100,9 @@ impl ActiveTerminalContext {
             cx.subscribe(&terminal, |this, _, event, cx| {
                 if matches!(
                     event,
-                    TerminalEvent::TitleChanged | TerminalEvent::BreadcrumbsChanged
+                    TerminalEvent::TitleChanged
+                        | TerminalEvent::BreadcrumbsChanged
+                        | TerminalEvent::LastCommandFinished(_)
                 ) {
                     this.refresh(cx);
                 }

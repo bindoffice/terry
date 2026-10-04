@@ -338,6 +338,7 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
             AlacTermEvent::Bell => Self::Bell,
             AlacTermEvent::Exit => Self::Exit,
             AlacTermEvent::ChildExit(status) => Self::ChildExit(status),
+            AlacTermEvent::CommandFinished(code) => Self::CommandFinished(code),
         }
     }
 }
@@ -907,6 +908,19 @@ pub(super) fn content_text(term: &Term<ZedListener>) -> String {
     let start = AlacPoint::new(term.topmost_line(), Column(0));
     let end = AlacPoint::new(term.bottommost_line(), term.last_column());
     term.bounds_to_string(start, end)
+}
+
+pub(super) fn last_command_output_text(term: &Term<ZedListener>) -> Option<String> {
+    let (start, end) = term.last_command_range()?;
+    // Clamp the start to the oldest retained history line; the command may
+    // have partially scrolled out of the scrollback.
+    let topmost = term.topmost_line();
+    let start = if start.line < topmost {
+        AlacPoint::new(topmost, Column(0))
+    } else {
+        start
+    };
+    Some(term.bounds_to_string(start, end))
 }
 
 pub(super) fn total_lines(term: &Term<ZedListener>) -> usize {

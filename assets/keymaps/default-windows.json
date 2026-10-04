@@ -1293,6 +1293,7 @@
       "alt-t": "terminal::RerunTask",
       "ctrl-shift-e": "terminal::OpenUrls",
       "ctrl-shift-up": "terminal::JumpToPreviousPrompt",
+      "ctrl-alt-u": "terminal::CopyLastCommandOutput",
       "ctrl-shift-5": "pane::SplitRight",
       "ctrl-shift-.": "agent::AddSelectionToThread",
     },

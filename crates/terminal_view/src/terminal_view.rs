@@ -136,6 +136,8 @@ actions!(
         RerunTask,
         /// Scrolls to the most recent shell prompt (requires OSC 133 shell integration).
         JumpToPreviousPrompt,
+        /// Copies the previous command's input/output (requires OSC 133 shell integration).
+        CopyLastCommandOutput,
         /// Toggles broadcast input for the active terminal group: keystrokes
         /// accepted by any terminal in the group are relayed to its peers.
         ToggleBroadcastInput,
@@ -944,6 +946,16 @@ impl TerminalView {
         }
     }
 
+    fn copy_last_command_output(
+        &mut self,
+        _: &CopyLastCommandOutput,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.terminal
+            .update(cx, |term, cx| term.copy_last_command_output(cx));
+    }
+
     fn toggle_vi_mode(&mut self, _: &ToggleViMode, _: &mut Window, cx: &mut Context<Self>) {
         self.terminal.update(cx, |term, _| term.toggle_vi_mode());
         cx.notify();
@@ -1407,6 +1419,11 @@ fn subscribe_for_terminal_events(
                     // anything that surfaces the directory (e.g. tab title).
                     cx.emit(ItemEvent::UpdateTab);
                 }
+                Event::LastCommandFinished(_) => {
+                    // Refresh exit-code surfaces (status bar) and the tab.
+                    cx.emit(ItemEvent::UpdateTab);
+                    cx.notify();
+                }
                 Event::UserInput(_) => {
                     // Broadcast relay is handled by the terminal list panel's
                     // subscription to this view; nothing to do here.
@@ -1557,6 +1574,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(TerminalView::scroll_to_top))
             .on_action(cx.listener(TerminalView::scroll_to_bottom))
             .on_action(cx.listener(TerminalView::jump_to_previous_prompt))
+            .on_action(cx.listener(TerminalView::copy_last_command_output))
             .on_action(cx.listener(TerminalView::toggle_vi_mode))
             .on_action(cx.listener(TerminalView::open_urls))
             .on_action(cx.listener(TerminalView::show_character_palette))

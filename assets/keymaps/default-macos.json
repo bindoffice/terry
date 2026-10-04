@@ -1341,6 +1341,7 @@
       "ctrl-shift-space": "terminal::ToggleViMode",
       "ctrl-shift-e": "terminal::OpenUrls",
       "ctrl-shift-up": "terminal::JumpToPreviousPrompt",
+      "cmd-alt-u": "terminal::CopyLastCommandOutput",
       "ctrl-alt-up": "pane::SplitUp",
       "ctrl-alt-down": "pane::SplitDown",
       "ctrl-alt-left": "pane::SplitLeft",

@@ -2207,6 +2207,7 @@ impl AgentPanel {
                 | TerminalEvent::NewNavigationTarget(_)
                 | TerminalEvent::Open(_)
                 | TerminalEvent::Notification(_, _, _)
+                | TerminalEvent::LastCommandFinished(_)
                 | TerminalEvent::UserInput(_) => {}
             },
         );
