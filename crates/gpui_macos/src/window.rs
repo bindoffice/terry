@@ -2317,6 +2317,13 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
                     drop(lock);
                 }
 
+                let marked_range_before = if is_composing {
+                    with_input_handler(this, |input_handler| input_handler.marked_text_range())
+                        .flatten()
+                } else {
+                    None
+                };
+
                 let handled: BOOL = unsafe {
                     let input_context: id = msg_send![this, inputContext];
                     msg_send![input_context, handleEvent: native_event]
@@ -2326,6 +2333,41 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
                     return handled as BOOL;
                 } else if handled == YES {
                     return YES;
+                }
+
+                // Self-heal a stale composition. A live IME always reacts to a
+                // printable key while composing: it extends the composition
+                // (setMarkedText), commits it (insertText), or hands the key back
+                // via doCommandBySelector. If none of that happened, the IME
+                // session that created the marked range is gone without notifying
+                // us — the input source was switched mid-composition, the window
+                // was hidden (quake terminal), or the IME restarted. The stale
+                // marked range keeps every later keystroke on this dead composing
+                // path, so drop it and give the (possibly new) input source one
+                // fresh chance to start its own composition with this key.
+                let is_plain_printable_key = key_down_event
+                    .keystroke
+                    .key_char
+                    .as_ref()
+                    .is_some_and(|key_char| key_char.chars().all(|c| !c.is_control()))
+                    && !key_down_event.keystroke.modifiers.control
+                    && !key_down_event.keystroke.modifiers.function
+                    && !key_down_event.keystroke.modifiers.platform;
+                if is_composing
+                    && is_plain_printable_key
+                    && with_input_handler(this, |input_handler| input_handler.marked_text_range())
+                        .flatten()
+                        == marked_range_before
+                {
+                    log::debug!("stale IME composition detected; clearing marked text");
+                    with_input_handler(this, |input_handler| input_handler.unmark_text());
+                    let retried: BOOL = unsafe {
+                        let input_context: id = msg_send![this, inputContext];
+                        msg_send![input_context, handleEvent: native_event]
+                    };
+                    if retried == YES {
+                        return YES;
+                    }
                 }
 
                 let handled = run_callback(PlatformInput::KeyDown(key_down_event));
