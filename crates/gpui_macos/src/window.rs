@@ -521,6 +521,12 @@ struct MacWindowState {
     previous_modifiers_changed_event: Option<PlatformInput>,
     keystroke_for_do_command: Option<Keystroke>,
     do_command_handled: Option<bool>,
+    /// Whether the input context delivered text (`insertText:` /
+    /// `setMarkedText:` / `unmarkText:`) while the current key event was being
+    /// handled. A live IME always reacts to a printable key it claims; a stale
+    /// input session returns YES without ever calling back and silently
+    /// swallows the key.
+    ime_produced_text: bool,
     external_files_dragged: bool,
     // Whether the next left-mouse click is also the focusing click.
     first_mouse: bool,
@@ -926,6 +932,7 @@ impl MacWindow {
                 previous_modifiers_changed_event: None,
                 keystroke_for_do_command: None,
                 do_command_handled: None,
+                ime_produced_text: false,
                 external_files_dragged: false,
                 first_mouse: false,
                 app_owns_titlebar_drag,
@@ -2314,6 +2321,7 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
                     let mut lock = window_state.as_ref().lock();
                     lock.keystroke_for_do_command = Some(key_down_event.keystroke.clone());
                     lock.do_command_handled.take();
+                    lock.ime_produced_text = false;
                     drop(lock);
                 }
 
@@ -2324,15 +2332,67 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
                     None
                 };
 
+                // Set when the input context claimed a printable key but produced
+                // no text at all, which means its session is stale. The key then
+                // has to reach the app through the normal dispatch path below.
+                let mut ime_swallowed_key = false;
+
                 let handled: BOOL = unsafe {
                     let input_context: id = msg_send![this, inputContext];
                     msg_send![input_context, handleEvent: native_event]
                 };
                 window_state.as_ref().lock().keystroke_for_do_command.take();
-                if let Some(handled) = window_state.as_ref().lock().do_command_handled.take() {
+                let (do_command_handled, ime_produced_text) = {
+                    let mut lock = window_state.as_ref().lock();
+                    (
+                        lock.do_command_handled.take(),
+                        std::mem::take(&mut lock.ime_produced_text),
+                    )
+                };
+                if let Some(handled) = do_command_handled {
                     return handled as BOOL;
                 } else if handled == YES {
-                    return YES;
+                    if !is_ime_printable_key || ime_produced_text {
+                        return YES;
+                    }
+
+                    // The IME claimed a printable key but never handed us any
+                    // text: no `insertText:`, no `setMarkedText:`, and no
+                    // `doCommandBySelector:`. A live input session always reacts
+                    // to a printable key it claims, so this session is stale
+                    // (the input source was switched, the window was hidden, or
+                    // the IME restarted) and silently swallowed the key. Drop the
+                    // dead composition and replay the key once; if even that
+                    // produces nothing, fall through to normal key dispatch so
+                    // the key is never lost.
+                    log::debug!("IME swallowed a printable key without producing text");
+                    let input_context: id = unsafe { msg_send![this, inputContext] };
+                    unsafe {
+                        let _: () = msg_send![input_context, discardMarkedText];
+                    }
+                    {
+                        let mut lock = window_state.as_ref().lock();
+                        lock.keystroke_for_do_command = Some(key_down_event.keystroke.clone());
+                        lock.do_command_handled.take();
+                        lock.ime_produced_text = false;
+                    }
+                    let retried: BOOL =
+                        unsafe { msg_send![input_context, handleEvent: native_event] };
+                    let (retried_do_command, produced_text) = {
+                        let mut lock = window_state.as_ref().lock();
+                        lock.keystroke_for_do_command.take();
+                        (
+                            lock.do_command_handled.take(),
+                            std::mem::take(&mut lock.ime_produced_text),
+                        )
+                    };
+                    if let Some(handled) = retried_do_command {
+                        return handled as BOOL;
+                    }
+                    if retried == YES && produced_text {
+                        return YES;
+                    }
+                    ime_swallowed_key = true;
                 }
 
                 // Self-heal a stale composition. A live IME always reacts to a
@@ -2370,7 +2430,25 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
                     }
                 }
 
-                let handled = run_callback(PlatformInput::KeyDown(key_down_event));
+                let handled = run_callback(PlatformInput::KeyDown(key_down_event.clone()));
+                if handled == YES {
+                    return YES;
+                }
+
+                // The input context is dead and the app didn't consume the key
+                // either. Type the character directly (what a live IME would have
+                // done) so the keystroke is never lost.
+                if ime_swallowed_key
+                    && let Some(key_char) = key_down_event.keystroke.key_char.as_ref()
+                {
+                    let inserted = with_input_handler(this, |input_handler| {
+                        input_handler.replace_text_in_range(None, key_char)
+                    });
+                    if inserted.is_some() {
+                        return YES;
+                    }
+                }
+
                 return handled;
             }
 
@@ -2925,6 +3003,17 @@ fn get_frame(this: &Object) -> NSRect {
     }
 }
 
+/// Records that the IME delivered text while handling the current key event.
+///
+/// [`handle_key_event`] clears this flag before handing a key to the input
+/// context and uses it afterwards to distinguish an IME that genuinely
+/// consumed the key from a stale input session that returns `YES` without
+/// doing anything (and would otherwise swallow the keystroke).
+fn mark_ime_text_callback(this: &Object) {
+    let window_state = unsafe { get_window_state(this) };
+    window_state.as_ref().lock().ime_produced_text = true;
+}
+
 extern "C" fn insert_text(this: &Object, _: Sel, text: id, replacement_range: NSRange) {
     unsafe {
         let is_attributed_string: BOOL =
@@ -2937,6 +3026,7 @@ extern "C" fn insert_text(this: &Object, _: Sel, text: id, replacement_range: NS
 
         let text = text.to_str();
         let replacement_range = replacement_range.to_range();
+        mark_ime_text_callback(this);
         with_input_handler(this, |input_handler| {
             input_handler.replace_text_in_range(replacement_range, text)
         });
@@ -2961,12 +3051,14 @@ extern "C" fn set_marked_text(
         let selected_range = selected_range.to_range();
         let replacement_range = replacement_range.to_range();
         let text = text.to_str();
+        mark_ime_text_callback(this);
         with_input_handler(this, |input_handler| {
             input_handler.replace_and_mark_text_in_range(replacement_range, text, selected_range)
         });
     }
 }
 extern "C" fn unmark_text(this: &Object, _: Sel) {
+    mark_ime_text_callback(this);
     with_input_handler(this, |input_handler| input_handler.unmark_text());
 }
 
