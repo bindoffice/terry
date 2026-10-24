@@ -4,8 +4,8 @@ use std::time::Duration;
 use fs::{Fs, RemoveOptions};
 use gpui::{
     Action, AnyElement, App, ClipboardItem, Context, Entity, EntityId, EventEmitter, FocusHandle,
-    Focusable, IntoElement, PromptLevel, Render, SharedString, Subscription, TaskExt, WeakEntity,
-    Window, div, px,
+    Focusable, IntoElement, PromptLevel, Render, SharedString, Subscription, Task, TaskExt,
+    WeakEntity, Window, div, px,
 };
 use ui::{
     ContextMenu, IconButton, IconName, Label, LabelSize, Tooltip, prelude::*, right_click_menu,
