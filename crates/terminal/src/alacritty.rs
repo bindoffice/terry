@@ -343,6 +343,7 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
             AlacTermEvent::Bell => Self::Bell,
             AlacTermEvent::Exit => Self::Exit,
             AlacTermEvent::ChildExit(status) => Self::ChildExit(status),
+            AlacTermEvent::CommandStarted => Self::CommandStarted,
             AlacTermEvent::CommandFinished(code) => Self::CommandFinished(code),
         }
     }

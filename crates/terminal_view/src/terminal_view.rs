@@ -1419,6 +1419,11 @@ fn subscribe_for_terminal_events(
                     // anything that surfaces the directory (e.g. tab title).
                     cx.emit(ItemEvent::UpdateTab);
                 }
+                Event::CommandStarted => {
+                    // Clear the previous exit status while the new command runs.
+                    cx.emit(ItemEvent::UpdateTab);
+                    cx.notify();
+                }
                 Event::LastCommandFinished(_) => {
                     // Refresh exit-code surfaces (status bar) and the tab.
                     cx.emit(ItemEvent::UpdateTab);

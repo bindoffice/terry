@@ -70,6 +70,9 @@ pub enum Event {
     /// Child process exited.
     ChildExit(ExitStatus),
 
+    /// A shell integration command started (`OSC 133;C`).
+    CommandStarted,
+
     /// A shell integration command finished (`OSC 133;D`), carrying its exit
     /// code if the shell reported one.
     CommandFinished(Option<i64>),
@@ -95,6 +98,7 @@ impl Debug for Event {
             Event::Bell => write!(f, "Bell"),
             Event::Exit => write!(f, "Exit"),
             Event::ChildExit(status) => write!(f, "ChildExit({status:?})"),
+            Event::CommandStarted => write!(f, "CommandStarted"),
             Event::CommandFinished(code) => write!(f, "CommandFinished({code:?})"),
         }
     }

@@ -112,6 +112,7 @@ impl ActiveTerminalContext {
                     event,
                     TerminalEvent::TitleChanged
                         | TerminalEvent::BreadcrumbsChanged
+                        | TerminalEvent::CommandStarted
                         | TerminalEvent::LastCommandFinished(_)
                 ) {
                     this.refresh(cx);

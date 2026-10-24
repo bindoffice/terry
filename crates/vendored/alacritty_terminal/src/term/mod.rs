@@ -2107,7 +2107,10 @@ impl<T: EventListener> Handler for Term<T> {
                 self.push_prompt_mark(self.grid.cursor.point);
             }
             // Command start: remember where the command's input begins.
-            'C' => self.command_start = Some(self.grid.cursor.point),
+            'C' => {
+                self.command_start = Some(self.grid.cursor.point);
+                self.event_proxy.send_event(Event::CommandStarted);
+            }
             // Command end: record the input/output range and the exit code,
             // then notify the UI ("copy last command output", status display).
             'D' => {
@@ -4318,8 +4321,12 @@ mod tests {
         assert_eq!(end, Point::new(Line(2), Column(0)));
         assert_eq!(term.bounds_to_string(start, end), "hi");
 
-        assert_eq!(events.lock().unwrap().len(), 1);
-        match &events.lock().unwrap()[0] {
+        assert_eq!(events.lock().unwrap().len(), 2);
+        assert!(matches!(
+            &events.lock().unwrap()[0],
+            Event::CommandStarted
+        ));
+        match &events.lock().unwrap()[1] {
             Event::CommandFinished(code) => assert_eq!(*code, Some(42)),
             other => panic!("unexpected event: {other:?}"),
         }
@@ -4329,7 +4336,8 @@ mod tests {
         processor.advance(&mut term, b"\x1b]133;C\x07");
         processor.advance(&mut term, b"\x1b]133;D\x07");
         assert_eq!(term.last_exit_code(), None);
-        match &events.lock().unwrap()[1] {
+        assert_eq!(events.lock().unwrap().len(), 4);
+        match &events.lock().unwrap()[3] {
             Event::CommandFinished(code) => assert_eq!(*code, None),
             other => panic!("unexpected event: {other:?}"),
         }

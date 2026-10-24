@@ -703,6 +703,9 @@ pub enum Event {
     /// The working directory reported via `OSC 7` changed. Re-read
     /// [`Terminal::working_directory`] to pick up the new value.
     CwdChanged,
+    /// The shell reported that a command started (`OSC 133;C`). The previous
+    /// command's exit status no longer applies to the running command.
+    CommandStarted,
     /// The shell reported that a command finished (`OSC 133;D`), carrying its
     /// exit code if the shell provided one.
     LastCommandFinished(Option<i64>),
@@ -773,6 +776,7 @@ pub(crate) enum TerminalBackendEvent {
     Bell,
     Exit,
     ChildExit(ExitStatus),
+    CommandStarted,
     CommandFinished(Option<i64>),
 }
 
@@ -796,6 +800,7 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::Bell => f.write_str("Bell"),
             Self::Exit => f.write_str("Exit"),
             Self::ChildExit(status) => write!(f, "ChildExit({status})"),
+            Self::CommandStarted => f.write_str("CommandStarted"),
             Self::CommandFinished(code) => write!(f, "CommandFinished({code:?})"),
         }
     }
@@ -1715,6 +1720,10 @@ impl Terminal {
             }
             TerminalBackendEvent::ChildExit(exit_status) => {
                 self.register_task_finished(Some(exit_status), cx);
+            }
+            TerminalBackendEvent::CommandStarted => {
+                self.last_exit_code = None;
+                cx.emit(Event::CommandStarted);
             }
             TerminalBackendEvent::CommandFinished(code) => {
                 self.last_exit_code = code;
