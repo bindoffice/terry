@@ -1157,3 +1157,18 @@ theme_settings = { workspace = true, features = ["test-support"] }
 title_bar = { workspace = true, features = ["test-support"] }
 util = { workspace = true, features = ["test-support"] }
 workspace = { workspace = true, features = ["test-support"] }
+
+[patch."https://github.com/zed-industries/scap"]
+zed-scap = { path = "/tmp/scap-partial" }
+
+[patch."https://github.com/zed-industries/tree-sitter-markdown"]
+tree-sitter-md = { path = "/tmp/ts-md" }
+
+[patch."https://github.com/zed-industries/tree-sitter-typescript"]
+tree-sitter-typescript = "0.23.2"
+
+[patch."https://github.com/zed-industries/tree-sitter-yaml"]
+tree-sitter-yaml = "0.6.1"
+
+[patch."https://github.com/tree-sitter/tree-sitter-cpp"]
+tree-sitter-cpp = "0.23.4"
