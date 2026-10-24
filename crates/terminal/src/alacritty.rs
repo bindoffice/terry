@@ -134,14 +134,19 @@ pub(super) fn display_only_term_config(
 pub(super) fn pty_term_config(
     scrolling_history: usize,
     cursor_shape: SettingsCursorShape,
+    clipboard_read: bool,
 ) -> AlacrittyTermConfig {
     Config {
         scrolling_history,
         default_cursor_style: alacritty_cursor_style(cursor_shape),
-        // Allow applications to both write to and read from the clipboard
-        // (OSC 52), matching kitty's default behavior.
-        osc52: Osc52::CopyPaste,
-        // Support the kitty keyboard protocol (CSI u).
+        // OSC 52 writes are always allowed. Reading the clipboard is opt-in:
+        // a remote shell could otherwise exfiltrate local clipboard contents.
+        osc52: if clipboard_read {
+            Osc52::CopyPaste
+        } else {
+            Osc52::OnlyCopy
+        },
+        // Support the kitty keyboard protocol (CSI > u).
         kitty_keyboard: true,
         ..Config::default()
     }

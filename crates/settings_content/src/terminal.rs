@@ -209,6 +209,12 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: true
     pub shell_integration: Option<bool>,
+    /// Whether terminal applications may read the system clipboard through
+    /// OSC 52. Writing to the clipboard is always allowed, but reading lets a
+    /// remote shell exfiltrate whatever you last copied, so it is opt-in.
+    ///
+    /// Default: false
+    pub clipboard_read: Option<bool>,
 }
 
 /// Shell configuration to open the terminal with.

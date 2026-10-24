@@ -45,6 +45,12 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("new_group", "New Group");
             m.insert("delete_group", "Delete Group");
             m.insert("broadcast_input", "Broadcast Input");
+            m.insert("broadcast_input_confirm_title", "Enable broadcast input?");
+            m.insert(
+                "broadcast_input_confirm_detail",
+                "Keystrokes will be sent to every terminal in this group. Make sure no destructive command is running.",
+            );
+            m.insert("enable", "Enable");
             m.insert("files", "Files");
             m.insert("up_one_level", "Up One Level");
             m.insert("refresh", "Refresh");
@@ -89,6 +95,17 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert(
                 "vim_mode_description",
                 "Use Vim keybindings in the editor.",
+            );
+            m.insert("terminal", "Terminal");
+            m.insert("shell_integration", "Shell Integration");
+            m.insert(
+                "shell_integration_description",
+                "Automatically load prompt marks (OSC 133) and working-directory tracking (OSC 7) for zsh and fish.",
+            );
+            m.insert("clipboard_read", "Allow Clipboard Read (OSC 52)");
+            m.insert(
+                "clipboard_read_description",
+                "Let terminal applications read the system clipboard. A remote shell could use this to read what you copied.",
             );
                         m.insert("menu_file", "File");
             m.insert("open", "Open…");
@@ -252,6 +269,12 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("new_group", "新建分组");
             m.insert("delete_group", "删除分组");
             m.insert("broadcast_input", "广播输入");
+            m.insert("broadcast_input_confirm_title", "开启广播输入？");
+            m.insert(
+                "broadcast_input_confirm_detail",
+                "按键会发送到该分组内的所有终端。请确认没有正在执行的危险命令。",
+            );
+            m.insert("enable", "开启");
             m.insert("files", "文件");
             m.insert("up_one_level", "上级目录");
             m.insert("refresh", "刷新");
@@ -285,6 +308,17 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("open_keymap_file", "打开快捷键配置文件");
             m.insert("vim_mode", "Vim 模式");
             m.insert("vim_mode_description", "在编辑器中使用 Vim 键绑定。");
+            m.insert("terminal", "终端");
+            m.insert("shell_integration", "Shell 集成");
+            m.insert(
+                "shell_integration_description",
+                "为 zsh 和 fish 自动加载提示符标记（OSC 133）与工作目录跟踪（OSC 7）。",
+            );
+            m.insert("clipboard_read", "允许读取剪贴板（OSC 52）");
+            m.insert(
+                "clipboard_read_description",
+                "允许终端程序读取系统剪贴板。远程 shell 可能借此读取你复制的内容。",
+            );
             m.insert("menu_file", "文件");
             m.insert("open", "打开…");
             m.insert("open_recent", "打开最近项目…");

@@ -6,6 +6,7 @@ use gpui::{
 };
 use settings::{Settings, SettingsStore, UiLanguage, update_settings_file};
 use strum::VariantArray;
+use terminal::terminal_settings::TerminalSettings;
 use theme::ActiveTheme;
 use ui::{
     Button, ButtonSize, ButtonStyle, Color, ContextMenu, DropdownMenu, IconPosition, Label,
@@ -45,15 +46,17 @@ enum SettingsTab {
     General,
     Appearance,
     Editor,
+    Terminal,
     Keyboard,
     Agent,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::General,
         Self::Appearance,
         Self::Editor,
+        Self::Terminal,
         Self::Keyboard,
         Self::Agent,
     ];
@@ -63,6 +66,7 @@ impl SettingsTab {
             Self::General => i18n::t("settings_tab_general"),
             Self::Appearance => i18n::t("appearance"),
             Self::Editor => i18n::t("settings_tab_editor"),
+            Self::Terminal => i18n::t("terminal"),
             Self::Keyboard => i18n::t("settings_tab_keyboard"),
             Self::Agent => i18n::t("agent"),
         }
@@ -150,6 +154,12 @@ impl SettingsWindow {
                 ToggleButtonSimple::new(SettingsTab::Editor.label(), cx.listener(|this, _, _, cx| {
                     this.select_tab(SettingsTab::Editor, cx);
                 })),
+                ToggleButtonSimple::new(
+                    SettingsTab::Terminal.label(),
+                    cx.listener(|this, _, _, cx| {
+                        this.select_tab(SettingsTab::Terminal, cx);
+                    }),
+                ),
                 ToggleButtonSimple::new(
                     SettingsTab::Keyboard.label(),
                     cx.listener(|this, _, _, cx| {
@@ -281,6 +291,58 @@ impl SettingsWindow {
         )
     }
 
+    fn render_terminal_tab(&self, cx: &App) -> AnyElement {
+        let terminal = TerminalSettings::get_global(cx);
+        let shell_integration = terminal.shell_integration;
+        let clipboard_read = terminal.clipboard_read;
+
+        v_flex()
+            .gap_4()
+            .child(settings_section(
+                i18n::t("shell_integration"),
+                i18n::t("shell_integration_description"),
+                Switch::new(
+                    "shell-integration",
+                    if shell_integration {
+                        ToggleState::Selected
+                    } else {
+                        ToggleState::Unselected
+                    },
+                )
+                .label(i18n::t("shell_integration"))
+                .on_click(|state, _window, cx| {
+                    let enabled = *state == ToggleState::Selected;
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content.terminal.get_or_insert_default().shell_integration = Some(enabled);
+                    });
+                })
+                .into_any_element(),
+            ))
+            .child(settings_section(
+                i18n::t("clipboard_read"),
+                i18n::t("clipboard_read_description"),
+                Switch::new(
+                    "clipboard-read",
+                    if clipboard_read {
+                        ToggleState::Selected
+                    } else {
+                        ToggleState::Unselected
+                    },
+                )
+                .label(i18n::t("clipboard_read"))
+                .on_click(|state, _window, cx| {
+                    let enabled = *state == ToggleState::Selected;
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content.terminal.get_or_insert_default().clipboard_read = Some(enabled);
+                    });
+                })
+                .into_any_element(),
+            ))
+            .into_any_element()
+    }
+
     fn render_keyboard_tab(&self, _cx: &App) -> AnyElement {
         settings_section(
             i18n::t("custom_shortcuts"),
@@ -317,6 +379,7 @@ impl SettingsWindow {
             SettingsTab::General => self.render_general_tab(cx),
             SettingsTab::Appearance => self.render_appearance_tab(cx),
             SettingsTab::Editor => self.render_editor_tab(cx),
+            SettingsTab::Terminal => self.render_terminal_tab(cx),
             SettingsTab::Keyboard => self.render_keyboard_tab(cx),
             SettingsTab::Agent => self.render_agent_tab(cx),
         }

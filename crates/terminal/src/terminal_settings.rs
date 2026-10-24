@@ -59,6 +59,10 @@ pub struct TerminalSettings {
     /// supported shells (zsh, fish) so prompt marks (OSC 133) and working
     /// directory reports (OSC 7) work out of the box.
     pub shell_integration: bool,
+    /// Allow applications to read the clipboard via OSC 52. Writing is always
+    /// allowed; reading is opt-in because remote shells can use it to read
+    /// local clipboard contents.
+    pub clipboard_read: bool,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -151,6 +155,7 @@ impl settings::Settings for TerminalSettings {
             image_display: user_content.image_display.unwrap_or_default(),
             max_image_memory: user_content.max_image_memory.unwrap_or(512 * 1024 * 1024),
             shell_integration: user_content.shell_integration.unwrap_or(true),
+            clipboard_read: user_content.clipboard_read.unwrap_or(false),
         }
     }
 }

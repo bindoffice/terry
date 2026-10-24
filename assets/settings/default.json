@@ -2119,6 +2119,11 @@
     // tracking (OSC 7) work without touching your dotfiles.
     // Default: true
     "shell_integration": true,
+    // Allow terminal applications to read the system clipboard via OSC 52.
+    // Writing is always allowed; reading is opt-in because remote shells can
+    // use it to read local clipboard contents.
+    // Default: false
+    "clipboard_read": false,
   },
   "code_actions_on_format": {},
   // Settings related to running tasks.

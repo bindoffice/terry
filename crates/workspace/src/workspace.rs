@@ -3365,6 +3365,25 @@ impl Workspace {
                 }
             }
 
+            // Ask items that own running processes (terminals) before the
+            // workspace is torn down. Cancelling aborts the close, matching
+            // the way a cancelled save cancels it.
+            let items_to_confirm = this.read_with(cx, |workspace, cx| {
+                workspace
+                    .panes
+                    .iter()
+                    .flat_map(|pane| pane.read(cx).items().map(|item| item.boxed_clone()))
+                    .collect::<Vec<_>>()
+            })?;
+            for item in items_to_confirm {
+                let confirmed = cx
+                    .update(|window, cx| item.confirm_close(window, cx))?
+                    .await;
+                if !confirmed {
+                    return anyhow::Ok(false);
+                }
+            }
+
             // Hot-exit silently writes dirty buffers to the DB; only allow it
             // if the workspace will be reachable again, either via session
             // restore or by reopening its folder paths. Otherwise prompt, so

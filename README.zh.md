@@ -23,7 +23,7 @@
 - **Quake 终端** — 全局热键 `ctrl+\`` 随处呼出的下拉终端，贴顶显示（macOS）
 - **命令行** — 从脚本和编辑器驱动运行中的 Terry：`terry new-tab --cwd ~/src`、`terry send-text "cargo test"`
 - **终端图像** — 支持 kitty graphics 协议与 sixel，终端内直接显示图片，GIF 可动画（`chafa` / `viu` / `icat` 可用）
-- **终端协议** — kitty 键盘协议（CSI u）与 OSC 52 剪贴板读写
+- **终端协议** — kitty 键盘协议（CSI u）与 OSC 52 剪贴板写入（读取需显式开启 `"terminal": { "clipboard_read": true }`）
 - **Shell 集成** — zsh / fish 开箱即用：提示符标记（OSC 133 / VS Code OSC 633）与工作目录跟踪（OSC 7）；`ctrl-shift-up` 跳转到上一条命令的提示符
 - **链接跳转** — `Ctrl+Shift+E` 列出当前可见的所有链接（URL / 路径 / OSC 8），键盘选择打开
 - **AI Agent** — 侧边栏与大模型对话，通过可配置的 Profile 调用命令与工具

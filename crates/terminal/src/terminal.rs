@@ -1120,6 +1120,8 @@ impl TerminalBuilder {
         let inject_shell_integration = task.is_none()
             && !no_pty
             && TerminalSettings::try_get(cx).is_some_and(|settings| settings.shell_integration);
+        let clipboard_read =
+            TerminalSettings::try_get(cx).is_some_and(|settings| settings.clipboard_read);
         let fut = async move {
             // Remove SHLVL so the spawned shell initializes it to 1, matching
             // the behavior of standalone terminal emulators like iTerm2/Kitty/Alacritty.
@@ -1230,7 +1232,7 @@ impl TerminalBuilder {
                     .unwrap_or(DEFAULT_SCROLL_HISTORY_LINES)
                     .min(MAX_SCROLL_HISTORY_LINES)
             };
-            let config = pty_term_config(scrolling_history, cursor_shape);
+            let config = pty_term_config(scrolling_history, cursor_shape, clipboard_read);
 
             //Spawn a task so the Alacritty EventLoop (or the subprocess reader) can communicate with us
             //TODO: Remove with a bounded sender which can be dispatched on &self
@@ -2479,10 +2481,11 @@ impl Terminal {
 
     ///Paste text into the terminal
     pub fn paste(&mut self, text: &str) {
+        let sanitized = sanitize_paste(text);
         let paste_text = if self.last_content.mode.contains(Modes::BRACKETED_PASTE) {
-            format!("{}{}{}", "\x1b[200~", text.replace('\x1b', ""), "\x1b[201~")
+            format!("\x1b[200~{sanitized}\x1b[201~")
         } else {
-            text.replace("\r\n", "\r").replace('\n', "\r")
+            sanitized.replace("\r\n", "\r").replace('\n', "\r")
         };
 
         self.input(paste_text.into_bytes());
@@ -3485,6 +3488,17 @@ impl Drop for Terminal {
 
 impl EventEmitter<Event> for Terminal {}
 
+/// Strip control characters from pasted text so clipboard contents cannot
+/// inject terminal escape sequences (OSC 52, title changes, cursor movement)
+/// or keyboard shortcuts such as Ctrl-C. Tabs and line breaks are preserved.
+fn sanitize_paste(text: &str) -> String {
+    text.chars()
+        .filter(|character| {
+            !character.is_control() || matches!(character, '\n' | '\r' | '\t')
+        })
+        .collect()
+}
+
 fn normalize_path_command_name(command: &str) -> Option<String> {
     const MAX_COMMAND_NAME_LENGTH: usize = 64;
 
@@ -3796,6 +3810,15 @@ mod tests {
                 "{command} should require close confirmation"
             );
         }
+    }
+
+    #[test]
+    fn paste_strips_control_characters_but_keeps_line_breaks() {
+        assert_eq!(
+            sanitize_paste("a\x1b]52;c;cGF5bG9hZA==\x07b\x03"),
+            "a]52;c;cGF5bG9hZA==b"
+        );
+        assert_eq!(sanitize_paste("one\ntwo\tthree\r\n"), "one\ntwo\tthree\r\n");
     }
 
     #[test]

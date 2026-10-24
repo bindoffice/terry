@@ -605,10 +605,10 @@ pub fn init(cx: &mut App) {
                 let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
                     return;
                 };
-                window.defer(cx, move |_, cx| {
+                window.defer(cx, move |window, cx| {
                     panel.update(cx, |panel, cx| {
                         let group_id = panel.active_group_id;
-                        panel.toggle_broadcast_input(group_id, cx);
+                        panel.toggle_broadcast_input(group_id, window, cx);
                     });
                 });
             },
@@ -1323,7 +1323,8 @@ impl TerminalListPanel {
                 has_unread: false,
                 saved_layout: layout,
                 layout_mode: p_group.layout_mode.unwrap_or_default(),
-                broadcast_input: p_group.broadcast_input,
+                // Never resume broadcasting silently after a restart.
+                broadcast_input: false,
                 session_terminal_count: Some(term_count),
                 restore_slots: vec![None; term_count],
             });
@@ -1804,9 +1805,9 @@ impl TerminalListPanel {
             menu = menu.separator().entry(
                 format!("{checked}{}", i18n::t("broadcast_input")),
                 None,
-                move |_, cx| {
+                move |window, cx| {
                     panel.update(cx, |this, cx| {
-                        this.toggle_broadcast_input(group_id, cx);
+                        this.toggle_broadcast_input(group_id, window, cx);
                     });
                 },
             );
@@ -2607,15 +2608,54 @@ impl TerminalListPanel {
         cx.notify();
     }
 
-    /// Toggles a group's broadcast-input mode. When on, keystrokes accepted by
-    /// any terminal in the group are relayed to every other terminal in it.
-    fn toggle_broadcast_input(&mut self, group_id: GroupId, cx: &mut Context<Self>) {
-        let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) else {
+    /// Toggles a group's broadcast-input mode. Enabling asks for confirmation
+    /// because every keystroke is then sent to all terminals in the group.
+    fn toggle_broadcast_input(
+        &mut self,
+        group_id: GroupId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(broadcast_input) = self
+            .groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .map(|group| group.broadcast_input)
+        else {
             return;
         };
-        group.broadcast_input = !group.broadcast_input;
-        self.save_session(cx);
-        cx.notify();
+
+        if broadcast_input {
+            if let Some(group) = self.groups.iter_mut().find(|group| group.id == group_id) {
+                group.broadcast_input = false;
+            }
+            self.save_session(cx);
+            cx.notify();
+            return;
+        }
+
+        let title = i18n::t("broadcast_input_confirm_title");
+        let detail = i18n::t("broadcast_input_confirm_detail");
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &title,
+            Some(&detail),
+            &[i18n::t_str("enable"), i18n::t_str("cancel")],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(0) {
+                this.update(cx, |this, cx| {
+                    if let Some(group) = this.groups.iter_mut().find(|group| group.id == group_id) {
+                        group.broadcast_input = true;
+                        this.save_session(cx);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// Relays `keystroke` from `sender` to every other terminal in its group

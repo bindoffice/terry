@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use fs::{Fs, RemoveOptions};
 use gpui::{
@@ -53,7 +54,7 @@ enum FileViewMode {
     Finder,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct FileEntry {
     path: PathBuf,
     name: SharedString,
@@ -113,6 +114,8 @@ pub struct FileListPanel {
     followed_cwd: Option<PathBuf>,
     /// Live cwd changes for the terminal currently being followed.
     _terminal_subscription: Option<Subscription>,
+    /// Background poll that notices files created/removed outside Terry.
+    _refresh_task: Task<()>,
     _workspace_subscription: Subscription,
 }
 
@@ -126,7 +129,7 @@ impl FileListPanel {
             cx.notify();
         });
         let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-        let panel = Self {
+        let mut panel = Self {
             workspace: workspace.downgrade(),
             focus_handle,
             position: DockPosition::Left,
@@ -140,10 +143,44 @@ impl FileListPanel {
             followed_item: None,
             followed_cwd: None,
             _terminal_subscription: None,
+            _refresh_task: Task::ready(()),
             _workspace_subscription,
         };
         panel.schedule_size_load(cx);
+        panel.start_auto_refresh(cx);
         panel
+    }
+
+    /// Poll the current directory in the background so changes made by shells
+    /// or other apps show up without requiring a manual refresh. A native
+    /// watcher would duplicate the worktree watcher and react to every file in
+    /// a large project, so a cheap 2s poll is used here instead.
+    fn start_auto_refresh(&mut self, cx: &mut Context<Self>) {
+        self._refresh_task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(2))
+                    .await;
+                let Ok(dir) = this.update(cx, |this, _cx| this.current_dir.clone()) else {
+                    break;
+                };
+                let dir_for_read = dir.clone();
+                let entries = cx
+                    .background_spawn(async move {
+                        FileListPanel::collect_entries(&dir_for_read)
+                    })
+                    .await;
+                let Ok(()) = this.update(cx, |this, cx| {
+                    if this.current_dir == dir && this.entries != entries {
+                        this.entries = entries;
+                        this.entries_dir = Some(dir);
+                        cx.notify();
+                    }
+                }) else {
+                    break;
+                };
+            }
+        });
     }
 
     fn schedule_size_load(&self, cx: &mut Context<Self>) {

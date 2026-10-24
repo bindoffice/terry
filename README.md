@@ -23,7 +23,7 @@ Group shells, browse files, and keep an AI agent beside you — built for people
 - **Quake terminal** — A drop-down terminal summoned anywhere with `ctrl+\`` , docked to the top of the screen (macOS)
 - **CLI** — Drive a running Terry from scripts and editors: `terry new-tab --cwd ~/src` and `terry send-text "cargo test"`
 - **Terminal images** — kitty graphics protocol and sixel support for rendering images directly in the terminal, with animated GIFs (`chafa` / `viu` / `icat` work)
-- **Terminal protocols** — kitty keyboard protocol (CSI u) and OSC 52 clipboard read/write
+- **Terminal protocols** — kitty keyboard protocol (CSI u) and OSC 52 clipboard write (clipboard *read* is opt-in via `"terminal": { "clipboard_read": true }`)
 - **Shell integration** — automatic for zsh and fish: prompt marks (OSC 133 / VS Code OSC 633) and working-directory tracking (OSC 7); `ctrl-shift-up` jumps to the previous prompt
 - **Link jump** — `Ctrl+Shift+E` lists all currently visible links (URL / path / OSC 8); pick one with the keyboard to open it
 - **AI Agent** — Chat with LLMs in a side panel; run commands and tools with configurable profiles

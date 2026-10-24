@@ -219,19 +219,19 @@ pub fn check_for_updates(cx: &mut App) {
     let cx = cx.to_async();
     cx.spawn(async move |cx| {
         let result = fetch_latest_release(http_client.as_ref()).await;
-        let (status, should_download) = match result {
+        let status = match result {
             Ok(release) if release.version > current_version => {
-                (UpdateStatus::UpdateAvailable(release), true)
+                // Only advertise the update. Downloading and replacing the app
+                // is destructive, so it is deferred to the user clicking the
+                // status-bar button.
+                UpdateStatus::UpdateAvailable(release)
             }
-            Ok(_) => (UpdateStatus::UpToDate, false),
-            Err(error) => (UpdateStatus::Failed(format!("{error:#}")), false),
+            Ok(_) => UpdateStatus::UpToDate,
+            Err(error) => UpdateStatus::Failed(format!("{error:#}")),
         };
         let transient = matches!(status, UpdateStatus::UpToDate | UpdateStatus::Failed(_));
         cx.update(|cx| {
             cx.update_global::<UpdateCheckerState, _>(|state, _| state.set_status(status));
-            if should_download {
-                download_update(cx);
-            }
         });
 
         // Transient statuses (up-to-date / failed) disappear after a while.
