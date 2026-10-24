@@ -709,10 +709,10 @@ pub struct TerminalListPanel {
     /// the shell was actually started in (after defaulting), and refreshed from
     /// live process info so session writes don't permanently store `null`.
     terminal_spawn_cwds: HashMap<EntityId, Option<PathBuf>>,
-    /// Keeps cwd-tracking subscriptions alive for each terminal.
-    _terminal_cwd_subscriptions: Vec<Subscription>,
-    /// Keeps broadcast-relay subscriptions alive for each terminal view.
-    _broadcast_subscriptions: Vec<Subscription>,
+    /// Subscription objects for each terminal view keyed by its entity id.
+    /// Removed when the terminal is closed so long sessions do not accumulate
+    /// dead subscriptions.
+    _terminal_subscriptions: HashMap<EntityId, Vec<Subscription>>,
     /// Debounced disk write after a terminal cwd change.
     cwd_persist_task: Task<()>,
     /// After session restore, ignore process-info reports of `$HOME` that would
@@ -813,8 +813,7 @@ impl TerminalListPanel {
             session_file_stem,
             owns_workspace_session,
             terminal_spawn_cwds: HashMap::default(),
-            _terminal_cwd_subscriptions: Vec::new(),
-            _broadcast_subscriptions: Vec::new(),
+            _terminal_subscriptions: HashMap::default(),
             cwd_persist_task: Task::ready(()),
             restore_cwd_guard_until: None,
             parked_agent_sessions: Vec::new(),
@@ -1955,6 +1954,9 @@ impl TerminalListPanel {
         let removed = self.groups.remove(index);
         let terminal_ids: std::collections::HashSet<EntityId> =
             removed.terminals.iter().map(|tv| tv.entity_id()).collect();
+        for id in &terminal_ids {
+            self._terminal_subscriptions.remove(id);
+        }
 
         // Pull closed items out of panes before dropping Entities.
         self.switching = true;
@@ -2481,7 +2483,8 @@ impl TerminalListPanel {
         // Keep remembered cwd in sync when the shell cds (TitleChanged), and
         // persist to disk so restart does not fall back to $HOME.
         let terminal = terminal_view.read(cx).terminal().clone();
-        self._terminal_cwd_subscriptions.push(cx.subscribe(
+        let mut subscriptions = Vec::new();
+        subscriptions.push(cx.subscribe(
             &terminal,
             move |this, term, event, cx| {
                 if matches!(event, terminal::Event::LastCommandFinished(_)) {
@@ -2563,7 +2566,7 @@ impl TerminalListPanel {
         // its group peers while the group's broadcast-input flag is on. The
         // sender already consumed the keystroke on its own input path, so it
         // is never echoed back through here.
-        self._broadcast_subscriptions.push(cx.subscribe(
+        subscriptions.push(cx.subscribe(
             &terminal_view,
             move |this, sender, event: &terminal::Event, cx| {
                 let terminal::Event::UserInput(keystroke) = event else {
@@ -2572,6 +2575,7 @@ impl TerminalListPanel {
                 this.forward_broadcast(&sender, keystroke, cx);
             },
         ));
+        self._terminal_subscriptions.insert(view_id, subscriptions);
 
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
             if let Some(index) = restore_index {
@@ -3795,6 +3799,7 @@ impl TerminalListPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self._terminal_subscriptions.remove(&item_id);
         let mut changed = false;
         let mut emptied_group: Option<GroupId> = None;
         let mut removed_from_active_auto = false;
