@@ -61,6 +61,18 @@ terry send-text "cargo test"       # 向活动终端粘贴文本
 
 已有实例在运行时再次启动 `terry` 会聚焦现有窗口，而不是启动第二个进程。
 
+### 自动化 API
+
+同一个带 bearer token 的本地服务器也接受 JSON 请求：
+
+- `/api/list_sessions` — 分组、终端 id、标题、cwd 与当前命令
+- `/api/focus_session` — 通过 `session_id` 聚焦终端
+- `/api/send_keys` — 发送文本或 `ctrl-c` 等按键
+- `/api/read_screen` — 以纯文本读取终端内容
+- `/api/get_context` — 活动终端的标题、cwd、分组与命令
+- `/api/notify` — 发送系统通知
+- `/api/new_tab`、`/api/send_text`、`/api/focus`
+
 ## 命令输出
 
 Shell 集成生效后，Terry 会跟踪每条命令的边界与退出码（`OSC 133;C/D`）：

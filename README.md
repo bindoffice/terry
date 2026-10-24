@@ -61,6 +61,18 @@ terry send-text "cargo test"       # paste text into the active terminal
 
 Starting `terry` while an instance is already running focuses that instance instead of launching a second process.
 
+### Automation API
+
+The same bearer-protected loopback server also accepts JSON requests:
+
+- `/api/list_sessions` — groups, terminal ids, titles, cwd, and running commands
+- `/api/focus_session` — focus a terminal by `session_id`
+- `/api/send_keys` — send text or a keystroke such as `ctrl-c`
+- `/api/read_screen` — read a terminal's content as plain text
+- `/api/get_context` — active terminal title, cwd, group, and command
+- `/api/notify` — post a desktop notification
+- `/api/new_tab`, `/api/send_text`, `/api/focus`
+
 ## Command output
 
 With shell integration active, Terry tracks each command's boundaries and exit code (`OSC 133;C/D`):
