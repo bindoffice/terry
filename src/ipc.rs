@@ -4,8 +4,8 @@
 //! - the GUI-side consumer that turns IPC requests into workspace actions.
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::path::PathBuf;
+use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -109,6 +109,100 @@ fn read_ipc_info() -> Option<IpcInfo> {
     serde_json::from_str(&raw).ok()
 }
 
+// -------------------------------------------------------------------------
+// Single instance
+// -------------------------------------------------------------------------
+
+fn instance_lock_path() -> PathBuf {
+    paths::data_dir().join("instance.lock")
+}
+
+fn try_create_instance_lock(path: &Path) -> bool {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => {
+            let _ = write!(file, "{}", std::process::id());
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Ensure only one GUI process owns the session files. If another instance is
+/// already running, ask it to focus and return `false` so the caller exits.
+///
+/// Returns `true` when this process may start the GUI. A crashed process can
+/// leave a stale lock; in that case the lock is reclaimed after the focus
+/// attempts fail. If the lock cannot be created at all (permissions), startup
+/// proceeds anyway rather than blocking the user.
+pub fn acquire_single_instance() -> bool {
+    let path = instance_lock_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    if try_create_instance_lock(&path) {
+        return true;
+    }
+
+    // Give an instance that is still booting time to publish ipc.json, then
+    // ask it to focus. Retry a few times before treating the lock as stale.
+    let mut ipc_attempts = 0;
+    for _ in 0..20 {
+        if focus_existing_instance() {
+            return false;
+        }
+        if read_ipc_info().is_some() {
+            ipc_attempts += 1;
+            if ipc_attempts >= 3 {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    let _ = std::fs::remove_file(&path);
+    if try_create_instance_lock(&path) {
+        return true;
+    }
+    // Another process won the race after the stale lock was removed.
+    !focus_existing_instance()
+}
+
+/// Remove the lock file on a clean quit, but only if this process still owns
+/// it (it may have been reclaimed after a crash).
+pub fn release_instance_lock() {
+    let path = instance_lock_path();
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if contents.trim().parse::<u32>().ok() == Some(std::process::id()) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn focus_existing_instance() -> bool {
+    let Some(info) = read_ipc_info() else {
+        return false;
+    };
+    matches!(
+        http_post_with_timeout(
+            info.port,
+            "/api/focus",
+            &info.token,
+            "{}",
+            Duration::from_millis(500),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        ),
+        Ok((status, body))
+            if (200..300).contains(&status) && body.contains("\"action\":\"focus\"")
+    )
+}
+
 /// Sends `body` to the running Terry instance and maps the outcome to an exit
 /// code: 0 on 2xx, 1 on transport/app failure (2 is reserved for usage
 /// errors). The reply body is echoed to stdout.
@@ -136,9 +230,30 @@ fn post_command(path: &str, body: &str) -> i32 {
 /// Minimal HTTP/1.1 client over a raw TcpStream — keeps the GUI binary free
 /// of an extra HTTP client dependency for scripting purposes.
 fn http_post(port: u16, path: &str, token: &str, body: &str) -> std::io::Result<(u16, String)> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
-    stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
+    http_post_with_timeout(
+        port,
+        path,
+        token,
+        body,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        Duration::from_secs(15),
+    )
+}
+
+fn http_post_with_timeout(
+    port: u16,
+    path: &str,
+    token: &str,
+    body: &str,
+    connect_timeout: Duration,
+    write_timeout: Duration,
+    read_timeout: Duration,
+) -> std::io::Result<(u16, String)> {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&address, connect_timeout)?;
+    stream.set_write_timeout(Some(write_timeout)).ok();
+    stream.set_read_timeout(Some(read_timeout)).ok();
 
     let request = format!(
         "POST {path} HTTP/1.1\r\n\
@@ -187,6 +302,7 @@ pub fn init(mut request_rx: futures::channel::mpsc::UnboundedReceiver<IpcRequest
             let outcome = match kind {
                 IpcRequestKind::NewTab { cwd } => new_tab(cx, cwd).await,
                 IpcRequestKind::SendText { text } => send_text(cx, &text).await,
+                IpcRequestKind::Focus => focus(cx).await,
             };
             reply.send(outcome).ok();
         }
@@ -237,13 +353,21 @@ async fn new_tab(cx: &mut AsyncApp, cwd: Option<PathBuf>) -> Result<Value, Strin
     };
     let cwd_display = cwd.as_ref().map(|path| path.display().to_string());
 
-    window
+    // Capture the current terminal count/active id, then wait for the spawn to
+    // finish. Returning before the shell exists made `new-tab && send-text`
+    // race against the old active terminal, and spawn failures looked like
+    // successes.
+    let before = window
         .update(cx, move |multi_workspace, window, cx| {
             let workspace = multi_workspace.workspace().clone();
             workspace.update(cx, move |workspace, cx| {
                 let panel = workspace
                     .panel::<TerminalListPanel>(cx)
                     .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let before = {
+                    let panel = panel.read(cx);
+                    (panel.terminal_count(), panel.focused_terminal_id(cx))
+                };
                 panel.update(cx, |panel, cx| {
                     // open_shell_at no-ops when the active group is missing, so
                     // make sure one exists first (create_default_group is
@@ -255,10 +379,59 @@ async fn new_tab(cx: &mut AsyncApp, cwd: Option<PathBuf>) -> Result<Value, Strin
                     }
                 });
                 window.activate_window();
-                Ok(json!({ "status": "ok", "action": "new_tab", "cwd": cwd_display }))
+                Ok(before)
             })
         })
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())??;
+
+    let mut observed_new = false;
+    let mut new_terminal_id = None;
+    let mut polls_after_spawn = 0;
+    for _ in 0..50 {
+        cx.background_executor()
+            .timer(Duration::from_millis(100))
+            .await;
+        let state = window
+            .update(cx, |multi_workspace, _window, cx| {
+                let workspace = multi_workspace.workspace().clone();
+                workspace.update(cx, |workspace, cx| {
+                    workspace.panel::<TerminalListPanel>(cx).map(|panel| {
+                        let panel = panel.read(cx);
+                        (panel.terminal_count(), panel.focused_terminal_id(cx))
+                    })
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        let Some((count, focused)) = state else {
+            continue;
+        };
+        if count > before.0 {
+            if focused != before.1 && focused.is_some() {
+                new_terminal_id = focused;
+                observed_new = true;
+                break;
+            }
+            if !observed_new {
+                observed_new = true;
+                new_terminal_id = focused;
+            }
+            polls_after_spawn += 1;
+            if polls_after_spawn >= 5 {
+                break;
+            }
+        }
+    }
+
+    if !observed_new {
+        return Err("timed out waiting for the new terminal to open".to_string());
+    }
+
+    Ok(json!({
+        "status": "ok",
+        "action": "new_tab",
+        "cwd": cwd_display,
+        "terminal_id": new_terminal_id.map(|id| id.as_u64()),
+    }))
 }
 
 async fn send_text(cx: &mut AsyncApp, text: &str) -> Result<Value, String> {
@@ -285,6 +458,26 @@ async fn send_text(cx: &mut AsyncApp, text: &str) -> Result<Value, String> {
             })
         })
         .map_err(|error| error.to_string())?
+}
+
+/// Brings the running workspace window to the front, opening one if Terry is
+/// alive but currently has no workspace window (macOS keeps the app running
+/// after the last window closes).
+async fn focus(cx: &mut AsyncApp) -> Result<Value, String> {
+    match workspace_window(cx).await? {
+        Some(window) => {
+            window
+                .update(cx, |_multi_workspace, window, _cx| {
+                    window.activate_window();
+                })
+                .map_err(|error| error.to_string())?;
+            cx.update(|cx| cx.activate(true));
+        }
+        None => {
+            open_workspace_window(cx).await?;
+        }
+    }
+    Ok(json!({ "status": "ok", "action": "focus" }))
 }
 
 /// Opens a fresh workspace window (used when Terry is running with zero

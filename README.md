@@ -59,6 +59,8 @@ terry send-text "cargo test"       # paste text into the active terminal
 
 `send-text` pastes without executing — it never appends a newline.
 
+Starting `terry` while an instance is already running focuses that instance instead of launching a second process.
+
 ## Command output
 
 With shell integration active, Terry tracks each command's boundaries and exit code (`OSC 133;C/D`):

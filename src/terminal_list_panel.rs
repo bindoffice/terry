@@ -1581,11 +1581,16 @@ impl TerminalListPanel {
 
     /// The terminal actually active in the center pane, ignoring the
     /// last-terminal fallback in [`Self::active_terminal_view`].
-    fn focused_terminal_id(&self, cx: &App) -> Option<EntityId> {
+    pub fn focused_terminal_id(&self, cx: &App) -> Option<EntityId> {
         self.display_pane_entity(cx)
             .and_then(|pane| pane.read(cx).active_item())
             .and_then(|item| item.act_as::<TerminalView>(cx))
             .map(|view| view.entity_id())
+    }
+
+    /// Number of terminals across every group, including inactive groups.
+    pub fn terminal_count(&self) -> usize {
+        self.groups.iter().map(|group| group.terminals.len()).sum()
     }
 
     /// Cached cwd of the currently focused terminal. Reads the value the

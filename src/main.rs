@@ -69,6 +69,12 @@ fn main() {
     zlog::init();
     zlog::init_output_stderr();
 
+    // If another Terry instance is already running, focus it and exit. This
+    // also keeps two processes from writing the same session files.
+    if !ipc::acquire_single_instance() {
+        return;
+    }
+
     // Restore last login-shell PATH/etc. immediately so session terminals do
     // not wait on a fresh multi-second `zsh -lic` capture before first paint.
     util::shell_env::apply_cached_environment();
@@ -148,6 +154,14 @@ fn main() {
     });
 
     app.run(move |cx| {
+        // Release the single-instance lock once the app has finished quitting
+        // normally. A crash leaves the lock behind; the next launch detects
+        // that its IPC endpoint is gone and reclaims it.
+        cx.on_app_quit(|_cx| async {
+            ipc::release_instance_lock();
+        })
+        .detach();
+
         cx.set_global(app_db);
         // Identity + dock icon before any windows open.
         cx.set_app_identity("dev.terry.Terry", "Terry");

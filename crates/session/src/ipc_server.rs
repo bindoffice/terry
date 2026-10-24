@@ -17,6 +17,9 @@ pub enum IpcRequestKind {
     NewTab { cwd: Option<PathBuf> },
     /// Paste text into the active terminal.
     SendText { text: String },
+    /// Bring the running workspace window to the front (used when a second
+    /// `terry` launch finds an existing instance).
+    Focus,
 }
 
 /// A request forwarded from the HTTP server to the GUI event loop. The HTTP
@@ -53,6 +56,7 @@ pub fn start_ipc_server(
     let protected = Router::new()
         .route("/api/new_tab", post(new_tab))
         .route("/api/send_text", post(send_text))
+        .route("/api/focus", post(focus))
         .route("/api/list_sessions", post(list_sessions))
         .route("/api/focus_session", post(focus_session))
         .route("/api/send_keys", post(send_keys))
@@ -137,6 +141,10 @@ async fn send_text(State(state): State<IpcState>, body: String) -> Response {
         }
         None => bad_request("missing \"text\" field".to_string()),
     }
+}
+
+async fn focus(State(state): State<IpcState>) -> Response {
+    dispatch(state, IpcRequestKind::Focus).await
 }
 
 /// An empty body is treated as `{}` so `curl -X POST` without data works.
