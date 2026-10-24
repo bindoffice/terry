@@ -43,10 +43,11 @@ use util::ResultExt;
 use uuid::Uuid;
 use vim_mode_setting::VimModeSetting;
 use workspace::{
-    AppState, OpenOptions, Pane, RestoreOnStartupBehavior, SerializedWorkspaceLocation,
-    SessionWorkspace, SplitDown, SplitLeft, SplitMode, SplitRight, SplitUp, ToggleZoom, Workspace,
-    WorkspaceDb, WorkspaceSettings, WorkspaceStore, last_opened_workspace_location,
-    last_session_workspace_locations, read_serialized_multi_workspaces, restore_multiworkspace,
+    AppState, MultiWorkspace, OpenOptions, Pane, RestoreOnStartupBehavior,
+    SerializedWorkspaceLocation, SessionWorkspace, SplitDown, SplitLeft, SplitMode, SplitRight,
+    SplitUp, ToggleZoom, Workspace, WorkspaceDb, WorkspaceSettings, WorkspaceStore,
+    last_opened_workspace_location, last_session_workspace_locations,
+    read_serialized_multi_workspaces, restore_multiworkspace,
 };
 
 fn main() {
@@ -89,13 +90,11 @@ fn main() {
         "token": ipc_token
     });
 
-    let ipc_path = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("terry/ipc.json");
+    let ipc_path = paths::data_dir().join("ipc.json");
     if let Some(parent) = ipc_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(&ipc_path, serde_json::to_string(&ipc_info).unwrap()).ok();
+    write_ipc_info(&ipc_path, &ipc_info);
 
     let app_db = db::AppDatabase::new();
     let session_id = Uuid::new_v4().to_string();
@@ -123,11 +122,18 @@ fn main() {
         paths::keymap_file().clone(),
     );
 
-    // Dock icon click with no windows (e.g. after closing the last window
-    // via the traffic-light button) must reopen a workspace.
+    // Dock icon click with no workspace windows (e.g. after closing the last
+    // window via the traffic-light button) must reopen a workspace. The quake
+    // terminal is a separate, usually hidden window: it must not make this
+    // look like a workspace is already open, or clicking the dock icon would
+    // do nothing after the main window was closed.
     // `on_reopen` is an Application API — register before `run`.
     app.on_reopen(|cx| {
-        if !cx.windows().is_empty() {
+        let has_workspace = cx
+            .windows()
+            .iter()
+            .any(|window| window.downcast::<MultiWorkspace>().is_some());
+        if has_workspace {
             return;
         }
         let Some(app_state) = AppState::try_global(cx) else {
@@ -776,5 +782,36 @@ fn load_default_keymap(cx: &mut gpui::App) {
             key_binding.set_meta(KeybindSource::Vim.meta());
         }
         cx.bind_keys(vim_key_bindings);
+    }
+}
+
+/// Persist the IPC connection info. The bearer token in this file grants
+/// control over the running app, so restrict it to the current user.
+fn write_ipc_info(path: &std::path::Path, info: &serde_json::Value) {
+    let Ok(json) = serde_json::to_vec(info) else {
+        return;
+    };
+
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+        {
+            let _ = file.write_all(&json);
+            let _ = file.flush();
+        }
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::write(path, json);
     }
 }

@@ -20,6 +20,7 @@ const TERRY_INTEGRATION_DIR_ENV: &str = "TERRY_INTEGRATION_DIR";
 const TERRY_USER_ZDOTDIR_ENV: &str = "TERRY_USER_ZDOTDIR";
 
 const ZSHENV_SHIM: &str = include_str!("../../../assets/shell-integration/zsh/.zshenv");
+const ZPROFILE_SHIM: &str = include_str!("../../../assets/shell-integration/zsh/.zprofile");
 const ZSHRC_SHIM: &str = include_str!("../../../assets/shell-integration/zsh/.zshrc");
 const TERRY_ZSH: &str = include_str!("../../../assets/shell-integration/zsh/terry.zsh");
 const FISH_INTEGRATION: &str =
@@ -28,6 +29,7 @@ const TERRY_BASH: &str = include_str!("../../../assets/shell-integration/bash/te
 
 const SCRIPTS: &[(&str, &str)] = &[
     ("zsh/.zshenv", ZSHENV_SHIM),
+    ("zsh/.zprofile", ZPROFILE_SHIM),
     ("zsh/.zshrc", ZSHRC_SHIM),
     ("zsh/terry.zsh", TERRY_ZSH),
     (
@@ -281,5 +283,36 @@ mod tests {
         // Writing again is a no-op and must not fail.
         write_scripts(&dir).unwrap();
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn zsh_profiles_are_chained_for_login_shells() {
+        // macOS starts Terry's shell through `login`, so zsh reads
+        // $ZDOTDIR/.zprofile. Missing the shim silently skips the user's
+        // ~/.zprofile in every terminal.
+        assert!(
+            SCRIPTS
+                .iter()
+                .any(|(relative_path, _)| *relative_path == "zsh/.zprofile"),
+            "the zsh .zprofile shim must be written to the integration dir",
+        );
+        assert!(ZPROFILE_SHIM.contains("/.zprofile"));
+        assert!(ZSHENV_SHIM.contains("TERRY_USER_ZDOTDIR"));
+    }
+
+    #[test]
+    fn osc7_uses_a_file_uri() {
+        // The terminal only accepts `file://` URIs for OSC 7; a bare $PWD is
+        // ignored as malformed, which used to break remote cwd tracking.
+        for (name, contents) in [
+            ("zsh", TERRY_ZSH),
+            ("fish", FISH_INTEGRATION),
+            ("bash", TERRY_BASH),
+        ] {
+            assert!(
+                contents.contains(r"\e]7;file://"),
+                "{name} integration must emit a file:// OSC 7 URI",
+            );
+        }
     }
 }

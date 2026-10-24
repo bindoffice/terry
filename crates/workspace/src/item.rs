@@ -216,6 +216,12 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
     fn deactivated(&mut self, _window: &mut Window, _: &mut Context<Self>) {}
     fn discarded(&self, _project: Entity<Project>, _window: &mut Window, _cx: &mut Context<Self>) {}
     fn on_removed(&self, _cx: &mut Context<Self>) {}
+    /// Called before the item is closed. Returning `false` cancels the close.
+    /// Items that own a running process (e.g. terminals) use this to ask the
+    /// user for confirmation.
+    fn confirm_close(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> Task<bool> {
+        Task::ready(true)
+    }
     fn workspace_deactivated(&mut self, _window: &mut Window, _: &mut Context<Self>) {}
     fn pane_changed(&mut self, _new_pane_id: EntityId, _cx: &mut Context<Self>) {}
     fn navigate(
@@ -527,6 +533,7 @@ pub trait ItemHandle: 'static + Send {
     );
     fn deactivated(&self, window: &mut Window, cx: &mut App);
     fn on_removed(&self, cx: &mut App);
+    fn confirm_close(&self, window: &mut Window, cx: &mut App) -> Task<bool>;
     fn workspace_deactivated(&self, window: &mut Window, cx: &mut App);
     fn navigate(&self, data: Arc<dyn Any + Send>, window: &mut Window, cx: &mut App) -> bool;
     fn item_id(&self) -> EntityId;
@@ -1024,6 +1031,10 @@ impl<T: Item> ItemHandle for Entity<T> {
 
     fn on_removed(&self, cx: &mut App) {
         self.update(cx, |item, cx| item.on_removed(cx));
+    }
+
+    fn confirm_close(&self, window: &mut Window, cx: &mut App) -> Task<bool> {
+        self.update(cx, |item, cx| item.confirm_close(window, cx))
     }
 
     fn workspace_deactivated(&self, window: &mut Window, cx: &mut App) {

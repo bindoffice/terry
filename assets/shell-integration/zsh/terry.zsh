@@ -15,7 +15,9 @@ TERRY_SHELL_INTEGRATION_LOADED=1
 __terry_precmd() {
   local __terry_exit_code=$?
   printf '\e]133;D;%s\e\\' "$__terry_exit_code"
-  printf '\e]7;%s\e\\' "$PWD"
+  # OSC 7 wants a file:// URI; encode a literal '%' so the terminal's
+  # percent-decoder does not mis-read it.
+  printf '\e]7;file://%s%s\e\\' "${HOST:-localhost}" "${PWD//\%/%25}"
   printf '\e]133;A\e\\'
   printf '\e]133;B\e\\'
 }

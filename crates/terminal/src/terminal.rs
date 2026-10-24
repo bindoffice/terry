@@ -3028,6 +3028,33 @@ impl Terminal {
         }
     }
 
+    /// Whether closing the terminal would terminate a foreground command or a
+    /// running task. An idle shell counts as "not running": closing it is the
+    /// normal way to close a tab.
+    pub fn is_running_command(&self) -> bool {
+        if self.has_exited() {
+            return false;
+        }
+        if self
+            .task
+            .as_ref()
+            .is_some_and(|task| task.status == TaskStatus::Running)
+        {
+            return true;
+        }
+        let TerminalType::Pty { info, .. } = &self.terminal_type else {
+            return false;
+        };
+        let current = info.current.read();
+        let Some(process) = current.as_ref() else {
+            return false;
+        };
+        let Some(command) = foreground_process_command_from_argv(&process.argv) else {
+            return false;
+        };
+        !is_shell_command_name(&command)
+    }
+
     /// Returns the working directory of the process that's connected to the PTY.
     /// That means it returns the working directory of the local shell or program
     /// that's running inside the terminal.
@@ -3510,6 +3537,34 @@ fn foreground_process_command_from_argv(argv: &[String]) -> Option<String> {
         .or(command)
 }
 
+/// Command names that mean "the shell is sitting at a prompt". Everything else
+/// (ssh, vim, less, a coding agent, …) is treated as a running command worth
+/// confirming before the tab is closed.
+fn is_shell_command_name(command: &str) -> bool {
+    matches!(
+        command,
+        "sh" | "bash"
+            | "zsh"
+            | "fish"
+            | "dash"
+            | "ksh"
+            | "mksh"
+            | "tcsh"
+            | "csh"
+            | "nu"
+            | "nushell"
+            | "pwsh"
+            | "powershell"
+            | "cmd"
+            | "xonsh"
+            | "elvish"
+            | "rc"
+            | "login"
+            | "conhost"
+            | "openconsole"
+    )
+}
+
 fn normalize_script_command_name(argument: &str) -> Option<String> {
     let path = Path::new(argument);
     let file_stem = path
@@ -3728,6 +3783,19 @@ mod tests {
         assert_eq!(normalize_path_command_name("zsh"), Some("zsh".into()));
         assert_eq!(normalize_path_command_name("-zsh"), None);
         assert_eq!(normalize_path_command_name("pwsh.exe"), Some("pwsh".into()));
+    }
+
+    #[test]
+    fn shell_command_names_are_not_running_commands() {
+        for shell in ["zsh", "bash", "fish", "pwsh", "cmd", "login", "conhost"] {
+            assert!(is_shell_command_name(shell), "{shell} is an idle shell");
+        }
+        for command in ["vim", "ssh", "less", "claude", "cargo"] {
+            assert!(
+                !is_shell_command_name(command),
+                "{command} should require close confirmation"
+            );
+        }
     }
 
     #[test]

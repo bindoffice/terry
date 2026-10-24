@@ -12,8 +12,8 @@ use editor::{
 use gpui::{
     Action, AnyElement, App, ClipboardEntry, DismissEvent, Entity, EventEmitter, ExternalPaths,
     FocusHandle, Focusable, Font, KeyContext, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
-    Pixels, Point as GpuiPoint, Render, ScrollWheelEvent, Styled, Subscription, SystemNotification,
-    Task, TaskExt, WeakEntity, actions, anchored, deferred, div,
+    Pixels, Point as GpuiPoint, PromptLevel, Render, ScrollWheelEvent, Styled, Subscription,
+    SystemNotification, Task, TaskExt, WeakEntity, actions, anchored, deferred, div,
 };
 use menu;
 use persistence::TerminalDb;
@@ -1996,6 +1996,38 @@ impl Item for TerminalView {
             Some(task) => task.status == TaskStatus::Running,
             None => self.has_bell(),
         }
+    }
+
+    fn confirm_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<bool> {
+        let command = {
+            let terminal = self.terminal.read(cx);
+            if !terminal.is_running_command() {
+                return Task::ready(true);
+            }
+            terminal
+                .foreground_process_command_name()
+                .or_else(|| {
+                    terminal
+                        .task()
+                        .map(|task| task.spawned_task.label.clone())
+                })
+                .unwrap_or_else(|| terminal.title(false))
+        };
+
+        let title = i18n::t("close_running_terminal");
+        let detail = format!(
+            "{}\n\n{}",
+            i18n::t("close_running_terminal_detail"),
+            command
+        );
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &title,
+            Some(&detail),
+            &[i18n::t_str("close"), i18n::t_str("cancel")],
+            cx,
+        );
+        cx.spawn(async move |_this, _cx| answer.await == Ok(0))
     }
 
     fn directory_for_new_file(&self, cx: &App) -> Option<PathBuf> {

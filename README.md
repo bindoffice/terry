@@ -44,13 +44,13 @@ Terry parses **OSC 133** prompt marks (including the VS Code **OSC 633** variant
   [ -n "$TERRY_INTEGRATION_DIR" ] && . "$TERRY_INTEGRATION_DIR/bash/terry.bash"
   ```
 
-  (Requires bash ≥ 4, the default on Linux.)
+  (Works with the system bash on macOS; if [bash-preexec](https://github.com/rcaloras/bash-preexec) is loaded, Terry hooks into it automatically.)
 
 Remote shells launched as `ssh` are skipped, and task runs never get integration.
 
 ## CLI
 
-A running Terry instance listens on a local IPC socket (token-protected; connection info in `terry/ipc.json` under your data directory). The `terry` binary doubles as the client:
+A running Terry instance listens on a local IPC socket (token-protected; connection info in `ipc.json` under your data directory). The `terry` binary doubles as the client:
 
 ```sh
 terry new-tab --cwd ~/src          # open a new tab in the active window

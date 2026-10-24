@@ -44,13 +44,13 @@ Terry 解析 **OSC 133** 提示符标记（含 VS Code 的 **OSC 633** 变体）
   [ -n "$TERRY_INTEGRATION_DIR" ] && . "$TERRY_INTEGRATION_DIR/bash/terry.bash"
   ```
 
-  （需要 bash ≥ 4，Linux 发行版默认满足。）
+  （macOS 自带的 bash 即可；如果已加载 [bash-preexec](https://github.com/rcaloras/bash-preexec)，Terry 会自动接入它的钩子。）
 
 以 `ssh` 启动的远程 shell 会被跳过；任务运行（task）不会注入集成。
 
 ## 命令行
 
-运行中的 Terry 实例会监听本地 IPC 套接字（带 token 保护，连接信息在数据目录的 `terry/ipc.json`）。`terry` 可执行文件同时充当客户端：
+运行中的 Terry 实例会监听本地 IPC 套接字（带 token 保护，连接信息在数据目录的 `ipc.json`）。`terry` 可执行文件同时充当客户端：
 
 ```sh
 terry new-tab --cwd ~/src          # 在当前窗口新建标签页

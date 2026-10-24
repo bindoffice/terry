@@ -30,6 +30,16 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("select_link_to_open", "Select a link to open…");
             m.insert("no_links_found", "No links found");
             m.insert("close", "Close");
+            m.insert("close_running_terminal", "Close running terminal?");
+            m.insert(
+                "close_running_terminal_detail",
+                "A process is still running in this terminal. Closing it will terminate that process.",
+            );
+            m.insert("delete_group_running", "Delete group with running processes?");
+            m.insert(
+                "delete_group_running_detail",
+                "One or more terminals in this group are still running a process. Deleting the group will terminate them.",
+            );
             m.insert("terminal_list", "Terminal List");
             m.insert("group", "Group");
             m.insert("new_group", "New Group");
@@ -227,6 +237,16 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("select_link_to_open", "选择要打开的链接…");
             m.insert("no_links_found", "未找到链接");
             m.insert("close", "关闭");
+            m.insert("close_running_terminal", "关闭正在运行的终端？");
+            m.insert(
+                "close_running_terminal_detail",
+                "该终端中仍有进程在运行。关闭终端会终止该进程。",
+            );
+            m.insert("delete_group_running", "删除包含运行中进程的分组？");
+            m.insert(
+                "delete_group_running_detail",
+                "该分组中至少有一个终端仍在运行进程。删除分组会终止这些进程。",
+            );
             m.insert("terminal_list", "终端列表");
             m.insert("group", "分组");
             m.insert("new_group", "新建分组");

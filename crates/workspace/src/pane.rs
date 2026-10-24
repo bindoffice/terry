@@ -2000,6 +2000,20 @@ impl Pane {
             return Task::ready(Ok(()));
         };
         cx.spawn_in(window, async move |pane, cx| {
+            // Give items that own external resources (e.g. terminals with a
+            // running command) a chance to cancel the close. Default items
+            // return `true` immediately, so editors are unaffected.
+            for item_to_close in &items_to_close {
+                let confirmed = pane
+                    .update_in(cx, |_, window, cx| {
+                        item_to_close.confirm_close(window, cx)
+                    })?
+                    .await;
+                if !confirmed {
+                    return Ok(());
+                }
+            }
+
             let dirty_items = workspace.update(cx, |workspace, cx| {
                 items_to_close
                     .iter()

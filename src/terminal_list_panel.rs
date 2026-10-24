@@ -3,7 +3,7 @@ use futures::FutureExt;
 use gpui::Keystroke;
 use gpui::{
     Action, AnyElement, App, Axis, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    Render, SharedString, Subscription, Task, TaskExt, WeakEntity, Window, div, px,
+    PromptLevel, Render, SharedString, Subscription, Task, TaskExt, WeakEntity, Window, div, px,
 };
 use project::Project;
 use terminal_view::TerminalView;
@@ -18,7 +18,7 @@ use zed_actions::terminal_list_panel::{NewGroup, NewTerminal, ToggleFocus};
 
 use serde::{Deserialize, Serialize};
 use settings::Settings;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -1010,14 +1010,26 @@ impl TerminalListPanel {
                 this.session_active_revealed = true;
             }
 
+            // Capture whether every persisted terminal actually spawned before
+            // dropping the expected counts. A timeout/failed spawn reaches
+            // this path with incomplete groups; rewriting the session then
+            // would delete the terminals that failed to restore.
+            let all_restored = this.session_spawns_complete();
             this.clear_session_terminal_counts();
             this.session_restoring = false;
             this.session_active_revealed = false;
             this.restore_cwd_guard_until = Some(std::time::Instant::now() + Duration::from_secs(8));
 
-            // First safe disk write after restore — preserve restored spawn
-            // paths (prefer_remembered) so flaky early $HOME reads cannot wipe them.
-            this.write_session_file(cx, true);
+            if all_restored {
+                // First safe disk write after restore — preserve restored spawn
+                // paths (prefer_remembered) so flaky early $HOME reads cannot
+                // wipe them.
+                this.write_session_file(cx, true);
+            } else {
+                log::warn!(
+                    "terminal session restore did not finish; leaving the saved session file untouched"
+                );
+            }
             cx.notify();
         });
     }
@@ -1160,7 +1172,17 @@ impl TerminalListPanel {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Ok(json) = serde_json::to_string_pretty(&session) {
-            let _ = std::fs::write(path, json);
+            // Write via a temp file so a crash mid-write cannot truncate the
+            // session file to invalid JSON (which would silently lose the
+            // whole workspace on the next launch).
+            let temp_path = path.with_extension("json.tmp");
+            if std::fs::write(&temp_path, json).is_ok()
+                && std::fs::rename(&temp_path, &path).is_err()
+            {
+                // Windows does not replace an existing file on rename.
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::rename(&temp_path, &path);
+            }
         }
     }
 
@@ -1320,6 +1342,34 @@ impl TerminalListPanel {
         self.session_active_revealed = false;
         self.session_reveal_scheduled = false;
         self.session_finish_scheduled = false;
+
+        // A spawn that fails (missing shell, PTY exhaustion, ...) never fills
+        // its restore slot, so `session_spawns_complete` would stay false
+        // forever and the panel would remain in "restoring" mode: no session
+        // writes, no worktree auto-spawn, and the active group may never be
+        // revealed. Recover after a bounded wait.
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs(10))
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                if !this.session_restoring {
+                    return;
+                }
+                let restored: usize = this.groups.iter().map(|g| g.terminals.len()).sum();
+                let expected: usize = this
+                    .groups
+                    .iter()
+                    .filter_map(|g| g.session_terminal_count)
+                    .sum();
+                log::warn!(
+                    "terminal session restore timed out ({restored}/{expected} terminals); continuing"
+                );
+                this.finish_session_restore(window, cx);
+            })
+            .ok();
+        })
+        .detach();
 
         for (id, index, p_term) in to_spawn {
             self.spawn_terminal(
@@ -1823,7 +1873,53 @@ impl TerminalListPanel {
 
     /// Deletes a group and drops all of its `TerminalView` entities so PTYs
     /// are killed. The last remaining group cannot be deleted.
+    /// Deletes a group, asking once when any of its terminals is still running
+    /// a command.
     fn delete_group(&mut self, group_id: GroupId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.groups.len() <= 1 {
+            return;
+        }
+        let has_running_command = self
+            .groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .is_some_and(|group| {
+                group
+                    .terminals
+                    .iter()
+                    .any(|view| view.read(cx).terminal().read(cx).is_running_command())
+            });
+        if !has_running_command {
+            self.delete_group_now(group_id, window, cx);
+            return;
+        }
+
+        let title = i18n::t("delete_group_running");
+        let detail = i18n::t("delete_group_running_detail");
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &title,
+            Some(&detail),
+            &[i18n::t_str("delete"), i18n::t_str("cancel")],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(0) {
+                this.update_in(cx, |this, window, cx| {
+                    this.delete_group_now(group_id, window, cx)
+                })?;
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn delete_group_now(
+        &mut self,
+        group_id: GroupId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.groups.len() <= 1 {
             return;
         }
@@ -1874,9 +1970,43 @@ impl TerminalListPanel {
         cx.notify();
     }
 
-    /// Closes a terminal: remove from every pane, then drop the model Entity
-    /// so the PTY is killed even if the terminal belonged to an inactive group.
+    /// Closes a terminal, asking for confirmation when a command is still
+    /// running in it. The actual removal is deferred until the prompt (which
+    /// may be `Task::ready` for idle shells) resolves.
     fn close_terminal(
+        &mut self,
+        terminal_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.terminal_view_by_id(terminal_id) else {
+            self.close_terminal_now(terminal_id, window, cx);
+            return;
+        };
+        let confirmed = view.confirm_close(window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if confirmed.await {
+                this.update_in(cx, |this, window, cx| {
+                    this.close_terminal_now(terminal_id, window, cx)
+                })?;
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn terminal_view_by_id(&self, terminal_id: EntityId) -> Option<Entity<TerminalView>> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.terminals.iter())
+            .find(|view| view.entity_id() == terminal_id)
+            .cloned()
+    }
+
+    /// Closes a terminal without asking for confirmation: remove it from every
+    /// pane, then drop the model Entity so the PTY is killed even if the
+    /// terminal belonged to an inactive group.
+    fn close_terminal_now(
         &mut self,
         terminal_id: EntityId,
         window: &mut Window,
@@ -2282,21 +2412,31 @@ impl TerminalListPanel {
 
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
             if let Some(index) = restore_index {
-                if group.restore_slots.len() <= index {
-                    group.restore_slots.resize_with(index + 1, || None);
-                }
-                group.restore_slots[index] = Some(terminal_view);
-                if group
-                    .session_terminal_count
-                    .is_some_and(|expected| expected > 0)
-                    && group.restore_slots.len() >= group.session_terminal_count.unwrap_or(0)
-                    && group.restore_slots.iter().all(|slot| slot.is_some())
-                {
-                    group.terminals = group
-                        .restore_slots
-                        .drain(..)
-                        .map(|slot| slot.expect("checked all some"))
-                        .collect();
+                if group.session_terminal_count.is_some() {
+                    if group.restore_slots.len() <= index {
+                        group.restore_slots.resize_with(index + 1, || None);
+                    }
+                    group.restore_slots[index] = Some(terminal_view);
+                    if group
+                        .session_terminal_count
+                        .is_some_and(|expected| expected > 0)
+                        && group.restore_slots.len() >= group.session_terminal_count.unwrap_or(0)
+                        && group.restore_slots.iter().all(|slot| slot.is_some())
+                    {
+                        group.terminals = group
+                            .restore_slots
+                            .drain(..)
+                            .map(|slot| slot.expect("checked all some"))
+                            .collect();
+                    }
+                } else {
+                    // `restore_index` is set for terminals whose spawn started
+                    // during session restore, but the restore may have timed
+                    // out before they finished. `session_terminal_count` is
+                    // cleared at that point, so fall back to appending;
+                    // otherwise the view would sit in `restore_slots` forever
+                    // and never be shown.
+                    group.terminals.push(terminal_view);
                 }
             } else {
                 group.terminals.push(terminal_view);
@@ -2525,21 +2665,21 @@ impl TerminalListPanel {
             }
         });
 
-        // Close empty leftover panes. `cx.emit(Remove)` is deferred, so we must
-        // not loop waiting for panes().len() to shrink (that busy-waits forever).
-        // Workspace::remove_pane treats "already gone" as a no-op if several
-        // Removes collapse the same split tree.
+        // Close leftover panes that are truly empty. `cx.emit(Remove)` is
+        // deferred, so we must not loop waiting for panes().len() to shrink
+        // (that busy-waits forever). Workspace::remove_pane treats "already
+        // gone" as a no-op if several Removes collapse the same split tree.
+        //
+        // Only close panes with no items at all: a pane that lost its
+        // terminals but still holds editors (or other non-terminal tabs) must
+        // survive. Closing it would drop those items and lose unsaved work.
         let panes = workspace.read(cx).panes().to_vec();
         if panes.len() > 1 {
             for pane in panes {
                 if pane.entity_id() == target_pane.entity_id() {
                     continue;
                 }
-                let has_terminal = pane
-                    .read(cx)
-                    .items()
-                    .any(|item| item.act_as::<TerminalView>(cx).is_some());
-                if !has_terminal {
+                if pane.read(cx).items_len() == 0 {
                     pane.update(cx, |_, cx| {
                         cx.emit(workspace::pane::Event::Remove {
                             focus_on_pane: Some(target_pane.clone()),
@@ -2827,14 +2967,27 @@ impl TerminalListPanel {
 
         if terminals.is_empty() {
             self.clear_center_terminals(window, cx);
+            // Keep every pane that still holds non-terminal items (editors,
+            // previews, …). Only collapse panes that are now completely empty;
+            // dropping a pane with items would discard unsaved work.
             let panes = workspace.read(cx).panes().to_vec();
-            if let Some(keep) = panes.first().cloned() {
-                for pane in panes.into_iter().skip(1) {
-                    pane.update(cx, |_, cx| {
-                        cx.emit(workspace::pane::Event::Remove {
-                            focus_on_pane: Some(keep.clone()),
+            let keep = panes
+                .iter()
+                .find(|pane| pane.read(cx).items_len() > 0)
+                .cloned()
+                .or_else(|| panes.first().cloned());
+            if let Some(keep) = keep {
+                for pane in panes {
+                    if pane.entity_id() == keep.entity_id() {
+                        continue;
+                    }
+                    if pane.read(cx).items_len() == 0 {
+                        pane.update(cx, |_, cx| {
+                            cx.emit(workspace::pane::Event::Remove {
+                                focus_on_pane: Some(keep.clone()),
+                            });
                         });
-                    });
+                    }
                 }
             }
             return;
@@ -2884,12 +3037,50 @@ impl TerminalListPanel {
             Some(group) => group.terminals.clone(),
             None => return,
         };
+
+        // Collect non-terminal items (editors, previews, …) before the center
+        // tree is replaced. `replace_center_layout` drops the old panes and
+        // everything they hold, so without this a group switch or a tiling
+        // reflow would silently close editors and discard unsaved changes.
+        // Strong item handles keep the underlying views alive; they are
+        // re-attached to the new focus pane below.
+        let preserved_items: Vec<Box<dyn ItemHandle>> = {
+            let mut seen = HashSet::default();
+            let mut items = Vec::new();
+            let panes = workspace.read(cx).panes().to_vec();
+            for pane in panes {
+                for item in pane.read(cx).items() {
+                    if item.act_as::<TerminalView>(cx).is_some() {
+                        continue;
+                    }
+                    if seen.insert(item.item_id()) {
+                        items.push(item.boxed_clone());
+                    }
+                }
+            }
+            items
+        };
+
         self.clear_center_terminals(window, cx);
         workspace.update(cx, |workspace, cx| {
             let (root, focus_pane, _) =
                 Self::build_layout_member(workspace, layout, &terminals, window, cx);
             let new_center = PaneGroup::with_root(root);
             workspace.replace_center_layout(new_center, focus_pane.clone(), window, cx);
+
+            // Re-home preserved editor-like tabs as regular tabs in the new
+            // focus pane. Their previous split geometry cannot be restored
+            // (the group layout only describes terminals), but keeping the
+            // items alive and visible avoids losing unsaved buffers.
+            if !preserved_items.is_empty() {
+                focus_pane.update(cx, |pane, cx| {
+                    let mut index = pane.items_len();
+                    for item in preserved_items {
+                        pane.add_item(item, false, false, Some(index), window, cx);
+                        index += 1;
+                    }
+                });
+            }
         });
         self.display_pane = workspace.read(cx).active_pane().downgrade();
     }
@@ -4355,6 +4546,91 @@ mod tests {
         assert_eq!(panel.read_with(cx, |p, _| p.active_group_id), GroupId(0));
         assert_eq!(panel.read_with(cx, |p, _| p.groups[0].terminals.len()), 2);
         assert_eq!(panel.read_with(cx, |p, _| p.groups[1].terminals.len()), 1);
+    }
+
+    /// Regression test: replacing the center layout (a group switch or an
+    /// auto-tiling re-flow) must re-home non-terminal items instead of
+    /// dropping them. Dropping an editor here silently loses unsaved buffers.
+    #[gpui::test]
+    async fn layout_rebuild_preserves_editor_tabs(cx: &mut TestAppContext) {
+        // Isolate session-file writes from the real data directory.
+        ensure_test_data_dir();
+
+        let params = cx.update(AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let project = Project::test(params.fs.clone(), [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+
+        let panel = window_handle
+            .update(cx, |mw, window, cx| {
+                let workspace = mw.workspace().clone();
+                let project = workspace.read(cx).project().clone();
+                let display_pane = workspace.read(cx).active_pane().clone();
+                let panel = cx.new(|cx| {
+                    TerminalListPanel::new(
+                        workspace.clone(),
+                        display_pane,
+                        project,
+                        None,
+                        window,
+                        cx,
+                    )
+                });
+                workspace.update(cx, |workspace, cx| {
+                    workspace.add_panel(panel.clone(), window, cx);
+                });
+                panel
+            })
+            .unwrap();
+
+        seed_group(&panel, &workspace, &project, &window_handle, cx);
+
+        // Add a non-terminal item to the center pane, alongside the terminals.
+        let editor = window_handle
+            .update(cx, |_mw, window, cx| {
+                let pane = workspace.read(cx).active_pane().clone();
+                let editor = cx.new(|cx| Editor::single_line(window, cx));
+                pane.update(cx, |pane, cx| {
+                    pane.add_item(Box::new(editor.clone()), false, false, None, window, cx);
+                });
+                editor
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let editor_id = editor.entity_id();
+        let editor_is_visible = |cx: &mut TestAppContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                workspace.panes().iter().any(|pane| {
+                    pane.read(cx)
+                        .items()
+                        .any(|item| item.item_id() == editor_id)
+                })
+            })
+        };
+        assert!(editor_is_visible(cx), "editor should start in a center pane");
+
+        // Full center-tree rebuild, as performed by a tiling re-flow or a
+        // group switch.
+        window_handle
+            .update(cx, |_mw, window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.set_group_layout(GroupId(0), GroupLayoutMode::Grid, window, cx);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert!(
+            editor_is_visible(cx),
+            "editor tab must survive a center-layout rebuild",
+        );
     }
 
     /// `set_custom_data_dir` may only be called once per process; all tests

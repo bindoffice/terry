@@ -15,7 +15,10 @@ if not set -q TERRY_SHELL_INTEGRATION_LOADED
     function __terry_fish_precmd --on-event fish_prompt
         set -l exit_code $status
         printf '\e]133;D;%s\e\\' $exit_code
-        printf '\e]7;%s\e\\' $PWD
+        # OSC 7 wants a file:// URI; encode a literal '%' so the terminal's
+        # percent-decoder does not mis-read it.
+        set -l encoded_pwd (string replace -a '%' '%25' -- $PWD)
+        printf '\e]7;file://%s%s\e\\' $hostname $encoded_pwd
         printf '\e]133;A\e\\'
         printf '\e]133;B\e\\'
     end

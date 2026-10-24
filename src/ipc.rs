@@ -12,7 +12,7 @@ use futures::StreamExt;
 use gpui::{AnyWindowHandle, App, AsyncApp, WindowHandle, WindowId};
 use serde_json::{Value, json};
 use session::ipc_server::{IpcRequest, IpcRequestKind};
-use workspace::{AppState, OpenOptions, Workspace};
+use workspace::{AppState, MultiWorkspace, OpenOptions};
 
 use crate::terminal_list_panel::TerminalListPanel;
 
@@ -101,9 +101,7 @@ struct IpcInfo {
 }
 
 fn ipc_info_path() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("terry/ipc.json")
+    paths::data_dir().join("ipc.json")
 }
 
 fn read_ipc_info() -> Option<IpcInfo> {
@@ -199,7 +197,13 @@ pub fn init(mut request_rx: futures::channel::mpsc::UnboundedReceiver<IpcRequest
 /// Picks the workspace window to act on: the active window, else windows from
 /// the platform focus stack, else any window. Returns `None` when no
 /// workspace window exists yet.
-async fn workspace_window(cx: &mut AsyncApp) -> Result<Option<WindowHandle<Workspace>>, String> {
+///
+/// Workspace windows are rooted at `MultiWorkspace`, not `Workspace`: the
+/// multi-workspace view owns the active workspace entity, so downcasting to
+/// `Workspace` never matches (and would make every IPC call open a new window).
+async fn workspace_window(
+    cx: &mut AsyncApp,
+) -> Result<Option<WindowHandle<MultiWorkspace>>, String> {
     let candidates: Vec<AnyWindowHandle> = cx.update(|cx| {
         let mut candidates = Vec::new();
         if let Some(active) = cx.active_window() {
@@ -213,7 +217,7 @@ async fn workspace_window(cx: &mut AsyncApp) -> Result<Option<WindowHandle<Works
     });
 
     for handle in candidates {
-        if let Some(window) = handle.downcast::<Workspace>() {
+        if let Some(window) = handle.downcast::<MultiWorkspace>() {
             return Ok(Some(window));
         }
     }
@@ -234,22 +238,25 @@ async fn new_tab(cx: &mut AsyncApp, cwd: Option<PathBuf>) -> Result<Value, Strin
     let cwd_display = cwd.as_ref().map(|path| path.display().to_string());
 
     window
-        .update(cx, move |workspace, window, cx| {
-            let panel = workspace
-                .panel::<TerminalListPanel>(cx)
-                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-            panel.update(cx, |panel, cx| {
-                // open_shell_at no-ops when the active group is missing, so
-                // make sure one exists first (create_default_group is
-                // idempotent).
-                panel.create_default_group(window, cx);
-                match &cwd {
-                    Some(cwd) => panel.open_shell_at(cwd.clone(), window, cx),
-                    None => panel.new_terminal(window, cx),
-                }
-            });
-            window.activate_window();
-            Ok(json!({ "status": "ok", "action": "new_tab", "cwd": cwd_display }))
+        .update(cx, move |multi_workspace, window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                panel.update(cx, |panel, cx| {
+                    // open_shell_at no-ops when the active group is missing, so
+                    // make sure one exists first (create_default_group is
+                    // idempotent).
+                    panel.create_default_group(window, cx);
+                    match &cwd {
+                        Some(cwd) => panel.open_shell_at(cwd.clone(), window, cx),
+                        None => panel.new_terminal(window, cx),
+                    }
+                });
+                window.activate_window();
+                Ok(json!({ "status": "ok", "action": "new_tab", "cwd": cwd_display }))
+            })
         })
         .map_err(|error| error.to_string())?
 }
@@ -260,26 +267,29 @@ async fn send_text(cx: &mut AsyncApp, text: &str) -> Result<Value, String> {
         .ok_or_else(|| "no Terry window is open".to_string())?;
 
     window
-        .update(cx, move |workspace, _window, cx| {
-            let panel = workspace
-                .panel::<TerminalListPanel>(cx)
-                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-            let view = panel
-                .read(cx)
-                .active_terminal_view(cx)
-                .ok_or_else(|| "no active terminal".to_string())?;
-            view.update(cx, |view, cx| {
-                view.terminal()
-                    .update(cx, |terminal, _cx| terminal.paste(text));
-            });
-            Ok(json!({ "status": "ok", "action": "send_text" }))
+        .update(cx, move |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let view = panel
+                    .read(cx)
+                    .active_terminal_view(cx)
+                    .ok_or_else(|| "no active terminal".to_string())?;
+                view.update(cx, |view, cx| {
+                    view.terminal()
+                        .update(cx, |terminal, _cx| terminal.paste(text));
+                });
+                Ok(json!({ "status": "ok", "action": "send_text" }))
+            })
         })
         .map_err(|error| error.to_string())?
 }
 
 /// Opens a fresh workspace window (used when Terry is running with zero
-/// windows) and returns its handle.
-async fn open_workspace_window(cx: &mut AsyncApp) -> Result<WindowHandle<Workspace>, String> {
+/// workspace windows) and returns its handle.
+async fn open_workspace_window(cx: &mut AsyncApp) -> Result<WindowHandle<MultiWorkspace>, String> {
     let existing: Vec<WindowId> = cx.update(|cx| {
         cx.windows()
             .into_iter()
@@ -305,7 +315,7 @@ async fn open_workspace_window(cx: &mut AsyncApp) -> Result<WindowHandle<Workspa
         cx.windows()
             .into_iter()
             .find(|handle| !existing.contains(&handle.window_id()))
-            .and_then(|handle| handle.downcast::<Workspace>())
+            .and_then(|handle| handle.downcast::<MultiWorkspace>())
             .ok_or_else(|| "new workspace window did not appear".to_string())
     })
 }
