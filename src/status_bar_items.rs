@@ -41,6 +41,10 @@ impl ActiveTerminalContext {
             .panel
             .upgrade()
             .and_then(|panel| panel.read(cx).active_group_name());
+        let broadcasting = self
+            .panel
+            .upgrade()
+            .is_some_and(|panel| panel.read(cx).active_group_broadcast_input());
 
         let terminal_info = self.active_terminal.as_ref().and_then(|tv| {
             let tv = tv.upgrade()?;
@@ -62,20 +66,26 @@ impl ActiveTerminalContext {
             Some(0) | None => String::new(),
             Some(code) => format!(" · exit {code}"),
         };
+        // Broadcast input is dangerous: make sure it is always visible.
+        let broadcast_suffix = if broadcasting {
+            format!(" · {}", i18n::t("broadcast_input"))
+        } else {
+            String::new()
+        };
 
         match (group_name, terminal_title) {
             (Some(group), Some(title)) if !title.is_empty() && title != group.as_ref() => {
-                let label = format!("{group} · {title}{exit_suffix}");
+                let label = format!("{group} · {title}{exit_suffix}{broadcast_suffix}");
                 self.tooltip = Some(label.clone().into());
                 self.label = Some(label.into());
             }
             (Some(group), _) => {
-                let label = format!("{group}{exit_suffix}");
+                let label = format!("{group}{exit_suffix}{broadcast_suffix}");
                 self.tooltip = Some(label.clone().into());
                 self.label = Some(label.into());
             }
             (None, Some(title)) if !title.is_empty() => {
-                let label = format!("{title}{exit_suffix}");
+                let label = format!("{title}{exit_suffix}{broadcast_suffix}");
                 self.tooltip = Some(label.clone().into());
                 self.label = Some(label.into());
             }

@@ -1554,6 +1554,15 @@ impl TerminalListPanel {
             .map(|group| group.name.clone())
     }
 
+    /// Whether the active group is currently broadcasting keystrokes to every
+    /// terminal in it.
+    pub fn active_group_broadcast_input(&self) -> bool {
+        self.groups
+            .iter()
+            .find(|group| group.id == self.active_group_id)
+            .is_some_and(|group| group.broadcast_input)
+    }
+
     /// Currently focused terminal view (pane active item, else last in the
     /// active group).
     pub fn active_terminal_view(&self, cx: &App) -> Option<Entity<TerminalView>> {
@@ -1568,6 +1577,15 @@ impl TerminalListPanel {
             .iter()
             .find(|group| group.id == self.active_group_id)
             .and_then(|group| group.terminals.last().cloned())
+    }
+
+    /// The terminal actually active in the center pane, ignoring the
+    /// last-terminal fallback in [`Self::active_terminal_view`].
+    fn focused_terminal_id(&self, cx: &App) -> Option<EntityId> {
+        self.display_pane_entity(cx)
+            .and_then(|pane| pane.read(cx).active_item())
+            .and_then(|item| item.act_as::<TerminalView>(cx))
+            .map(|view| view.entity_id())
     }
 
     /// Cached cwd of the currently focused terminal. Reads the value the
@@ -2352,11 +2370,42 @@ impl TerminalListPanel {
         self._terminal_cwd_subscriptions.push(cx.subscribe(
             &terminal,
             move |this, term, event, cx| {
+                if matches!(event, terminal::Event::LastCommandFinished(_)) {
+                    // Ignore the synthetic "command finished" emitted for the
+                    // initial prompt while a session is still restoring.
+                    if this.session_restoring
+                        || this
+                            .restore_cwd_guard_until
+                            .is_some_and(|until| std::time::Instant::now() < until)
+                    {
+                        return;
+                    }
+                    // A command finished in a terminal the user is not looking
+                    // at: mark its group so the sidebar shows activity.
+                    if this.focused_terminal_id(cx) != Some(view_id) {
+                        if let Some(group) = this.groups.iter_mut().find(|group| {
+                            group
+                                .terminals
+                                .iter()
+                                .any(|view| view.entity_id() == view_id)
+                        }) {
+                            if !group.has_unread {
+                                group.has_unread = true;
+                                cx.notify();
+                            }
+                        }
+                    }
+                    return;
+                }
                 if !matches!(
                     event,
                     terminal::Event::TitleChanged | terminal::Event::BreadcrumbsChanged
                 ) {
                     return;
+                }
+                if matches!(event, terminal::Event::TitleChanged) {
+                    // The sidebar uses the terminal title as its label.
+                    cx.notify();
                 }
                 // TitleChanged is emitted right after the background refresh
                 // updates the cached cwd, so read the cache instead of
@@ -3095,6 +3144,7 @@ impl TerminalListPanel {
         if group_id == self.active_group_id {
             if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
                 group.collapsed = false;
+                group.has_unread = false;
             }
             cx.notify();
             return;
@@ -3112,6 +3162,7 @@ impl TerminalListPanel {
         self.active_group_id = group_id;
         if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
             group.collapsed = false;
+            group.has_unread = false;
         }
         cx.notify();
 
@@ -3151,6 +3202,7 @@ impl TerminalListPanel {
         cx: &mut Context<Self>,
     ) {
         let target_id = terminal_view.entity_id();
+        self.clear_unread_for_terminal(target_id);
         for pane in self.center_panes(cx) {
             let index = pane
                 .read(cx)
@@ -3162,6 +3214,17 @@ impl TerminalListPanel {
                 });
                 return;
             }
+        }
+    }
+
+    fn clear_unread_for_terminal(&mut self, terminal_id: EntityId) {
+        if let Some(group) = self.groups.iter_mut().find(|group| {
+            group
+                .terminals
+                .iter()
+                .any(|view| view.entity_id() == terminal_id)
+        }) {
+            group.has_unread = false;
         }
     }
 
@@ -3260,6 +3323,11 @@ impl TerminalListPanel {
             return;
         }
         match event {
+            workspace::Event::ActiveItemChanged { .. } => {
+                if let Some(id) = self.focused_terminal_id(cx) {
+                    self.clear_unread_for_terminal(id);
+                }
+            }
             workspace::Event::ItemRemoved { item_id } => {
                 // `apply_layout_to_center` removes every tile and re-adds it to
                 // its new pane within the same update. Its guard decrement is
@@ -3708,11 +3776,13 @@ impl Render for TerminalListPanel {
             SharedString,
             bool,
             bool,
+            bool,
             Vec<(Entity<TerminalView>, SharedString)>,
         )> = Vec::new();
         for group in &self.groups {
             let is_active = group.id == active_group_id;
             let collapsed = group.collapsed;
+            let has_unread = group.has_unread;
             let mut terminals = Vec::new();
             if !collapsed {
                 for tv in &group.terminals {
@@ -3724,12 +3794,13 @@ impl Render for TerminalListPanel {
                 group.name.clone(),
                 is_active,
                 collapsed,
+                has_unread,
                 terminals,
             ));
         }
 
         let mut rows: Vec<AnyElement> = Vec::new();
-        for (group_id, name, is_active, collapsed, terminals) in groups_snapshot {
+        for (group_id, name, is_active, collapsed, has_unread, terminals) in groups_snapshot {
             let _colors = theme.colors().clone();
             let is_expanded = !collapsed;
             let panel = cx.entity().clone();
@@ -3820,7 +3891,15 @@ impl Render for TerminalListPanel {
                                             }
                                         })
                                         .child(
-                                            h_flex().flex_grow(1.).justify_end().child(
+                                            h_flex().flex_grow(1.).justify_end()
+                                                .when(has_unread, |this| {
+                                                    this.child(
+                                                        Label::new("●")
+                                                            .size(LabelSize::XSmall)
+                                                            .color(Color::Accent),
+                                                    )
+                                                })
+                                                .child(
                                                 PopoverMenu::new(SharedString::from(format!(
                                                     "menu-{}",
                                                     group_id.0

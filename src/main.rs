@@ -248,6 +248,19 @@ fn main() {
         ipc::init(ipc_requests_rx, cx);
 
         theme_settings::init(LoadThemes::All(Box::new(Assets)), cx);
+        // The default keymap binds cmd+= / cmd+- / cmd+0 to these actions, but
+        // this app does not include the `zed` crate that normally handles them.
+        // Registering them here also makes terminal text zoom with the buffer
+        // (the terminal font follows the buffer font size).
+        cx.on_action(|_: &zed_actions::IncreaseBufferFontSize, cx| {
+            theme_settings::increase_buffer_font_size(cx)
+        });
+        cx.on_action(|_: &zed_actions::DecreaseBufferFontSize, cx| {
+            theme_settings::decrease_buffer_font_size(cx)
+        });
+        cx.on_action(|_: &zed_actions::ResetBufferFontSize, cx| {
+            theme_settings::reset_buffer_font_size(cx)
+        });
         Assets.load_fonts(cx).log_err();
 
         editor::init(cx);

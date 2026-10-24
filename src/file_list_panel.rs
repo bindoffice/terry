@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use fs::{Fs, RemoveOptions};
 use gpui::{
     Action, AnyElement, App, ClipboardItem, Context, Entity, EntityId, EventEmitter, FocusHandle,
     Focusable, IntoElement, PromptLevel, Render, SharedString, Subscription, TaskExt, WeakEntity,
@@ -92,6 +93,13 @@ pub struct FileListPanel {
     focus_handle: FocusHandle,
     position: DockPosition,
     current_dir: PathBuf,
+    /// Cached directory contents. Rebuilt only when `current_dir` changes or
+    /// the user explicitly refreshes; reading and stat-ing a directory on every
+    /// frame made large folders needlessly expensive.
+    entries: Vec<FileEntry>,
+    /// Directory `entries` was read from. `None` forces the next render to
+    /// reload (refresh button, create/delete, or a directory change).
+    entries_dir: Option<PathBuf>,
     view_mode: FileViewMode,
     /// Width last used in list mode. Restored when switching back.
     list_size: Option<PanelSizeState>,
@@ -103,6 +111,8 @@ pub struct FileListPanel {
     /// real directory or selection change.
     followed_item: Option<EntityId>,
     followed_cwd: Option<PathBuf>,
+    /// Live cwd changes for the terminal currently being followed.
+    _terminal_subscription: Option<Subscription>,
     _workspace_subscription: Subscription,
 }
 
@@ -121,12 +131,15 @@ impl FileListPanel {
             focus_handle,
             position: DockPosition::Left,
             current_dir,
+            entries: Vec::new(),
+            entries_dir: None,
             view_mode: FileViewMode::List,
             list_size: None,
             finder_size: None,
             applied_mode: None,
             followed_item: None,
             followed_cwd: None,
+            _terminal_subscription: None,
             _workspace_subscription,
         };
         panel.schedule_size_load(cx);
@@ -137,9 +150,35 @@ impl FileListPanel {
         let this = cx.entity().downgrade();
         cx.defer(move |cx| {
             if let Some(this) = this.upgrade() {
-                this.update(cx, |this, cx| this.load_remembered_sizes(cx));
+                this.update(cx, |this, cx| {
+                    this.load_remembered_sizes(cx);
+                    this.initialize_current_dir(cx);
+                });
             }
         });
+    }
+
+    /// Prefer the project root over the process cwd (which is often `/` for a
+    /// packaged app). Skipped once the panel has started following a terminal.
+    fn initialize_current_dir(&mut self, cx: &mut Context<Self>) {
+        if self.entries_dir.is_some() || self.followed_item.is_some() {
+            return;
+        }
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let project = workspace.read(cx).project().clone();
+        let root = project
+            .read(cx)
+            .visible_worktrees(cx)
+            .find_map(|worktree| {
+                let path = worktree.read(cx).abs_path().to_path_buf();
+                path.is_dir().then_some(path)
+            });
+        if let Some(root) = root {
+            self.current_dir = root;
+            cx.notify();
+        }
     }
 
     /// Keeps the current dock width for the mode being left, then returns the
@@ -218,12 +257,33 @@ impl FileListPanel {
             return;
         };
         let Some(active_item) = workspace.read(cx).active_item(cx) else {
+            self.stop_following_terminal();
             return;
         };
         let Some(terminal_view) = active_item.downcast::<terminal_view::TerminalView>() else {
+            self.stop_following_terminal();
             return;
         };
         let item_id = active_item.item_id();
+
+        // Follow the active terminal's cwd while it stays active. TitleChanged
+        // is emitted after the cached process cwd changes; CwdChanged covers
+        // remote terminals reporting OSC 7.
+        if self.followed_item != Some(item_id) {
+            let terminal = terminal_view.read(cx).terminal().clone();
+            self._terminal_subscription = Some(cx.subscribe(
+                &terminal,
+                move |this, _terminal, event, cx| {
+                    if matches!(
+                        event,
+                        terminal::Event::CwdChanged | terminal::Event::TitleChanged
+                    ) {
+                        this.update_from_active_item(false, cx);
+                    }
+                },
+            ));
+        }
+
         let cwd = terminal_view
             .read(cx)
             .terminal()
@@ -239,13 +299,21 @@ impl FileListPanel {
             return;
         }
         if let Some(cwd) = cwd {
-            self.current_dir = cwd;
-            cx.notify();
+            if self.current_dir != cwd {
+                self.current_dir = cwd;
+                cx.notify();
+            }
         }
     }
 
-    fn collect_entries(&self) -> Vec<FileEntry> {
-        let mut entries = match std::fs::read_dir(&self.current_dir) {
+    fn stop_following_terminal(&mut self) {
+        self._terminal_subscription = None;
+        self.followed_item = None;
+        self.followed_cwd = None;
+    }
+
+    fn collect_entries(dir: &Path) -> Vec<FileEntry> {
+        let mut entries = match std::fs::read_dir(dir) {
             Ok(read_dir) => read_dir
                 .filter_map(|entry| entry.ok())
                 .map(|entry| {
@@ -267,7 +335,7 @@ impl FileListPanel {
         // Directories first, then alphabetical.
         entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
         // Keep ".." above every folder so it is not sorted in with the names.
-        if let Some(parent) = self.current_dir.parent() {
+        if let Some(parent) = dir.parent() {
             entries.insert(
                 0,
                 FileEntry {
@@ -278,6 +346,21 @@ impl FileListPanel {
             );
         }
         entries
+    }
+
+    /// Return the cached entries, reloading only when the directory changed or
+    /// the cache was explicitly invalidated (refresh / create / delete).
+    fn entries_for_render(&mut self) -> Vec<FileEntry> {
+        if self.entries_dir.as_deref() != Some(self.current_dir.as_path()) {
+            let dir = self.current_dir.clone();
+            self.entries = Self::collect_entries(&dir);
+            self.entries_dir = Some(dir);
+        }
+        self.entries.clone()
+    }
+
+    fn invalidate_entries(&mut self) {
+        self.entries_dir = None;
     }
 
     fn open_terminal_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -292,6 +375,7 @@ impl FileListPanel {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.invalidate_entries();
         cx.notify();
     }
 
@@ -300,11 +384,13 @@ impl FileListPanel {
             if window.modifiers().secondary() {
                 if let Some(workspace) = self.workspace.upgrade() {
                     if let Some(active_item) = workspace.read(cx).active_item(cx) {
-                        if let Some(terminal_view) = active_item.downcast::<terminal_view::TerminalView>() {
-                            let path_str = entry.path.to_string_lossy().to_string();
+                        if let Some(terminal_view) =
+                            active_item.downcast::<terminal_view::TerminalView>()
+                        {
+                            let command = format!("cd {}\n", Self::shell_quote_path(&entry.path));
                             let terminal = terminal_view.read(cx).terminal().clone();
                             terminal.update(cx, |t, _cx| {
-                                t.input(format!("cd {:?}\n", path_str).into_bytes());
+                                t.input(command.into_bytes());
                             });
                         }
                     }
@@ -315,6 +401,14 @@ impl FileListPanel {
         } else {
             self.open_file(entry.path, window, cx);
         }
+    }
+
+    /// Quote a path for typing into an interactive shell. `cd {:?}` is not
+    /// safe: debug formatting does not escape `$(...)`, backticks or `!`, so a
+    /// crafted directory name could execute commands.
+    fn shell_quote_path(path: &Path) -> String {
+        let value = path.to_string_lossy();
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 
     fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -381,6 +475,7 @@ impl FileListPanel {
     ) {
         let path = Self::unique_child_path(&parent, "untitled");
         if std::fs::File::create(&path).is_ok() {
+            self.invalidate_entries();
             self.open_file(path, window, cx);
             cx.notify();
         }
@@ -389,6 +484,7 @@ impl FileListPanel {
     fn create_new_folder_in(&mut self, parent: PathBuf, cx: &mut Context<Self>) {
         let path = Self::unique_child_path(&parent, "untitled folder");
         if std::fs::create_dir(&path).is_ok() {
+            self.invalidate_entries();
             cx.notify();
         }
     }
@@ -406,21 +502,24 @@ impl FileListPanel {
             &[i18n::t_str("delete"), i18n::t_str("cancel")],
             cx,
         );
+        // Prefer the platform trash over permanent deletion.
+        let fs = <dyn Fs>::global(cx);
         cx.spawn_in(window, async move |this, cx| {
             if answer.await != Ok(0) {
                 return;
             }
-            let delete_result = cx
-                .background_spawn(async move {
-                    if path.is_dir() {
-                        std::fs::remove_dir_all(path)
-                    } else {
-                        std::fs::remove_file(path)
-                    }
-                })
-                .await;
-            if delete_result.is_ok() {
-                this.update(cx, |_, cx| cx.notify()).ok();
+            let delete_result = fs.trash(&path, RemoveOptions::default()).await;
+            match delete_result {
+                Ok(_) => {
+                    this.update(cx, |this, cx| {
+                        this.invalidate_entries();
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(error) => {
+                    log::error!("failed to move {} to trash: {error}", path.display());
+                }
             }
         })
         .detach();
@@ -535,7 +634,7 @@ impl EventEmitter<PanelEvent> for FileListPanel {}
 
 impl Render for FileListPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let entries = self.collect_entries();
+        let entries = self.entries_for_render();
         let theme = cx.theme().clone();
         let dir_label = self.dir_label();
 
@@ -873,5 +972,28 @@ impl Panel for FileListPanel {
 
     fn activation_priority(&self) -> u32 {
         3
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn shell_quote_path_handles_spaces_and_quotes() {
+        assert_eq!(
+            FileListPanel::shell_quote_path(Path::new("/tmp/a b")),
+            "'/tmp/a b'"
+        );
+        assert_eq!(
+            FileListPanel::shell_quote_path(Path::new("/tmp/it's here")),
+            "'/tmp/it'\\''s here'"
+        );
+        // Command substitutions must stay literal inside the single quotes.
+        assert_eq!(
+            FileListPanel::shell_quote_path(Path::new("/tmp/$(touch pwned)")),
+            "'/tmp/$(touch pwned)'"
+        );
     }
 }
