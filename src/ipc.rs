@@ -9,9 +9,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::StreamExt;
-use gpui::{AnyWindowHandle, App, AsyncApp, WindowHandle, WindowId};
+use gpui::{
+    AnyWindowHandle, App, AsyncApp, EntityId, Keystroke, SystemNotification, WindowHandle, WindowId,
+};
 use serde_json::{Value, json};
 use session::ipc_server::{IpcRequest, IpcRequestKind};
+use settings::Settings;
+use terminal::terminal_settings::TerminalSettings;
+use terminal_view::TerminalView;
 use workspace::{AppState, MultiWorkspace, OpenOptions};
 
 use crate::terminal_list_panel::TerminalListPanel;
@@ -303,6 +308,18 @@ pub fn init(mut request_rx: futures::channel::mpsc::UnboundedReceiver<IpcRequest
                 IpcRequestKind::NewTab { cwd } => new_tab(cx, cwd).await,
                 IpcRequestKind::SendText { text } => send_text(cx, &text).await,
                 IpcRequestKind::Focus => focus(cx).await,
+                IpcRequestKind::FocusTerminal { terminal_id } => {
+                    focus_terminal(cx, terminal_id).await
+                }
+                IpcRequestKind::ListSessions => list_sessions(cx).await,
+                IpcRequestKind::SendKeys { terminal_id, keys } => {
+                    send_keys(cx, terminal_id, &keys).await
+                }
+                IpcRequestKind::ReadScreen { terminal_id } => read_screen(cx, terminal_id).await,
+                IpcRequestKind::GetContext { terminal_id } => get_context(cx, terminal_id).await,
+                IpcRequestKind::Notify { title, message } => {
+                    notify(cx, title, &message).await
+                }
             };
             reply.send(outcome).ok();
         }
@@ -478,6 +495,162 @@ async fn focus(cx: &mut AsyncApp) -> Result<Value, String> {
         }
     }
     Ok(json!({ "status": "ok", "action": "focus" }))
+}
+
+async fn focus_terminal(cx: &mut AsyncApp, terminal_id: Option<u64>) -> Result<Value, String> {
+    let window = match workspace_window(cx).await? {
+        Some(window) => window,
+        None => open_workspace_window(cx).await?,
+    };
+
+    window
+        .update(cx, move |multi_workspace, window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                if let Some(id) = terminal_id {
+                    let focused = panel.update(cx, |panel, cx| {
+                        panel.focus_terminal_by_id(EntityId::from(id), window, cx)
+                    });
+                    if !focused {
+                        return Err(format!("no terminal with id {id}"));
+                    }
+                }
+                window.activate_window();
+                Ok(json!({ "status": "ok", "action": "focus_session" }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn list_sessions(cx: &mut AsyncApp) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                Ok(panel.read(cx).session_info(cx))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+fn resolve_terminal(
+    panel: &gpui::Entity<TerminalListPanel>,
+    terminal_id: Option<u64>,
+    cx: &App,
+) -> Result<gpui::Entity<TerminalView>, String> {
+    match terminal_id {
+        Some(id) => panel
+            .read(cx)
+            .terminal_view_by_id(EntityId::from(id))
+            .ok_or_else(|| format!("no terminal with id {id}")),
+        None => panel
+            .read(cx)
+            .active_terminal_view(cx)
+            .ok_or_else(|| "no active terminal".to_string()),
+    }
+}
+
+async fn send_keys(
+    cx: &mut AsyncApp,
+    terminal_id: Option<u64>,
+    keys: &str,
+) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+    let keys = keys.to_string();
+
+    window
+        .update(cx, move |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let view = resolve_terminal(&panel, terminal_id, cx)?;
+                let option_as_meta = TerminalSettings::get_global(cx).option_as_meta;
+                view.update(cx, move |view, cx| {
+                    view.terminal().update(cx, |terminal, _cx| {
+                        let handled = Keystroke::parse(&keys)
+                            .ok()
+                            .is_some_and(|keystroke| {
+                                terminal.try_keystroke(&keystroke, option_as_meta)
+                            });
+                        if !handled {
+                            terminal.input(keys.into_bytes());
+                        }
+                    });
+                });
+                Ok(json!({ "status": "ok", "action": "send_keys" }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn read_screen(cx: &mut AsyncApp, terminal_id: Option<u64>) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let view = resolve_terminal(&panel, terminal_id, cx)?;
+                let id = view.entity_id().as_u64();
+                let content = view.read(cx).terminal().read(cx).get_content();
+                Ok(json!({ "terminal_id": id, "content": content }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn get_context(cx: &mut AsyncApp, terminal_id: Option<u64>) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                panel
+                    .read(cx)
+                    .terminal_context(terminal_id.map(EntityId::from), cx)
+                    .ok_or_else(|| "no active terminal".to_string())
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn notify(cx: &mut AsyncApp, title: Option<String>, message: &str) -> Result<Value, String> {
+    let title = title.unwrap_or_else(|| "Terry".to_string());
+    let body = message.to_string();
+    cx.update(|cx| {
+        cx.show_system_notification(SystemNotification {
+            tag: "terry-ipc".into(),
+            title: title.into(),
+            body: body.into(),
+            actions: Vec::new(),
+        });
+    });
+    Ok(json!({ "status": "ok", "action": "notify" }))
 }
 
 /// Opens a fresh workspace window (used when Terry is running with zero

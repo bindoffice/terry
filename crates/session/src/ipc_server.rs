@@ -20,6 +20,25 @@ pub enum IpcRequestKind {
     /// Bring the running workspace window to the front (used when a second
     /// `terry` launch finds an existing instance).
     Focus,
+    /// Focus a specific terminal, switching its group first if needed.
+    FocusTerminal { terminal_id: Option<u64> },
+    /// List groups and terminals in the active workspace window.
+    ListSessions,
+    /// Send text or a keystroke sequence to a terminal. `terminal_id` defaults
+    /// to the active terminal.
+    SendKeys {
+        terminal_id: Option<u64>,
+        keys: String,
+    },
+    /// Read the terminal's content as plain text.
+    ReadScreen { terminal_id: Option<u64> },
+    /// Report the active (or requested) terminal's title, cwd, and command.
+    GetContext { terminal_id: Option<u64> },
+    /// Post an OS notification.
+    Notify {
+        title: Option<String>,
+        message: String,
+    },
 }
 
 /// A request forwarded from the HTTP server to the GUI event loop. The HTTP
@@ -51,8 +70,7 @@ pub fn start_ipc_server(
         requests,
     };
 
-    // Mock routes are kept for compatibility with existing tooling; they now
-    // require the bearer token but still answer canned payloads.
+    // Every route below requires the bearer token persisted in ipc.json.
     let protected = Router::new()
         .route("/api/new_tab", post(new_tab))
         .route("/api/send_text", post(send_text))
@@ -186,32 +204,116 @@ fn bad_request(message: String) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
 }
 
-async fn list_sessions() -> Json<Value> {
-    Json(json!({"sessions": []})) // Implementation is a mock placeholder
+async fn list_sessions(State(state): State<IpcState>) -> Response {
+    dispatch(state, IpcRequestKind::ListSessions).await
 }
 
-async fn focus_session(Json(_payload): Json<Value>) -> Json<Value> {
-    Json(json!({"status": "focused"}))
+async fn focus_session(State(state): State<IpcState>, body: String) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+    dispatch(
+        state,
+        IpcRequestKind::FocusTerminal {
+            terminal_id: parse_terminal_id(&payload),
+        },
+    )
+    .await
 }
 
-async fn send_keys(Json(_payload): Json<Value>) -> Json<Value> {
-    Json(json!({"status": "sent"}))
+async fn send_keys(State(state): State<IpcState>, body: String) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+    let Some(keys) = payload.get("keys").and_then(Value::as_str) else {
+        return bad_request("missing \"keys\" field".to_string());
+    };
+    if keys.is_empty() {
+        return bad_request("\"keys\" must not be empty".to_string());
+    }
+    dispatch(
+        state,
+        IpcRequestKind::SendKeys {
+            terminal_id: parse_terminal_id(&payload),
+            keys: keys.to_string(),
+        },
+    )
+    .await
 }
 
-async fn read_screen(Json(_payload): Json<Value>) -> Json<Value> {
-    Json(json!({"content": "terminal output"}))
+async fn read_screen(State(state): State<IpcState>, body: String) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+    dispatch(
+        state,
+        IpcRequestKind::ReadScreen {
+            terminal_id: parse_terminal_id(&payload),
+        },
+    )
+    .await
 }
 
-async fn get_context(Json(_payload): Json<Value>) -> Json<Value> {
-    Json(json!({"cwd": "/", "git_branch": "main"}))
+async fn get_context(State(state): State<IpcState>, body: String) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+    dispatch(
+        state,
+        IpcRequestKind::GetContext {
+            terminal_id: parse_terminal_id(&payload),
+        },
+    )
+    .await
 }
 
-async fn notify(Json(_payload): Json<Value>) -> Json<Value> {
-    Json(json!({"status": "notified"}))
+async fn notify(State(state): State<IpcState>, body: String) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+    let Some(message) = payload.get("message").and_then(Value::as_str) else {
+        return bad_request("missing \"message\" field".to_string());
+    };
+    let title = payload
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    dispatch(
+        state,
+        IpcRequestKind::Notify {
+            title,
+            message: message.to_string(),
+        },
+    )
+    .await
 }
 
-async fn create_new_terminal(Json(_payload): Json<Value>) -> Json<Value> {
-    Json(json!({"status": "created", "id": "uuid-here"}))
+async fn create_new_terminal(State(state): State<IpcState>, body: String) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+    let cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(PathBuf::from);
+    dispatch(state, IpcRequestKind::NewTab { cwd }).await
+}
+
+fn parse_terminal_id(payload: &Value) -> Option<u64> {
+    payload
+        .get("terminal_id")
+        .or_else(|| payload.get("session_id"))
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        })
 }
 
 #[cfg(test)]
@@ -370,6 +472,40 @@ mod tests {
 
         let (status, _) = post(port, "/api/send_text", Some(&token), "{}").await;
         assert_eq!(status, 400);
+    }
+
+    #[tokio::test]
+    async fn send_keys_parses_session_id_and_forwards_keys() {
+        let TestServer {
+            port,
+            token,
+            requests,
+        } = spawn_server();
+        let mut requests = requests;
+
+        let http = post(
+            port,
+            "/api/send_keys",
+            Some(&token),
+            r#"{"session_id":"42","keys":"ctrl-c"}"#,
+        );
+        let app_side = async {
+            let request = tokio::time::timeout(Duration::from_secs(5), requests.next())
+                .await
+                .expect("ipc request never arrived")
+                .expect("ipc channel closed");
+            match request.kind {
+                IpcRequestKind::SendKeys { terminal_id, keys } => {
+                    assert_eq!(terminal_id, Some(42));
+                    assert_eq!(keys, "ctrl-c");
+                }
+                other => panic!("expected SendKeys, got {other:?}"),
+            }
+            request.reply.send(Ok(json!({ "status": "ok" }))).ok();
+        };
+
+        let ((status, _), _) = tokio::join!(http, app_side);
+        assert_eq!(status, 200);
     }
 
     #[tokio::test]

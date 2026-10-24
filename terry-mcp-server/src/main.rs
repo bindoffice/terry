@@ -128,6 +128,62 @@ async fn main() -> Result<()> {
                             "type": "object",
                             "properties": { "cwd": { "type": "string" }, "title": { "type": "string" } }
                         }
+                    },
+                    {
+                        "name": "list_sessions",
+                        "description": "List groups and terminals with their ids, cwd, and running command",
+                        "inputSchema": { "type": "object", "properties": {} }
+                    },
+                    {
+                        "name": "focus_session",
+                        "description": "Focus a terminal by id, or the workspace window when no id is given",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": { "session_id": { "type": "string" } }
+                        }
+                    },
+                    {
+                        "name": "send_keys",
+                        "description": "Send text or a keystroke (e.g. ctrl-c) to a terminal",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "session_id": { "type": "string" },
+                                "keys": { "type": "string" }
+                            },
+                            "required": ["keys"]
+                        }
+                    },
+                    {
+                        "name": "read_screen",
+                        "description": "Read a terminal's content as plain text",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "session_id": { "type": "string" },
+                                "raw_ansi": { "type": "boolean" }
+                            }
+                        }
+                    },
+                    {
+                        "name": "get_context",
+                        "description": "Get the active terminal's title, cwd, group, and running command",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": { "session_id": { "type": "string" } }
+                        }
+                    },
+                    {
+                        "name": "notify",
+                        "description": "Post a desktop notification",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "message": { "type": "string" },
+                                "title": { "type": "string" }
+                            },
+                            "required": ["message"]
+                        }
                     }
                 ]
             });
@@ -137,6 +193,8 @@ async fn main() -> Result<()> {
             let endpoint = match tool_name {
                 "new_tab" | "create_new_terminal" => Some("new_tab"),
                 "send_text" => Some("send_text"),
+                "list_sessions" | "focus_session" | "send_keys" | "read_screen" | "get_context"
+                | "notify" => Some(tool_name),
                 _ => None,
             };
 

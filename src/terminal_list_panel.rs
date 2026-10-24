@@ -2018,12 +2018,120 @@ impl TerminalListPanel {
         .detach_and_log_err(cx);
     }
 
-    fn terminal_view_by_id(&self, terminal_id: EntityId) -> Option<Entity<TerminalView>> {
+    pub fn terminal_view_by_id(&self, terminal_id: EntityId) -> Option<Entity<TerminalView>> {
         self.groups
             .iter()
             .flat_map(|group| group.terminals.iter())
             .find(|view| view.entity_id() == terminal_id)
             .cloned()
+    }
+
+    /// Focus a terminal by id, switching to its group when necessary.
+    /// Returns `false` when the id is unknown.
+    pub fn focus_terminal_by_id(
+        &mut self,
+        terminal_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(group_id) = self
+            .groups
+            .iter()
+            .find(|group| {
+                group
+                    .terminals
+                    .iter()
+                    .any(|view| view.entity_id() == terminal_id)
+            })
+            .map(|group| group.id)
+        else {
+            return false;
+        };
+        let Some(view) = self.terminal_view_by_id(terminal_id) else {
+            return false;
+        };
+        self.focus_terminal_in_group(group_id, view, window, cx);
+        true
+    }
+
+    /// JSON description of one terminal (or the active terminal when `None`).
+    pub fn terminal_context(
+        &self,
+        terminal_id: Option<EntityId>,
+        cx: &App,
+    ) -> Option<serde_json::Value> {
+        let view = match terminal_id {
+            Some(id) => self.terminal_view_by_id(id)?,
+            None => self.active_terminal_view(cx)?,
+        };
+        let id = view.entity_id();
+        let view = view.read(cx);
+        let terminal = view.terminal().read(cx);
+        let group = self.groups.iter().find(|group| {
+            group
+                .terminals
+                .iter()
+                .any(|terminal_view| terminal_view.entity_id() == id)
+        });
+        Some(serde_json::json!({
+            "terminal_id": id.as_u64(),
+            "title": view
+                .custom_title()
+                .map(str::to_string)
+                .unwrap_or_else(|| terminal.title(false)),
+            "cwd": terminal
+                .working_directory()
+                .map(|cwd| cwd.display().to_string()),
+            "command": terminal.foreground_process_command_name(),
+            "exit_code": terminal.last_exit_code(),
+            "exited": terminal.has_exited(),
+            "group": group.map(|group| group.name.to_string()),
+        }))
+    }
+
+    /// Machine-readable summary of every group and terminal, used by the IPC
+    /// API (`/api/list_sessions`).
+    pub fn session_info(&self, cx: &App) -> serde_json::Value {
+        let focused = self.focused_terminal_id(cx);
+        let groups: Vec<serde_json::Value> = self
+            .groups
+            .iter()
+            .map(|group| {
+                let terminals: Vec<serde_json::Value> = group
+                    .terminals
+                    .iter()
+                    .map(|view_entity| {
+                        let id = view_entity.entity_id();
+                        let view = view_entity.read(cx);
+                        let terminal = view.terminal().read(cx);
+                        let title = view
+                            .custom_title()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| terminal.title(false));
+                        serde_json::json!({
+                            "id": id.as_u64(),
+                            "title": title,
+                            "cwd": terminal
+                                .working_directory()
+                                .map(|cwd| cwd.display().to_string()),
+                            "command": terminal.foreground_process_command_name(),
+                            "exit_code": terminal.last_exit_code(),
+                            "exited": terminal.has_exited(),
+                            "active": focused == Some(id),
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "id": group.id.0,
+                    "name": group.name.to_string(),
+                    "active": group.id == self.active_group_id,
+                    "collapsed": group.collapsed,
+                    "broadcast_input": group.broadcast_input,
+                    "terminals": terminals,
+                })
+            })
+            .collect();
+        serde_json::json!({ "groups": groups })
     }
 
     /// Closes a terminal without asking for confirmation: remove it from every
