@@ -1,7 +1,9 @@
 use gpui::{
-    App, AppContext as _, Context, FocusHandle, Focusable, Menu, MenuItem, OsAction,
-    Render, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, img, px,
+    App, AppContext as _, Context, FocusHandle, Focusable, Menu, MenuItem, OsAction, Render,
+    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, img, px,
 };
+use settings::Settings;
+use terminal::terminal_settings::TerminalSettings;
 use theme::ActiveTheme;
 use ui::{Color, Headline, Label, LabelSize, prelude::*};
 use util::ResultExt;
@@ -101,14 +103,11 @@ impl Render for AboutWindow {
                     .color(Color::Muted),
             )
             .child(
-                div()
-                    .max_w(px(280.))
-                    .text_center()
-                    .child(
-                        Label::new(i18n::t("about_terry_description"))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    ),
+                div().max_w(px(280.)).text_center().child(
+                    Label::new(i18n::t("about_terry_description"))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
             )
     }
 }
@@ -153,7 +152,7 @@ fn open_about_window(cx: &mut App) {
     });
 }
 
-pub fn app_menus(_cx: &App) -> Vec<Menu> {
+pub fn app_menus(cx: &App) -> Vec<Menu> {
     vec![
         Menu {
             name: "Terry".into(),
@@ -191,10 +190,7 @@ pub fn app_menus(_cx: &App) -> Vec<Menu> {
             disabled: false,
             items: vec![
                 MenuItem::action(i18n::t("open"), workspace::Open::default()),
-                MenuItem::action(
-                    i18n::t("open_recent"),
-                    zed_actions::OpenRecent::default(),
-                ),
+                MenuItem::action(i18n::t("open_recent"), zed_actions::OpenRecent::default()),
                 MenuItem::separator(),
                 MenuItem::action(
                     i18n::t("add_folder_to_project"),
@@ -241,6 +237,81 @@ pub fn app_menus(_cx: &App) -> Vec<Menu> {
                     zed_actions::command_palette::Toggle,
                 ),
             ],
+        },
+        Menu {
+            name: i18n::t("menu_terminal").into(),
+            disabled: false,
+            items: {
+                let mut items = vec![
+                    MenuItem::action(
+                        i18n::t("new_terminal"),
+                        zed_actions::terminal_list_panel::NewTerminal,
+                    ),
+                    MenuItem::action(
+                        i18n::t("new_group"),
+                        zed_actions::terminal_list_panel::NewGroup,
+                    ),
+                ];
+                let profiles = TerminalSettings::get_global(cx).profiles.clone();
+                if !profiles.is_empty() {
+                    items.push(MenuItem::submenu(Menu {
+                        name: i18n::t("new_terminal_with_profile").into(),
+                        disabled: false,
+                        items: profiles
+                            .into_iter()
+                            .map(|profile| {
+                                let action =
+                                    terminal_view::NewTerminalWithProfile(profile.name.clone());
+                                MenuItem::action(profile.name, action)
+                            })
+                            .collect(),
+                    }));
+                }
+                items.extend([
+                    MenuItem::separator(),
+                    MenuItem::action(
+                        i18n::t("next_group"),
+                        zed_actions::terminal_list_panel::NextGroup,
+                    ),
+                    MenuItem::action(
+                        i18n::t("previous_group"),
+                        zed_actions::terminal_list_panel::PreviousGroup,
+                    ),
+                    MenuItem::separator(),
+                    MenuItem::action(
+                        i18n::t("jump_to_previous_prompt"),
+                        terminal_view::JumpToPreviousPrompt,
+                    ),
+                    MenuItem::action(
+                        i18n::t("jump_to_next_prompt"),
+                        terminal_view::JumpToNextPrompt,
+                    ),
+                    MenuItem::separator(),
+                    MenuItem::action(
+                        i18n::t("copy_last_command_output"),
+                        terminal_view::CopyLastCommandOutput,
+                    ),
+                    MenuItem::action(
+                        i18n::t("select_last_command_output"),
+                        terminal_view::SelectLastCommandOutput,
+                    ),
+                    MenuItem::action(
+                        i18n::t("rerun_last_command"),
+                        terminal_view::RerunLastCommand,
+                    ),
+                    MenuItem::separator(),
+                    MenuItem::action(
+                        i18n::t("broadcast_input"),
+                        terminal_view::ToggleBroadcastInput,
+                    ),
+                    MenuItem::separator(),
+                    MenuItem::action(
+                        i18n::t("toggle_quake_terminal"),
+                        crate::quake_terminal::Toggle,
+                    ),
+                ]);
+                items
+            },
         },
         Menu {
             name: i18n::t("menu_window").into(),

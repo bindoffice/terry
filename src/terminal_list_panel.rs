@@ -3,7 +3,8 @@ use futures::FutureExt;
 use gpui::Keystroke;
 use gpui::{
     Action, AnyElement, App, Axis, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    PromptLevel, Render, SharedString, Subscription, Task, TaskExt, WeakEntity, Window, div, px,
+    PromptLevel, Render, SharedString, StatefulInteractiveElement, Subscription, Task, TaskExt,
+    WeakEntity, Window, div, px,
 };
 use project::Project;
 use terminal::terminal_settings::{TerminalProfile, TerminalSettings};
@@ -62,6 +63,39 @@ fn release_session_claim(workspace_key: &str, owner: EntityId) {
 struct ParkedAgentSession {
     view: Entity<TerminalView>,
     cwd: Option<PathBuf>,
+}
+
+/// A live terminal kept alive outside every group so its PTY, scrollback and
+/// running processes survive being detached from the sidebar.
+struct DetachedSession {
+    view: Entity<TerminalView>,
+    title: SharedString,
+    cwd: Option<PathBuf>,
+}
+
+/// Drag payload for reordering groups in the sidebar.
+#[derive(Clone)]
+struct DraggedGroup {
+    id: GroupId,
+    name: SharedString,
+}
+
+/// Minimal preview rendered under the cursor while dragging a group.
+struct DraggedGroupPreview {
+    name: SharedString,
+}
+
+impl Render for DraggedGroupPreview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .bg(cx.theme().colors().element_background)
+            .child(Label::new(self.name.clone()).size(LabelSize::Small))
+    }
 }
 
 /// Group-menu actions for the coding agent in that group.
@@ -752,6 +786,13 @@ pub struct TerminalListPanel {
     /// Coding-agent terminals closed by the user. The PTY stays alive so the
     /// next new terminal can reattach instead of starting a fresh shell.
     parked_agent_sessions: Vec<ParkedAgentSession>,
+    /// Live terminals removed from every group but still running. They are not
+    /// persisted: quitting the app releases their PTYs like any other view.
+    detached_sessions: Vec<DetachedSession>,
+    /// Transient "index/total · name" hint shown after a group shortcut.
+    group_switch_hint: Option<(SharedString, u64)>,
+    /// Monotonic token so an older timer cannot clear a newer hint.
+    switch_hint_generation: u64,
     /// Agent and directory remembered at close time, so a later terminal can
     /// run the CLI's resume command after the process has exited.
     remembered_agent_sessions: Vec<RememberedAgentSession>,
@@ -848,6 +889,9 @@ impl TerminalListPanel {
             cwd_persist_task: Task::ready(()),
             restore_cwd_guard_until: None,
             parked_agent_sessions: Vec::new(),
+            detached_sessions: Vec::new(),
+            group_switch_hint: None,
+            switch_hint_generation: 0,
             remembered_agent_sessions: Vec::new(),
             _session_release_subscription,
             renaming_group_id: None,
@@ -2006,6 +2050,15 @@ impl TerminalListPanel {
                         menu
                     })
             };
+
+            let detach_panel = panel.clone();
+            let menu =
+                menu.separator()
+                    .entry(i18n::t("detach_terminal"), None, move |window, cx| {
+                        detach_panel.update(cx, |this, cx| {
+                            this.detach_terminal(terminal_id, window, cx);
+                        });
+                    });
 
             menu.entry(i18n::t("close"), None, move |window, cx| {
                 close_panel.update(cx, |this, cx| {
@@ -3632,6 +3685,7 @@ impl TerminalListPanel {
         let next = (current + offset).rem_euclid(len) as usize;
         let group_id = self.groups[next].id;
         self.switch_group(group_id, window, cx);
+        self.show_group_switch_hint(group_id, cx);
     }
 
     /// Switches the display pane to show the given group's terminals as tabs,
@@ -3802,6 +3856,179 @@ impl TerminalListPanel {
                 cx.notify();
             }
         }
+    }
+
+    /// Removes a terminal from its group but keeps its PTY, scrollback and
+    /// running processes alive so it can be reattached later.
+    fn detach_terminal(
+        &mut self,
+        terminal_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session_restoring {
+            return;
+        }
+        let Some(group_ix) = self.groups.iter().position(|group| {
+            group
+                .terminals
+                .iter()
+                .any(|view| view.entity_id() == terminal_id)
+        }) else {
+            return;
+        };
+        let group_id = self.groups[group_ix].id;
+        let Some(removed_ix) = self.groups[group_ix]
+            .terminals
+            .iter()
+            .position(|view| view.entity_id() == terminal_id)
+        else {
+            return;
+        };
+
+        let view = self.groups[group_ix].terminals.remove(removed_ix);
+        let title = sidebar_terminal_name(&view, cx);
+        let cwd = self
+            .terminal_spawn_cwds
+            .get(&terminal_id)
+            .cloned()
+            .flatten()
+            .or_else(|| view.read(cx).terminal().read(cx).working_directory());
+
+        // Manual layouts store indices into `group.terminals`; keep them
+        // pointing at the same terminals after the list shifts left.
+        if self.groups[group_ix].layout_mode == GroupLayoutMode::Manual {
+            if let Some(layout) = self.groups[group_ix].saved_layout.as_mut() {
+                Self::remap_layout_after_remove(layout, removed_ix);
+            }
+        }
+        if self.groups[group_ix].terminals.is_empty() {
+            self.groups[group_ix].has_unread = false;
+            if self.groups[group_ix].layout_mode == GroupLayoutMode::Manual {
+                self.groups[group_ix].saved_layout = None;
+            }
+        }
+
+        // Only the active group's terminals live in the center panes.
+        if group_id == self.active_group_id {
+            if let Some(workspace) = self.workspace.upgrade() {
+                let panes = workspace.read(cx).panes().to_vec();
+                for pane in panes {
+                    let shows_terminal = pane
+                        .read(cx)
+                        .items()
+                        .any(|item| item.item_id() == terminal_id);
+                    if shows_terminal {
+                        pane.update(cx, |pane, cx| {
+                            pane.remove_item(terminal_id, false, false, window, cx);
+                        });
+                    }
+                }
+            }
+            self.defer_sync_active_group_to_pane(window, cx);
+        }
+
+        self.detached_sessions
+            .push(DetachedSession { view, title, cwd });
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Puts a detached terminal back into the active group without recreating
+    /// its view or PTY.
+    fn reattach_detached(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.detached_sessions.len() {
+            return;
+        }
+        if self.groups.is_empty() {
+            let id = self.new_group_id();
+            self.groups.push(TerminalGroup {
+                id,
+                name: SharedString::from(i18n::t("terminals")),
+                terminals: Vec::new(),
+                collapsed: false,
+                has_unread: false,
+                saved_layout: None,
+                layout_mode: GroupLayoutMode::Manual,
+                broadcast_input: false,
+                session_terminal_count: None,
+                restore_slots: Vec::new(),
+            });
+            self.active_group_id = id;
+        }
+        let session = self.detached_sessions.remove(index);
+        let group_id = self.active_group_id;
+        self.prepare_group_for_terminal(group_id, window, cx);
+        self.add_terminal_to_group(group_id, session.view, None, session.cwd, cx);
+        self.defer_sync_active_group_to_pane(window, cx);
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Drops a detached session for good, releasing its PTY.
+    fn close_detached_session(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.detached_sessions.len() {
+            return;
+        }
+        let session = self.detached_sessions.remove(index);
+        let id = session.view.entity_id();
+        self._terminal_subscriptions.remove(&id);
+        self.terminal_spawn_cwds.remove(&id);
+        drop(session.view);
+        cx.notify();
+    }
+
+    /// Moves a group to `target`'s slot in the sidebar (drag and drop).
+    fn reorder_group(&mut self, dragged: GroupId, target: GroupId, cx: &mut Context<Self>) {
+        if dragged == target {
+            return;
+        }
+        let (Some(from), Some(to)) = (
+            self.groups.iter().position(|group| group.id == dragged),
+            self.groups.iter().position(|group| group.id == target),
+        ) else {
+            return;
+        };
+        let group = self.groups.remove(from);
+        let insert_at = to.min(self.groups.len());
+        self.groups.insert(insert_at, group);
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Shows a transient "index/total · name" banner after a group shortcut.
+    fn show_group_switch_hint(&mut self, group_id: GroupId, cx: &mut Context<Self>) {
+        let Some(index) = self.groups.iter().position(|group| group.id == group_id) else {
+            return;
+        };
+        let text: SharedString = format!(
+            "{}/{} · {}",
+            index + 1,
+            self.groups.len(),
+            self.groups[index].name
+        )
+        .into();
+        self.switch_hint_generation += 1;
+        let token = self.switch_hint_generation;
+        self.group_switch_hint = Some((text, token));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1400))
+                .await;
+            this.update(cx, |this, cx| {
+                if this
+                    .group_switch_hint
+                    .as_ref()
+                    .is_some_and(|(_, hint_token)| *hint_token == token)
+                {
+                    this.group_switch_hint = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn on_workspace_event(
@@ -4264,6 +4491,13 @@ impl Render for TerminalListPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let active_group_id = self.active_group_id;
+        let group_switch_hint = self.group_switch_hint.clone().map(|(text, _)| text);
+        let detached_snapshot: Vec<(usize, SharedString)> = self
+            .detached_sessions
+            .iter()
+            .enumerate()
+            .map(|(index, session)| (index, session.title.clone()))
+            .collect();
 
         let active_terminal_id = self
             .display_pane_entity(cx)
@@ -4308,6 +4542,7 @@ impl Render for TerminalListPanel {
             let panel = cx.entity().clone();
             let is_renaming = Some(group_id) == self.renaming_group_id;
             let rename_editor = self.rename_editor.clone();
+            let drag_name = name.clone();
 
             let on_group_click = cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                 if event.click_count() == 2 {
@@ -4432,6 +4667,27 @@ impl Render for TerminalListPanel {
                                                 ),
                                         ),
                                 )
+                                .on_drag(
+                                    DraggedGroup {
+                                        id: group_id,
+                                        name: drag_name,
+                                    },
+                                    |dragged, _, _, cx| {
+                                        cx.new(|_| DraggedGroupPreview {
+                                            name: dragged.name.clone(),
+                                        })
+                                    },
+                                )
+                                .on_drop({
+                                    let panel = panel.downgrade();
+                                    move |dragged: &DraggedGroup, _window, cx: &mut App| {
+                                        panel
+                                            .update(cx, |this, cx| {
+                                                this.reorder_group(dragged.id, group_id, cx);
+                                            })
+                                            .ok();
+                                    }
+                                })
                                 .on_click(on_group_click)
                         }
                     })
@@ -4518,6 +4774,67 @@ impl Render for TerminalListPanel {
             }
         }
 
+        let mut detached_rows: Vec<AnyElement> = Vec::new();
+        if !detached_snapshot.is_empty() {
+            detached_rows.push(
+                h_flex()
+                    .px_2()
+                    .py_1()
+                    .mx_1()
+                    .items_center()
+                    .child(
+                        Label::new(i18n::t("detached_sessions"))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .into_any_element(),
+            );
+            for (index, title) in detached_snapshot {
+                let hover_background = cx.theme().colors().element_hover;
+                let on_click = cx.listener(move |this, _, window, cx| {
+                    this.reattach_detached(index, window, cx);
+                });
+                let on_close = cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.close_detached_session(index, cx);
+                });
+                detached_rows.push(
+                    div()
+                        .id(SharedString::from(format!("detached-{index}")))
+                        .px_2()
+                        .py_1()
+                        .mx_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(hover_background))
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .child(div().size(IconSize::Small.rems()))
+                                .child(
+                                    ui::Icon::new(IconName::Terminal)
+                                        .size(IconSize::Small)
+                                        .color(Color::Muted),
+                                )
+                                .child(Label::new(title).size(LabelSize::Small).truncate())
+                                .child(div().flex_grow(1.))
+                                .child(
+                                    IconButton::new(
+                                        SharedString::from(format!("detached-close-{index}")),
+                                        IconName::Close,
+                                    )
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text(i18n::t("close")))
+                                    .on_click(on_close),
+                                ),
+                        )
+                        .on_click(on_click)
+                        .into_any_element(),
+                );
+            }
+        }
+
         v_flex()
             .size_full()
             .overflow_hidden()
@@ -4589,12 +4906,22 @@ impl Render for TerminalListPanel {
                             ),
                     ),
             )
+            .when(group_switch_hint.is_some(), |el| {
+                el.child(
+                    div().px_3().pb_1().child(
+                        Label::new(group_switch_hint.clone().unwrap_or_default())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Accent),
+                    ),
+                )
+            })
             .child(
                 v_flex()
                     .id("terminal-list")
                     .flex_1()
                     .overflow_y_scroll()
-                    .children(rows),
+                    .children(rows)
+                    .children(detached_rows),
             )
     }
 }
@@ -5230,6 +5557,99 @@ mod tests {
         assert_eq!(panel.read_with(cx, |p, _| p.active_group_id), target_id);
         assert!(is_visible(cx), "moved tab must appear in its new group");
         assert_eq!(panel.read_with(cx, |p, _| p.groups[1].terminals.len()), 2);
+    }
+
+    /// Detaching a terminal must keep the same view alive (and its PTY) while
+    /// removing it from its group and the center panes; reattaching restores
+    /// that same view instead of spawning a new shell.
+    #[gpui::test]
+    async fn detach_and_reattach_preserve_terminal_view(cx: &mut TestAppContext) {
+        // Isolate session-file writes from the real data directory.
+        ensure_test_data_dir();
+
+        let params = cx.update(AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let project = Project::test(params.fs.clone(), [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+
+        let panel = window_handle
+            .update(cx, |mw, window, cx| {
+                let workspace = mw.workspace().clone();
+                let project = workspace.read(cx).project().clone();
+                let display_pane = workspace.read(cx).active_pane().clone();
+                let panel = cx.new(|cx| {
+                    TerminalListPanel::new(
+                        workspace.clone(),
+                        display_pane,
+                        project,
+                        None,
+                        window,
+                        cx,
+                    )
+                });
+                workspace.update(cx, |workspace, cx| {
+                    workspace.add_panel(panel.clone(), window, cx);
+                });
+                panel
+            })
+            .unwrap();
+
+        seed_group(&panel, &workspace, &project, &window_handle, cx);
+        let detached_id = panel.read_with(cx, |p, _| p.groups[0].terminals[0].entity_id());
+        let is_visible = |cx: &mut TestAppContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                workspace.panes().iter().any(|pane| {
+                    pane.read(cx)
+                        .items()
+                        .any(|item| item.item_id() == detached_id)
+                })
+            })
+        };
+        assert!(is_visible(cx));
+
+        window_handle
+            .update(cx, |_mw, window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.detach_terminal(detached_id, window, cx);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.groups[0].terminals.len(), 1);
+            assert_eq!(panel.detached_sessions.len(), 1);
+            assert_eq!(panel.detached_sessions[0].view.entity_id(), detached_id);
+        });
+        assert!(!is_visible(cx), "detached terminal leaves the center panes");
+
+        window_handle
+            .update(cx, |_mw, window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.reattach_detached(0, window, cx);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.detached_sessions.is_empty());
+            assert_eq!(panel.groups[0].terminals.len(), 2);
+            assert!(
+                panel.groups[0]
+                    .terminals
+                    .iter()
+                    .any(|tv| tv.entity_id() == detached_id),
+                "reattach keeps the original view"
+            );
+        });
+        assert!(is_visible(cx), "reattached terminal is shown again");
     }
 
     /// Regression test: replacing the center layout (a group switch or an

@@ -73,10 +73,7 @@ impl SettingsTab {
     }
 
     fn index(self) -> usize {
-        Self::ALL
-            .iter()
-            .position(|tab| *tab == self)
-            .unwrap_or(0)
+        Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
     }
 }
 
@@ -142,18 +139,24 @@ impl SettingsWindow {
         ToggleButtonGroup::single_row(
             "settings-tabs",
             [
-                ToggleButtonSimple::new(SettingsTab::General.label(), cx.listener(|this, _, _, cx| {
-                    this.select_tab(SettingsTab::General, cx);
-                })),
+                ToggleButtonSimple::new(
+                    SettingsTab::General.label(),
+                    cx.listener(|this, _, _, cx| {
+                        this.select_tab(SettingsTab::General, cx);
+                    }),
+                ),
                 ToggleButtonSimple::new(
                     SettingsTab::Appearance.label(),
                     cx.listener(|this, _, _, cx| {
                         this.select_tab(SettingsTab::Appearance, cx);
                     }),
                 ),
-                ToggleButtonSimple::new(SettingsTab::Editor.label(), cx.listener(|this, _, _, cx| {
-                    this.select_tab(SettingsTab::Editor, cx);
-                })),
+                ToggleButtonSimple::new(
+                    SettingsTab::Editor.label(),
+                    cx.listener(|this, _, _, cx| {
+                        this.select_tab(SettingsTab::Editor, cx);
+                    }),
+                ),
                 ToggleButtonSimple::new(
                     SettingsTab::Terminal.label(),
                     cx.listener(|this, _, _, cx| {
@@ -166,9 +169,12 @@ impl SettingsWindow {
                         this.select_tab(SettingsTab::Keyboard, cx);
                     }),
                 ),
-                ToggleButtonSimple::new(SettingsTab::Agent.label(), cx.listener(|this, _, _, cx| {
-                    this.select_tab(SettingsTab::Agent, cx);
-                })),
+                ToggleButtonSimple::new(
+                    SettingsTab::Agent.label(),
+                    cx.listener(|this, _, _, cx| {
+                        this.select_tab(SettingsTab::Agent, cx);
+                    }),
+                ),
             ],
         )
         .selected_index(active.index())
@@ -297,6 +303,8 @@ impl SettingsWindow {
         let clipboard_read = terminal.clipboard_read;
         let notify_on_command_finish = terminal.notify_on_command_finish;
         let confirm_multiline_paste = terminal.confirm_multiline_paste;
+        let profiles = terminal.profiles.clone();
+        let default_profile = terminal.default_profile.clone();
 
         v_flex()
             .gap_4()
@@ -337,8 +345,10 @@ impl SettingsWindow {
                     let enabled = *state == ToggleState::Selected;
                     let fs = <dyn Fs>::global(cx);
                     update_settings_file(fs, cx, move |content, _| {
-                        content.terminal.get_or_insert_default().notify_on_command_finish =
-                            Some(enabled);
+                        content
+                            .terminal
+                            .get_or_insert_default()
+                            .notify_on_command_finish = Some(enabled);
                     });
                 })
                 .into_any_element(),
@@ -359,8 +369,10 @@ impl SettingsWindow {
                     let enabled = *state == ToggleState::Selected;
                     let fs = <dyn Fs>::global(cx);
                     update_settings_file(fs, cx, move |content, _| {
-                        content.terminal.get_or_insert_default().confirm_multiline_paste =
-                            Some(enabled);
+                        content
+                            .terminal
+                            .get_or_insert_default()
+                            .confirm_multiline_paste = Some(enabled);
                     });
                 })
                 .into_any_element(),
@@ -385,6 +397,87 @@ impl SettingsWindow {
                     });
                 })
                 .into_any_element(),
+            ))
+            .child(settings_section(
+                i18n::t("terminal_profiles"),
+                i18n::t("terminal_profiles_description"),
+                v_flex()
+                    .gap_2()
+                    .children(if profiles.is_empty() {
+                        vec![
+                            Label::new(i18n::t("no_terminal_profiles"))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .into_any_element(),
+                        ]
+                    } else {
+                        profiles
+                            .into_iter()
+                            .map(|profile| {
+                                let name = profile.name.clone();
+                                let is_default = default_profile.as_deref() == Some(name.as_str());
+                                let button_label = if is_default {
+                                    i18n::t("clear_default_profile")
+                                } else {
+                                    i18n::t("set_as_default")
+                                };
+                                let mut row = h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        ui::Icon::new(IconName::Terminal)
+                                            .size(IconSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(Label::new(name.clone()).size(LabelSize::Small));
+                                if is_default {
+                                    row = row.child(
+                                        Label::new(i18n::t("default_label"))
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Accent),
+                                    );
+                                }
+                                row.child(div().flex_grow(1.))
+                                    .child(
+                                        Button::new(
+                                            SharedString::from(format!("profile-default-{name}")),
+                                            button_label,
+                                        )
+                                        .style(ButtonStyle::Outlined)
+                                        .size(ButtonSize::Compact)
+                                        .on_click(
+                                            move |_, _, cx| {
+                                                let new_default = if is_default {
+                                                    None
+                                                } else {
+                                                    Some(name.clone())
+                                                };
+                                                let fs = <dyn Fs>::global(cx);
+                                                update_settings_file(fs, cx, move |content, _| {
+                                                    content
+                                                        .terminal
+                                                        .get_or_insert_default()
+                                                        .default_profile = new_default.clone();
+                                                });
+                                            },
+                                        ),
+                                    )
+                                    .into_any_element()
+                            })
+                            .collect()
+                    })
+                    .child(
+                        Button::new("open-terminal-settings", i18n::t("edit_terminal_profiles"))
+                            .style(ButtonStyle::Outlined)
+                            .size(ButtonSize::Compact)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(
+                                    zed_actions::OpenSettingsFile.boxed_clone(),
+                                    cx,
+                                );
+                            }),
+                    )
+                    .into_any_element(),
             ))
             .into_any_element()
     }

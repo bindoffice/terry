@@ -193,6 +193,26 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("menu_edit", "Edit");
             m.insert("menu_view", "View");
             m.insert("menu_window", "Window");
+            m.insert("menu_terminal", "Terminal");
+            m.insert("next_group", "Next Group");
+            m.insert("previous_group", "Previous Group");
+            m.insert("jump_to_previous_prompt", "Jump to Previous Prompt");
+            m.insert("jump_to_next_prompt", "Jump to Next Prompt");
+            m.insert("copy_last_command_output", "Copy Last Command Output");
+            m.insert("toggle_quake_terminal", "Toggle Quake Terminal");
+            m.insert("terminal_profiles", "Terminal Profiles");
+            m.insert(
+                "terminal_profiles_description",
+                "Launch profiles override the shell, working directory, environment, and startup command.",
+            );
+            m.insert("no_terminal_profiles", "No terminal profiles configured.");
+            m.insert("default_label", "Default");
+            m.insert("set_as_default", "Set as Default");
+            m.insert("clear_default_profile", "Clear Default");
+            m.insert("edit_terminal_profiles", "Edit Settings");
+            m.insert("detach_terminal", "Detach Terminal");
+            m.insert("reattach_terminal", "Reattach Terminal");
+            m.insert("detached_sessions", "Detached Sessions");
             m.insert("undo", "Undo");
             m.insert("redo", "Redo");
             m.insert("cut", "Cut");
@@ -438,6 +458,26 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("menu_edit", "编辑");
             m.insert("menu_view", "显示");
             m.insert("menu_window", "窗口");
+            m.insert("menu_terminal", "终端");
+            m.insert("next_group", "下一个分组");
+            m.insert("previous_group", "上一个分组");
+            m.insert("jump_to_previous_prompt", "跳到上一个提示符");
+            m.insert("jump_to_next_prompt", "跳到下一个提示符");
+            m.insert("copy_last_command_output", "复制上一条命令输出");
+            m.insert("toggle_quake_terminal", "切换 Quake 终端");
+            m.insert("terminal_profiles", "终端配置档");
+            m.insert(
+                "terminal_profiles_description",
+                "配置档可覆盖 shell、工作目录、环境变量和启动命令。",
+            );
+            m.insert("no_terminal_profiles", "未配置终端配置档。");
+            m.insert("default_label", "默认");
+            m.insert("set_as_default", "设为默认");
+            m.insert("clear_default_profile", "取消默认");
+            m.insert("edit_terminal_profiles", "编辑设置");
+            m.insert("detach_terminal", "分离终端");
+            m.insert("reattach_terminal", "重新连接终端");
+            m.insert("detached_sessions", "已分离的会话");
             m.insert("undo", "撤销");
             m.insert("redo", "重做");
             m.insert("cut", "剪切");

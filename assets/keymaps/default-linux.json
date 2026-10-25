@@ -33,6 +33,7 @@
       "ctrl-0": ["zed::ResetBufferFontSize", { "persist": false }],
       "ctrl-alt-,": "zed::OpenSettingsFile",
       "ctrl-q": "zed::Quit",
+      "ctrl-`": "quake_terminal::Toggle",
       "f4": "debugger::Start",
       "f11": "zed::ToggleFullScreen",
       "ctrl-alt-z": "edit_prediction::RatePredictions",

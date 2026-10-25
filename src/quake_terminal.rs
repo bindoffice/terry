@@ -1,9 +1,13 @@
-//! Quake-style drop-down terminal: a global hotkey (ctrl+backtick) toggles a
+//! Quake-style drop-down terminal: a hotkey (ctrl+backtick) toggles a
 //! top-anchored floating terminal window from anywhere in the system.
 //!
 //! MVP notes:
-//! - The hotkey is registered via gpui's global-hotkey API (macOS only, backed
-//!   by Carbon `RegisterEventHotKey`; needs no accessibility permissions).
+//! - On macOS the hotkey is registered via gpui's global-hotkey API (backed by
+//!   Carbon `RegisterEventHotKey`; needs no accessibility permissions), so it
+//!   works while another application is frontmost.
+//! - On Linux and Windows `on_global_hotkey` is a no-op, so the same shortcut is
+//!   bound to [`Toggle`] in `default-linux.json` / `default-windows.json` and
+//!   handled by an app-level action listener.
 //! - No slide animation: the window is shown/hidden in one step.
 //! - The window hosts a standalone `TerminalView` with an invalid (never
 //!   upgradable) `WeakEntity<Workspace>`; `TerminalView` degrades gracefully
@@ -14,13 +18,21 @@
 use gpui::{
     App, AppContext, Bounds, Context, Entity, Focusable, Global, InteractiveElement, IntoElement,
     ParentElement, Render, Styled, UpdateGlobal, WeakEntity, Window, WindowBounds, WindowHandle,
-    WindowKind, WindowOptions, div, point, px, size,
+    WindowKind, WindowOptions, actions, div, point, px, size,
 };
 use project::{LocalProjectFlags, Project};
 use terminal_view::TerminalView;
 use theme::ActiveTheme;
 use util::ResultExt;
 use workspace::{AppState, Workspace};
+
+actions!(
+    quake_terminal,
+    [
+        /// Toggles the quake drop-down terminal.
+        Toggle,
+    ]
+);
 
 /// Carbon virtual key code `kVK_ANSI_Grave` (HIToolbox/Events.h) — the
 /// backtick / grave accent key on ANSI layouts.
@@ -49,7 +61,8 @@ pub fn init(cx: &mut App) {
     QuakeState::set_global(cx, QuakeState::default());
 
     // macOS-only: on other platforms `on_global_hotkey` is a no-op and the
-    // callback is never invoked.
+    // callback is never invoked, so the same shortcut is dispatched as an
+    // action through the keymap instead.
     cx.on_global_hotkey(
         gpui::GlobalHotkey {
             key_code: KEY_CODE_ANSI_GRAVE,
@@ -57,6 +70,8 @@ pub fn init(cx: &mut App) {
         },
         |cx| toggle(cx),
     );
+
+    cx.on_action(|_: &Toggle, cx| toggle(cx));
 }
 
 /// Show/hide semantics: visible-and-key → hide; otherwise → show + focus.
