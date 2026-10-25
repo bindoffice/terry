@@ -115,7 +115,6 @@ members = [
     "crates/bedrock",
     "crates/breadcrumbs",
     "crates/buffer_diff",
-    "crates/call",
     "crates/channel",
     "crates/client",
     "crates/clock",
@@ -193,8 +192,6 @@ members = [
     "crates/language_selector",
     "crates/languages",
     "crates/line_ending_selector",
-    "crates/livekit_api",
-    "crates/livekit_client",
     "crates/llama_cpp",
     "crates/lmstudio",
     "crates/lsp",
@@ -323,7 +320,6 @@ aws_http_client = { path = "crates/aws_http_client" }
 bedrock = { path = "crates/bedrock" }
 breadcrumbs = { path = "crates/breadcrumbs" }
 buffer_diff = { path = "crates/buffer_diff" }
-call = { path = "crates/call" }
 channel = { path = "crates/channel" }
 cli = { path = "crates/cli" }
 client = { path = "crates/client" }
@@ -420,8 +416,6 @@ language_selector = { path = "crates/language_selector" }
 language_tools = { path = "crates/language_tools" }
 languages = { path = "crates/languages" }
 line_ending_selector = { path = "crates/line_ending_selector" }
-livekit_api = { path = "crates/livekit_api" }
-livekit_client = { path = "crates/livekit_client" }
 llama_cpp = { path = "crates/llama_cpp" }
 lmstudio = { path = "crates/lmstudio" }
 lsp = { path = "crates/lsp" }

@@ -7,10 +7,10 @@ rustflags = [
     "--cfg",
     "windows_slim_errors",        # This cfg will reduce the size of `windows::core::Error` from 16 bytes to 4 bytes
     "-C",
-    "target-feature=+crt-static", # This fixes the linking issue when compiling livekit on Windows
+    "target-feature=+crt-static", # Link the C runtime statically so the Windows build has no MSVC redistributable dependency
 ]
 
-# We need lld to link libwebrtc.a successfully on aarch64-linux
+# Use lld on aarch64-linux for reliable linking of large static libraries
 [target.aarch64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 

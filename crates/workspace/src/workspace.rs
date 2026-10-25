@@ -1297,7 +1297,9 @@ pub enum Event {
     },
     /// `activated` is set when the user focused or selected the item.
     /// Title refreshes, including those caused by resizing a terminal, leave it false.
-    ActiveItemChanged { activated: bool },
+    ActiveItemChanged {
+        activated: bool,
+    },
     ItemRemoved {
         item_id: EntityId,
     },
@@ -3985,7 +3987,10 @@ impl Workspace {
     }
 
     pub fn most_recent_active_path(&self, cx: &App) -> Option<PathBuf> {
-        if let Some(dir) = self.active_item(cx).and_then(|item| item.directory_for_new_file(cx)) {
+        if let Some(dir) = self
+            .active_item(cx)
+            .and_then(|item| item.directory_for_new_file(cx))
+        {
             return Some(dir);
         }
         if let Some(dir) = &self.last_active_directory {
@@ -4017,7 +4022,10 @@ impl Workspace {
     /// Prefers the active terminal's cwd (or any terminal in the active pane)
     /// so new files save next to where you're working.
     pub fn directory_for_new_path_prompt(&self, cx: &App) -> Option<PathBuf> {
-        if let Some(dir) = self.active_item(cx).and_then(|item| item.directory_for_new_file(cx)) {
+        if let Some(dir) = self
+            .active_item(cx)
+            .and_then(|item| item.directory_for_new_file(cx))
+        {
             return Some(dir);
         }
         if let Some(dir) = self
@@ -5774,9 +5782,12 @@ impl Workspace {
             }
             pane::Event::RemovedItem { item } => {
                 cx.emit(Event::ActiveItemChanged { activated: true });
-        if let Some(dir) = self.active_item(cx).and_then(|item| item.directory_for_new_file(cx)) {
-            self.last_active_directory = Some(dir);
-        }
+                if let Some(dir) = self
+                    .active_item(cx)
+                    .and_then(|item| item.directory_for_new_file(cx))
+                {
+                    self.last_active_directory = Some(dir);
+                }
                 self.update_window_edited(window, cx);
                 if let hash_map::Entry::Occupied(entry) = self.panes_by_item.entry(item.item_id())
                     && entry.get().entity_id() == pane.entity_id()
@@ -6258,7 +6269,10 @@ impl Workspace {
             project.set_active_path(active_entry.clone(), cx)
         });
 
-        if let Some(dir) = self.active_item(cx).and_then(|item| item.directory_for_new_file(cx)) {
+        if let Some(dir) = self
+            .active_item(cx)
+            .and_then(|item| item.directory_for_new_file(cx))
+        {
             self.last_active_directory = Some(dir);
         }
 
@@ -8740,7 +8754,7 @@ impl ParticipantLocation {
     }
 }
 /// Workspace-local view of a remote collaborator's state.
-/// This is the subset of `call::RemoteParticipant` that workspace needs.
+/// This is the subset of a remote participant's state that workspace needs.
 #[derive(Clone)]
 pub struct RemoteCollaborator {
     pub user: Arc<User>,
