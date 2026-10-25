@@ -3631,7 +3631,7 @@ impl TerminalListPanel {
         // Strong item handles keep the underlying views alive; they are
         // re-attached to the new focus pane below.
         let preserved_items: Vec<Box<dyn ItemHandle>> = {
-            let mut seen: HashSet<EntityId> = HashSet::default();
+            let mut seen: HashSet<EntityId> = HashSet::new();
             let mut items = Vec::new();
             let panes = workspace.read(cx).panes().to_vec();
             for pane in panes {
