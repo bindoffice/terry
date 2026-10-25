@@ -1879,6 +1879,25 @@
     //         }
     //     }
     "shell": "system",
+    // Named terminal launch profiles. Each profile can override the shell,
+    // working directory and environment, and type a command into the shell
+    // after it starts. New terminals use `default_profile` when it is set;
+    // profiles can also be picked from a group's context menu.
+    //
+    // "profiles": [
+    //   {
+    //     "name": "tmux",
+    //     "command": "tmux new -A -s main"
+    //   },
+    //   {
+    //     "name": "project venv",
+    //     "shell": { "program": "/bin/zsh" },
+    //     "env": { "VIRTUAL_ENV_DISABLE_PROMPT": "1" },
+    //     "working_directory": "current_project_directory",
+    //     "command": "source .venv/bin/activate"
+    //   }
+    // ],
+    // "default_profile": "tmux",
     // Where to dock terminals panel. Can be `left`, `right`, `bottom`.
     "dock": "bottom",
     // Whether the terminal panel should use flexible (proportional) sizing.
@@ -2124,6 +2143,16 @@
     // use it to read local clipboard contents.
     // Default: false
     "clipboard_read": false,
+    // Show a system notification when a shell command finishes while the
+    // terminal is not focused. Requires OSC 133 shell integration so command
+    // boundaries can be detected.
+    // Default: false
+    "notify_on_command_finish": false,
+    // Ask before pasting text that contains more than one line. Multi-line
+    // pastes into a shell can execute commands immediately, so this is on by
+    // default.
+    // Default: true
+    "confirm_multiline_paste": true,
   },
   "code_actions_on_format": {},
   // Settings related to running tasks.

@@ -22,9 +22,16 @@ __terry_precmd() {
   printf '\e]133;B\e\\'
 }
 
-# Runs before an interactive command line is executed.
+# Runs before an interactive command line is executed. The command text is
+# base64-encoded in the "C" payload so Terry can re-run it later.
 __terry_preexec() {
-  printf '\e]133;C\e\\'
+  if (( $+commands[base64] )) && (( ${#1} <= 128 )); then
+    local encoded
+    encoded=$(printf '%s' "$1" | base64 | tr -d '\n')
+    printf '\e]133;C;%s\e\\' "$encoded"
+  else
+    printf '\e]133;C\e\\'
+  fi
 }
 
 if [[ -o interactive ]]; then

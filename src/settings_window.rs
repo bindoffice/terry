@@ -295,6 +295,8 @@ impl SettingsWindow {
         let terminal = TerminalSettings::get_global(cx);
         let shell_integration = terminal.shell_integration;
         let clipboard_read = terminal.clipboard_read;
+        let notify_on_command_finish = terminal.notify_on_command_finish;
+        let confirm_multiline_paste = terminal.confirm_multiline_paste;
 
         v_flex()
             .gap_4()
@@ -315,6 +317,50 @@ impl SettingsWindow {
                     let fs = <dyn Fs>::global(cx);
                     update_settings_file(fs, cx, move |content, _| {
                         content.terminal.get_or_insert_default().shell_integration = Some(enabled);
+                    });
+                })
+                .into_any_element(),
+            ))
+            .child(settings_section(
+                i18n::t("notify_on_command_finish"),
+                i18n::t("notify_on_command_finish_description"),
+                Switch::new(
+                    "notify-on-command-finish",
+                    if notify_on_command_finish {
+                        ToggleState::Selected
+                    } else {
+                        ToggleState::Unselected
+                    },
+                )
+                .label(i18n::t("notify_on_command_finish"))
+                .on_click(|state, _window, cx| {
+                    let enabled = *state == ToggleState::Selected;
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content.terminal.get_or_insert_default().notify_on_command_finish =
+                            Some(enabled);
+                    });
+                })
+                .into_any_element(),
+            ))
+            .child(settings_section(
+                i18n::t("confirm_multiline_paste"),
+                i18n::t("confirm_multiline_paste_description"),
+                Switch::new(
+                    "confirm-multiline-paste",
+                    if confirm_multiline_paste {
+                        ToggleState::Selected
+                    } else {
+                        ToggleState::Unselected
+                    },
+                )
+                .label(i18n::t("confirm_multiline_paste"))
+                .on_click(|state, _window, cx| {
+                    let enabled = *state == ToggleState::Selected;
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content.terminal.get_or_insert_default().confirm_multiline_paste =
+                            Some(enabled);
                     });
                 })
                 .into_any_element(),

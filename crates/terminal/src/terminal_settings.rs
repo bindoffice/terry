@@ -18,6 +18,16 @@ pub struct Toolbar {
     pub breadcrumbs: bool,
 }
 
+/// A resolved terminal launch profile from settings.
+#[derive(Clone, Debug, Deserialize)]
+pub struct TerminalProfile {
+    pub name: String,
+    pub shell: Option<Shell>,
+    pub working_directory: Option<WorkingDirectory>,
+    pub env: HashMap<String, String>,
+    pub command: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, RegisterSetting)]
 pub struct TerminalSettings {
     pub shell: Shell,
@@ -63,6 +73,15 @@ pub struct TerminalSettings {
     /// allowed; reading is opt-in because remote shells can use it to read
     /// local clipboard contents.
     pub clipboard_read: bool,
+    /// Show a system notification when a command finishes while the terminal
+    /// is not focused.
+    pub notify_on_command_finish: bool,
+    /// Ask before pasting text that contains more than one line.
+    pub confirm_multiline_paste: bool,
+    /// Named launch profiles.
+    pub profiles: Vec<TerminalProfile>,
+    /// Profile used for new terminals, if any.
+    pub default_profile: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -156,7 +175,36 @@ impl settings::Settings for TerminalSettings {
             max_image_memory: user_content.max_image_memory.unwrap_or(512 * 1024 * 1024),
             shell_integration: user_content.shell_integration.unwrap_or(true),
             clipboard_read: user_content.clipboard_read.unwrap_or(false),
+            notify_on_command_finish: user_content.notify_on_command_finish.unwrap_or(false),
+            confirm_multiline_paste: user_content.confirm_multiline_paste.unwrap_or(true),
+            profiles: user_content
+                .profiles
+                .unwrap_or_default()
+                .into_iter()
+                .map(|profile| TerminalProfile {
+                    name: profile.name,
+                    shell: profile.shell.map(settings_shell_to_task_shell),
+                    working_directory: profile.working_directory,
+                    env: profile.env.unwrap_or_default(),
+                    command: profile.command,
+                })
+                .collect(),
+            default_profile: user_content.default_profile,
         }
+    }
+}
+
+impl TerminalSettings {
+    /// Looks up a profile by its exact name.
+    pub fn profile(&self, name: &str) -> Option<&TerminalProfile> {
+        self.profiles.iter().find(|profile| profile.name == name)
+    }
+
+    /// Resolves the configured default profile, if it still exists.
+    pub fn default_profile_config(&self) -> Option<&TerminalProfile> {
+        self.default_profile
+            .as_deref()
+            .and_then(|name| self.profile(name))
     }
 }
 
@@ -182,5 +230,56 @@ impl From<settings::CursorShapeContent> for CursorShape {
             settings::CursorShapeContent::Bar => CursorShape::Bar,
             settings::CursorShapeContent::Hollow => CursorShape::Hollow,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use settings::{RootUserSettings as _, Settings as _, SettingsContent};
+
+    #[test]
+    fn parses_terminal_profiles_and_default() {
+        let content = SettingsContent::parse_json_with_comments(
+            r#"{
+                "terminal": {
+                    "profiles": [
+                        {
+                            "name": "tmux",
+                            "command": "tmux new -A -s main",
+                            "env": { "TMUX_PROFILE": "1" }
+                        },
+                        {
+                            "name": "venv",
+                            "working_directory": "current_project_directory"
+                        }
+                    ],
+                    "default_profile": "tmux",
+                    "notify_on_command_finish": true
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let settings = TerminalSettings::from_settings(&content);
+        assert!(settings.notify_on_command_finish);
+        assert_eq!(settings.profiles.len(), 2);
+        assert_eq!(settings.profiles[0].name, "tmux");
+        assert_eq!(
+            settings.profiles[0].command.as_deref(),
+            Some("tmux new -A -s main")
+        );
+        assert_eq!(
+            settings.profiles[0].env.get("TMUX_PROFILE").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            settings.default_profile_config().map(|profile| profile.name.as_str()),
+            Some("tmux")
+        );
+        assert_eq!(
+            settings.profile("venv").and_then(|profile| profile.working_directory.clone()),
+            Some(WorkingDirectory::CurrentProjectDirectory)
+        );
     }
 }

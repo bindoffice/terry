@@ -976,6 +976,10 @@ pub mod terminal_list_panel {
             NewTerminal,
             /// Creates a new terminal group with a first shell.
             NewGroup,
+            /// Switches to the next terminal group.
+            NextGroup,
+            /// Switches to the previous terminal group.
+            PreviousGroup,
         ]
     );
 }

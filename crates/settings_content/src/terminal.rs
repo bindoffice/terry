@@ -65,6 +65,23 @@ pub struct ProjectTerminalSettingsContent {
     pub path_hyperlink_timeout_ms: Option<u64>,
 }
 
+/// A named set of terminal launch options.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct TerminalProfileContent {
+    /// Display name and lookup key of the profile.
+    pub name: String,
+    /// Shell to launch instead of the global `shell` setting.
+    pub shell: Option<Shell>,
+    /// Working directory to use instead of the global `working_directory`
+    /// setting.
+    pub working_directory: Option<WorkingDirectory>,
+    /// Environment variables merged on top of the global terminal `env`.
+    pub env: Option<HashMap<String, String>>,
+    /// Command to write to the shell after it starts. The command is typed
+    /// into the terminal, so it can use shell syntax and aliases.
+    pub command: Option<String>,
+}
+
 #[with_fallible_options]
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct TerminalSettingsContent {
@@ -215,6 +232,28 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: false
     pub clipboard_read: Option<bool>,
+    /// Whether to show a system notification when a shell command finishes
+    /// while the terminal is not focused. Requires OSC 133 shell integration
+    /// so Terry can detect command boundaries.
+    ///
+    /// Default: false
+    pub notify_on_command_finish: Option<bool>,
+    /// Whether to ask for confirmation before pasting text containing more
+    /// than one line into the terminal.
+    ///
+    /// Default: true
+    pub confirm_multiline_paste: Option<bool>,
+    /// Named terminal profiles. Each profile can override the shell, working
+    /// directory, environment, and run a startup command after the shell is
+    /// ready.
+    ///
+    /// Default: []
+    pub profiles: Option<Vec<TerminalProfileContent>>,
+    /// Name of the profile to use for new terminals. When unset, new terminals
+    /// use the normal `shell` configuration.
+    ///
+    /// Default: null
+    pub default_profile: Option<String>,
 }
 
 /// Shell configuration to open the terminal with.

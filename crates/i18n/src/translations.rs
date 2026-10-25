@@ -9,10 +9,12 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "Terminals");
             m.insert("new_terminal", "New Terminal");
+            m.insert("new_terminal_with_profile", "New Terminal with Profile");
             m.insert("resume_agent_session", "Resume Agent Session");
             m.insert("fork_agent_session", "Fork Agent Session");
             m.insert("past_agent_sessions", "Past Agent Sessions");
             m.insert("clone_terminal", "Clone Terminal");
+            m.insert("move_to_group", "Move to Group");
             m.insert("new_center_terminal", "New Center Terminal");
             m.insert("new_ellipsis", "New…");
             m.insert("new_file", "New File");
@@ -106,6 +108,25 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert(
                 "clipboard_read_description",
                 "Let terminal applications read the system clipboard. A remote shell could use this to read what you copied.",
+            );
+            m.insert("notify_on_command_finish", "Notify When Commands Finish");
+            m.insert(
+                "notify_on_command_finish_description",
+                "Show a system notification when a command finishes in an unfocused terminal. Requires shell integration.",
+            );
+            m.insert("command_finished", "Command finished");
+            m.insert("command_failed", "Command failed (exit {code})");
+            m.insert("select_last_command_output", "Select Last Command Output");
+            m.insert("rerun_last_command", "Rerun Last Command");
+            m.insert("confirm_multiline_paste", "Confirm Multiline Paste");
+            m.insert(
+                "confirm_multiline_paste_description",
+                "Ask before pasting text with more than one line, since shells may execute it immediately.",
+            );
+            m.insert("paste_multiline_title", "Paste multiple lines?");
+            m.insert(
+                "paste_multiline_detail",
+                "The clipboard contains multiple lines. Pasting may execute them immediately.",
             );
                         m.insert("menu_file", "File");
             m.insert("open", "Open…");
@@ -233,10 +254,12 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             let mut m = HashMap::new();
             m.insert("terminals", "终端");
             m.insert("new_terminal", "新建终端");
+            m.insert("new_terminal_with_profile", "按配置档新建终端");
             m.insert("resume_agent_session", "继续 Agent 会话");
             m.insert("fork_agent_session", "分叉 Agent 会话");
             m.insert("past_agent_sessions", "历史 Agent 会话");
             m.insert("clone_terminal", "克隆终端");
+            m.insert("move_to_group", "移动到分组");
             m.insert("new_center_terminal", "新建中间终端");
             m.insert("new_ellipsis", "新建…");
             m.insert("new_file", "新建文件");
@@ -318,6 +341,25 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert(
                 "clipboard_read_description",
                 "允许终端程序读取系统剪贴板。远程 shell 可能借此读取你复制的内容。",
+            );
+            m.insert("notify_on_command_finish", "命令结束时通知");
+            m.insert(
+                "notify_on_command_finish_description",
+                "终端未聚焦时，命令执行结束会发送系统通知。需要开启 Shell 集成。",
+            );
+            m.insert("command_finished", "命令已结束");
+            m.insert("command_failed", "命令失败（退出码 {code}）");
+            m.insert("select_last_command_output", "选中上一条命令输出");
+            m.insert("rerun_last_command", "重新执行上一条命令");
+            m.insert("confirm_multiline_paste", "多行粘贴确认");
+            m.insert(
+                "confirm_multiline_paste_description",
+                "粘贴多行文本前先确认，因为 Shell 可能会立即执行这些命令。",
+            );
+            m.insert("paste_multiline_title", "粘贴多行文本？");
+            m.insert(
+                "paste_multiline_detail",
+                "剪贴板包含多行文本，粘贴后可能会立即执行。",
             );
             m.insert("menu_file", "文件");
             m.insert("open", "打开…");
@@ -455,6 +497,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("terminals", "終端機");
             m.insert("new_terminal", "新增終端機");
             m.insert("clone_terminal", "複製終端機");
+            m.insert("move_to_group", "移動到分組");
             m.insert("new_center_terminal", "新增中間終端機");
             m.insert("new_ellipsis", "新增…");
             m.insert("new_file", "新增檔案");

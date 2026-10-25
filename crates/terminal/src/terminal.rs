@@ -67,10 +67,12 @@ use crate::alacritty::{
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
     append_text_to_term, apply_config, clear_saved_screen, content_text, display_offset,
     display_only_term_config, find_all_visible_links, find_from_terminal_point, full_content_range,
-    last_command_output_text, last_non_empty_lines, last_prompt_mark as last_term_prompt_mark,
+    last_command_input_text, last_command_output_range, last_command_output_text,
+    last_non_empty_lines, last_prompt_mark as last_term_prompt_mark,
     make_content, new_term, open_pty, prompt_marks as term_prompt_marks, pty_options,
-    pty_term_config, resize, screen_lines, scroll_display, scroll_to_point, search_matches,
-    selection_text, set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
+    pty_term_config, resize, screen_lines, scroll_display, scroll_to_point,
+    scroll_to_point_aligned, search_matches, selection_text, set_default_cursor_style,
+    set_selection as set_term_selection, shrink_to_used,
     spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
     update_selection as update_term_selection, update_selection_to_vi_cursor,
     update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
@@ -743,6 +745,9 @@ enum InternalEvent {
     // FocusNextMatch,
     Scroll(Scroll),
     ScrollToPoint(Point),
+    /// Scroll so the point becomes the first visible row, instead of only
+    /// scrolling when it is outside the viewport.
+    ScrollToPointAligned(Point),
     SetSelection(Option<Selection>),
     UpdateSelection(GpuiPoint<Pixels>),
     FindHyperlink(GpuiPoint<Pixels>, bool),
@@ -1835,6 +1840,11 @@ impl Terminal {
                 scroll_to_point(term, *point);
                 self.refresh_hovered_word(window);
             }
+            InternalEvent::ScrollToPointAligned(point) => {
+                trace!("Scrolling to aligned point: point={point:?}");
+                scroll_to_point_aligned(term, *point);
+                self.refresh_hovered_word(window);
+            }
             InternalEvent::MoveViCursorToPoint(point) => {
                 trace!("Move vi cursor to point: point={point:?}");
                 vi_goto_point(term, *point);
@@ -2027,14 +2037,45 @@ impl Terminal {
         last_term_prompt_mark(&self.term.lock_unfair())
     }
 
-    /// Scroll so the most recent shell prompt (OSC 133) becomes visible.
-    /// Returns whether a mark existed.
+    /// First visible row of the viewport, in grid coordinates.
+    fn prompt_navigation_reference(&self) -> i32 {
+        -(self.last_content.display_offset as i32)
+    }
+
+    /// Scroll so the previous shell prompt (OSC 133) becomes the first visible
+    /// row. Returns whether the viewport moved.
     pub fn jump_to_previous_prompt(&mut self) -> bool {
-        let Some(mark) = self.last_prompt_mark() else {
+        let marks = self.prompt_marks();
+        let reference = self.prompt_navigation_reference();
+        let Some(mark) = previous_prompt_mark(&marks, reference) else {
             return false;
         };
-        self.events.push_back(InternalEvent::ScrollToPoint(mark));
+        self.events
+            .push_back(InternalEvent::ScrollToPointAligned(mark));
         true
+    }
+
+    /// Scroll so the next shell prompt (OSC 133) becomes the first visible row.
+    /// Prompts on the live screen cannot be aligned to the top, so those scroll
+    /// back to the bottom instead.
+    /// Returns whether the viewport moved.
+    pub fn jump_to_next_prompt(&mut self) -> bool {
+        let marks = self.prompt_marks();
+        let reference = self.prompt_navigation_reference();
+        if let Some(mark) = next_prompt_mark(&marks, reference) {
+            if mark.line >= 0 {
+                self.events.push_back(InternalEvent::Scroll(Scroll::Bottom));
+            } else {
+                self.events
+                    .push_back(InternalEvent::ScrollToPointAligned(mark));
+            }
+            return true;
+        }
+        if self.last_content.display_offset > 0 {
+            self.events.push_back(InternalEvent::Scroll(Scroll::Bottom));
+            return true;
+        }
+        false
     }
 
     //To test:
@@ -2550,9 +2591,9 @@ impl Terminal {
         self.last_exit_code
     }
 
-    /// Copy the previous command's input/output (tracked via `OSC 133;C/D`
-    /// shell integration markers). No-op if the shell hasn't reported a
-    /// finished command yet.
+    /// Copy the previous command's output (tracked via `OSC 133;C/D` shell
+    /// integration markers). No-op if the shell hasn't reported a finished
+    /// command yet.
     pub fn copy_last_command_output(&mut self, cx: &mut Context<Self>) {
         let text = {
             let term = self.term.lock_unfair();
@@ -2562,6 +2603,43 @@ impl Terminal {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             cx.notify();
         }
+    }
+
+    /// Select the previous command's output and scroll its beginning into
+    /// view. Returns whether a command range was available.
+    pub fn select_last_command_output(&mut self) -> bool {
+        let Some((start, end)) = ({
+            let term = self.term.lock_unfair();
+            last_command_output_range(&term)
+        }) else {
+            return false;
+        };
+        if start == end {
+            return false;
+        }
+        self.events
+            .push_back(InternalEvent::SetSelection(Some(Selection::simple_range(
+                Range::new(start, end),
+            ))));
+        self.events
+            .push_back(InternalEvent::ScrollToPointAligned(start));
+        true
+    }
+
+    /// Re-run the previous command by writing its recorded command line to the
+    /// shell. Returns whether a non-empty command was available.
+    pub fn rerun_last_command(&mut self) -> bool {
+        let Some(text) = ({
+            let term = self.term.lock_unfair();
+            last_command_input_text(&term)
+        }) else {
+            return false;
+        };
+        let mut input = text.into_bytes();
+        input.push(b'\r');
+        self.write_to_pty(input);
+        self.events.push_back(InternalEvent::Scroll(Scroll::Bottom));
+        true
     }
 
     pub fn last_n_non_empty_lines(&self, n: usize) -> Vec<String> {
@@ -3497,6 +3575,25 @@ impl Drop for Terminal {
 
 impl EventEmitter<Event> for Terminal {}
 
+/// Greatest prompt mark strictly above `reference`, i.e. the prompt before the
+/// current viewport or cursor.
+fn previous_prompt_mark(marks: &[Point], reference: i32) -> Option<Point> {
+    marks
+        .iter()
+        .rev()
+        .copied()
+        .find(|mark| mark.line < reference)
+}
+
+/// Smallest prompt mark strictly below `reference`, i.e. the prompt after the
+/// current viewport or cursor.
+fn next_prompt_mark(marks: &[Point], reference: i32) -> Option<Point> {
+    marks
+        .iter()
+        .copied()
+        .find(|mark| mark.line > reference)
+}
+
 /// Strip control characters from pasted text so clipboard contents cannot
 /// inject terminal escape sequences (OSC 52, title changes, cursor movement)
 /// or keyboard shortcuts such as Ctrl-C. Tabs and line breaks are preserved.
@@ -3724,6 +3821,41 @@ mod tests {
     use parking_lot::Mutex;
     use rand::{Rng, distr, rngs::StdRng};
     use task::{Shell, ShellBuilder};
+
+    #[test]
+    fn prompt_navigation_picks_adjacent_marks() {
+        let marks = vec![
+            Point::new(-30, 0),
+            Point::new(-20, 0),
+            Point::new(-10, 0),
+        ];
+
+        assert_eq!(
+            previous_prompt_mark(&marks, 0),
+            Some(Point::new(-10, 0))
+        );
+        assert_eq!(
+            previous_prompt_mark(&marks, -10),
+            Some(Point::new(-20, 0))
+        );
+        assert_eq!(
+            previous_prompt_mark(&marks, -30),
+            None
+        );
+        assert_eq!(
+            next_prompt_mark(&marks, -20),
+            Some(Point::new(-10, 0))
+        );
+        assert_eq!(next_prompt_mark(&marks, -10), None);
+    }
+
+    #[test]
+    fn prompt_navigation_handles_marks_inside_viewport() {
+        let marks = vec![Point::new(-20, 0), Point::new(2, 0), Point::new(8, 0)];
+
+        assert_eq!(previous_prompt_mark(&marks, 8), Some(Point::new(2, 0)));
+        assert_eq!(next_prompt_mark(&marks, 2), Some(Point::new(8, 0)));
+    }
 
     #[test]
     fn test_init_command_startup_marker_commands_do_not_contain_marker() {

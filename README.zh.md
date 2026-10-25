@@ -19,12 +19,14 @@
 
 ## 功能特性
 
-- **终端工作区** — 分组管理多个终端，按正确工作目录新建会话；分组支持自动平铺布局（手动 / tall / grid / stack，类似 kitty）；在分组右键菜单开启**广播输入**，一次键入同时发送到组内所有终端（`ctrl-alt-b`）
+- **终端工作区** — 分组管理多个终端，`ctrl-alt-shift-up` / `ctrl-alt-shift-down` 切换分组；按正确工作目录新建会话；分组支持自动平铺布局（手动 / tall / grid / stack，类似 kitty）；在分组右键菜单开启**广播输入**，一次键入同时发送到组内所有终端（`ctrl-alt-b`）
 - **Quake 终端** — 全局热键 `ctrl+\`` 随处呼出的下拉终端，贴顶显示（macOS）
 - **命令行** — 从脚本和编辑器驱动运行中的 Terry：`terry new-tab --cwd ~/src`、`terry send-text "cargo test"`
 - **终端图像** — 支持 kitty graphics 协议与 sixel，终端内直接显示图片，GIF 可动画（`chafa` / `viu` / `icat` 可用）
 - **终端协议** — kitty 键盘协议（CSI u）与 OSC 52 剪贴板写入（读取需显式开启 `"terminal": { "clipboard_read": true }`）
-- **Shell 集成** — zsh / fish 开箱即用：提示符标记（OSC 133 / VS Code OSC 633）与工作目录跟踪（OSC 7）；`ctrl-shift-up` 跳转到上一条命令的提示符
+- **粘贴安全** — 多行粘贴默认先确认（可用 `"terminal": { "confirm_multiline_paste": false }` 关闭）
+- **Shell 集成** — zsh / fish 开箱即用：提示符标记（OSC 133 / VS Code OSC 633）与工作目录跟踪（OSC 7）；`ctrl-shift-up` / `ctrl-shift-down` 在各条命令的提示符之间跳转
+- **终端配置档** — 命名 Profile 可覆盖 Shell、环境变量与工作目录，并在 Shell 启动后执行命令（例如 `tmux` 或激活项目虚拟环境）；可在分组右键菜单中选择，或用 `default_profile` 设为默认
 - **链接跳转** — `Ctrl+Shift+E` 列出当前可见的所有链接（URL / 路径 / OSC 8），键盘选择打开
 - **AI Agent** — 侧边栏与大模型对话，通过可配置的 Profile 调用命令与工具
 - **MCP** — 接入 Model Context Protocol 服务器，扩展 Agent 能力
@@ -35,7 +37,7 @@
 
 ## Shell 集成
 
-Terry 解析 **OSC 133** 提示符标记（含 VS Code 的 **OSC 633** 变体）与 **OSC 7** 工作目录上报。集成生效后，`ctrl-shift-up` 可跳转到上一条命令的提示符。
+Terry 解析 **OSC 133** 提示符标记（含 VS Code 的 **OSC 633** 变体）与 **OSC 7** 工作目录上报。集成生效后，`ctrl-shift-up` / `ctrl-shift-down` 可在各条命令的提示符之间前后跳转；Terry 还会记录命令文本，用于选中输出或重新执行。
 
 - **zsh 与 fish** 开箱即用。Terry 会把集成脚本写入数据目录（macOS 上为 `~/Library/Application Support/Terry/shell-integration`）并自动注入，无需修改任何 dotfile。在设置的 `terminal` 段中设置 `"shell_integration": false` 可关闭。
 - **bash** 需手动启用 —— 在 `~/.bashrc` 中加一行：
@@ -77,9 +79,12 @@ terry send-text "cargo test"       # 向活动终端粘贴文本
 
 Shell 集成生效后，Terry 会跟踪每条命令的边界与退出码（`OSC 133;C/D`）：
 
-- `cmd-alt-u`（macOS）/ `ctrl-alt-u`（Linux、Windows）把上一条命令的输入与输出复制到剪贴板
+- `cmd-alt-u`（macOS）/ `ctrl-alt-u`（Linux、Windows）把上一条命令的输出复制到剪贴板
+- `cmd-alt-shift-u` / `ctrl-alt-shift-u` 选中上一条命令的输出
+- `cmd-alt-shift-r` / `ctrl-alt-shift-r` 重新执行上一条命令
 - 状态栏显示最近一条失败命令的退出码，如 `分组 · 标题 · exit 1`
-- 终端搜索（`cmd-f`）支持大小写敏感开关（macOS 为 `alt-cmd-c`，其他平台为 `alt-c`）
+- 可在「设置 → 终端」开启命令结束通知；OSC 9 进度会显示在标签页标题中
+- 终端搜索（`cmd-f`）支持大小写敏感、整词匹配与正则模式
 
 ## 支持平台
 

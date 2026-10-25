@@ -23,8 +23,14 @@ if not set -q TERRY_SHELL_INTEGRATION_LOADED
         printf '\e]133;B\e\\'
     end
 
-    # Runs before an interactive command line is executed.
+    # Runs before an interactive command line is executed. The command text is
+    # base64-encoded in the "C" payload so Terry can re-run it later.
     function __terry_fish_preexec --on-event fish_preexec
-        printf '\e]133;C\e\\'
+        if command -sq base64; and test (string length -- $argv[1]) -le 128
+            set -l encoded (printf '%s' $argv[1] | base64 | tr -d '\n')
+            printf '\e]133;C;%s\e\\' $encoded
+        else
+            printf '\e]133;C\e\\'
+        end
     end
 end

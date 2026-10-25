@@ -263,6 +263,18 @@ pub(super) fn scroll_to_point(term: &mut AlacrittyTerm, point: Point) {
     term.scroll_to_point(point.to_alacritty());
 }
 
+/// Scroll so `point` is the first visible row. Unlike `scroll_to_point`, this
+/// also moves the viewport when the target is already visible, which is what
+/// prompt-to-prompt navigation needs.
+pub(super) fn scroll_to_point_aligned(term: &mut AlacrittyTerm, point: Point) {
+    let current_offset = display_offset(term) as i32;
+    let target_offset = -point.line;
+    let delta = target_offset - current_offset;
+    if delta != 0 {
+        scroll_display(term, Scroll::Delta(delta));
+    }
+}
+
 pub(super) fn prompt_marks(term: &AlacrittyTerm) -> Vec<Point> {
     term.prompt_marks()
         .map(|point| terminal_point_from_alacritty(*point))
@@ -927,6 +939,33 @@ pub(super) fn last_command_output_text(term: &Term<ZedListener>) -> Option<Strin
         start
     };
     Some(term.bounds_to_string(start, end))
+}
+
+pub(super) fn last_command_output_range(term: &Term<ZedListener>) -> Option<(Point, Point)> {
+    let (start, end) = term.last_command_range()?;
+    let topmost = term.topmost_line();
+    if end.line < topmost {
+        return None;
+    }
+    let start = if start.line < topmost {
+        AlacPoint::new(topmost, Column(0))
+    } else {
+        start
+    };
+    Some((
+        terminal_point_from_alacritty(start),
+        terminal_point_from_alacritty(end),
+    ))
+}
+
+pub(super) fn last_command_input_text(term: &Term<ZedListener>) -> Option<String> {
+    let text = term.last_command_text()?;
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
 }
 
 pub(super) fn total_lines(term: &Term<ZedListener>) -> usize {

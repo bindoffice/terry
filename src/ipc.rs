@@ -396,7 +396,7 @@ async fn new_tab(cx: &mut AsyncApp, cwd: Option<PathBuf>) -> Result<Value, Strin
                     }
                 });
                 window.activate_window();
-                Ok(before)
+                Ok::<_, String>(before)
             })
         })
         .map_err(|error| error.to_string())??;

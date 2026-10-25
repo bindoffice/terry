@@ -19,12 +19,14 @@ Group shells, browse files, and keep an AI agent beside you — built for people
 
 ## Features
 
-- **Terminal workspace** — Group and manage multiple terminals; open new sessions with the right working directory; groups support automatic tiled layouts (manual / tall / grid / stack, like kitty); enable **broadcast input** in a group's context menu to type into every terminal at once (`ctrl-alt-b`)
+- **Terminal workspace** — Group and manage multiple terminals; switch groups with `ctrl-alt-shift-up` / `ctrl-alt-shift-down`; open new sessions with the right working directory; groups support automatic tiled layouts (manual / tall / grid / stack, like kitty); enable **broadcast input** in a group's context menu to type into every terminal at once (`ctrl-alt-b`)
 - **Quake terminal** — A drop-down terminal summoned anywhere with `ctrl+\`` , docked to the top of the screen (macOS)
 - **CLI** — Drive a running Terry from scripts and editors: `terry new-tab --cwd ~/src` and `terry send-text "cargo test"`
 - **Terminal images** — kitty graphics protocol and sixel support for rendering images directly in the terminal, with animated GIFs (`chafa` / `viu` / `icat` work)
 - **Terminal protocols** — kitty keyboard protocol (CSI u) and OSC 52 clipboard write (clipboard *read* is opt-in via `"terminal": { "clipboard_read": true }`)
-- **Shell integration** — automatic for zsh and fish: prompt marks (OSC 133 / VS Code OSC 633) and working-directory tracking (OSC 7); `ctrl-shift-up` jumps to the previous prompt
+- **Paste safety** — multi-line pastes ask for confirmation by default (`"terminal": { "confirm_multiline_paste": false }` to disable)
+- **Shell integration** — automatic for zsh and fish: prompt marks (OSC 133 / VS Code OSC 633) and working-directory tracking (OSC 7); `ctrl-shift-up` / `ctrl-shift-down` move between prompts
+- **Terminal profiles** — named launch profiles can override the shell, environment, and working directory, and run a startup command (for example `tmux` or a project virtualenv); pick one from a group's context menu or set `default_profile`
 - **Link jump** — `Ctrl+Shift+E` lists all currently visible links (URL / path / OSC 8); pick one with the keyboard to open it
 - **AI Agent** — Chat with LLMs in a side panel; run commands and tools with configurable profiles
 - **MCP** — Connect Model Context Protocol servers to extend agent capabilities
@@ -35,7 +37,7 @@ Group shells, browse files, and keep an AI agent beside you — built for people
 
 ## Shell integration
 
-Terry parses **OSC 133** prompt marks (including the VS Code **OSC 633** variant) and **OSC 7** working-directory reports. With integration active, `ctrl-shift-up` jumps to the previous prompt.
+Terry parses **OSC 133** prompt marks (including the VS Code **OSC 633** variant) and **OSC 7** working-directory reports. With integration active, `ctrl-shift-up` / `ctrl-shift-down` move between prompts, and the last command line is recorded so it can be selected or re-run.
 
 - **zsh and fish** work out of the box. Terry writes its integration scripts to its data directory (on macOS: `~/Library/Application Support/Terry/shell-integration`) and injects them automatically — no dotfile changes needed. Disable it with `"shell_integration": false` in the `terminal` section of your settings.
 - **bash** is supported manually — add one line to `~/.bashrc`:
@@ -77,9 +79,12 @@ The same bearer-protected loopback server also accepts JSON requests:
 
 With shell integration active, Terry tracks each command's boundaries and exit code (`OSC 133;C/D`):
 
-- `cmd-alt-u` (macOS) / `ctrl-alt-u` (Linux, Windows) copies the previous command's input and output to the clipboard
+- `cmd-alt-u` (macOS) / `ctrl-alt-u` (Linux, Windows) copies the previous command's output to the clipboard
+- `cmd-alt-shift-u` / `ctrl-alt-shift-u` selects the previous command's output
+- `cmd-alt-shift-r` / `ctrl-alt-shift-r` re-runs the previous command
 - The status bar shows the last failed command's exit code, e.g. `group · title · exit 1`
-- Terminal search (`cmd-f`) has a case-sensitive toggle (`alt-cmd-c` on macOS, `alt-c` elsewhere)
+- Optional command-finished notifications (Settings → Terminal) and OSC 9 progress in the tab title
+- Terminal search (`cmd-f`) supports case-sensitive, whole-word, and regex modes
 
 ## Platforms
 

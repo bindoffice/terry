@@ -48,7 +48,13 @@ __terry_preexec() {
   case "$BASH_COMMAND" in
     *__terry_precmd*) return 0 ;;
   esac
-  printf '\e]133;C\e\\'
+  if command -v base64 >/dev/null 2>&1 && [ "${#BASH_COMMAND}" -le 128 ]; then
+    local encoded
+    encoded=$(printf '%s' "$BASH_COMMAND" | base64 | tr -d '\n')
+    printf '\e]133;C;%s\e\\' "$encoded"
+  else
+    printf '\e]133;C\e\\'
+  fi
 }
 
 # bash-preexec (https://github.com/rcaloras/bash-preexec) is widely used and

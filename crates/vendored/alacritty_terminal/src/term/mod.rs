@@ -357,8 +357,20 @@ pub struct Term<T> {
     /// `OSC 133;B`). Pushed into [`Self::prompt_marks`] once closed.
     active_prompt_mark: Option<Point>,
 
+    /// Where the current prompt ended (`OSC 133;B`), i.e. where the user's
+    /// command line begins.
+    prompt_end_mark: Option<Point>,
+
     /// The point where the currently running command started (`OSC 133;C`).
     command_start: Option<Point>,
+
+    /// Grid range covering the command line that was executed, from
+    /// `OSC 133;B` through `OSC 133;C`.
+    last_command_input_range: Option<(Point, Point)>,
+
+    /// Command line reported by the shell in the payload of `OSC 133;C`, if
+    /// the integration script encodes one.
+    last_command_text: Option<String>,
 
     /// Grid range covering the previous command's input and output, from
     /// `OSC 133;C` through `OSC 133;D`.
@@ -498,7 +510,10 @@ impl<T> Term<T> {
             images: ImageState::new(),
             prompt_marks: VecDeque::new(),
             active_prompt_mark: None,
+            prompt_end_mark: None,
             command_start: None,
+            last_command_input_range: None,
+            last_command_text: None,
             last_command_range: None,
             last_exit_code: None,
         }
@@ -2097,17 +2112,29 @@ impl<T: EventListener> Handler for Term<T> {
             // Prompt start. If a previous prompt is still open, close it first.
             'A' => {
                 self.finish_active_prompt();
+                self.prompt_end_mark = None;
                 self.active_prompt_mark = Some(self.grid.cursor.point);
             }
-            // Prompt end.
-            'B' => self.finish_active_prompt(),
+            // Prompt end: the user's command line starts here.
+            'B' => {
+                self.prompt_end_mark = Some(self.grid.cursor.point);
+                self.finish_active_prompt();
+            }
             // Mark the entire prompt (start and end at the current position).
             'F' => {
                 self.finish_active_prompt();
                 self.push_prompt_mark(self.grid.cursor.point);
             }
-            // Command start: remember where the command's input begins.
+            // Command start: remember where the command line was entered and,
+            // when the integration script provides it, the exact command text
+            // encoded as base64 in the payload.
             'C' => {
+                let start = self.prompt_end_mark.take().unwrap_or(self.grid.cursor.point);
+                self.last_command_input_range = Some((start, self.grid.cursor.point));
+                self.last_command_text = payload.as_deref().and_then(|payload| {
+                    let decoded = Base64.decode(payload.trim()).ok()?;
+                    String::from_utf8(decoded).ok()
+                });
                 self.command_start = Some(self.grid.cursor.point);
                 self.event_proxy.send_event(Event::CommandStarted);
             }
@@ -2136,7 +2163,10 @@ impl<T: EventListener> Handler for Term<T> {
         if matches!(mode, ansi::ClearMode::All) {
             self.prompt_marks.clear();
             self.active_prompt_mark = None;
+            self.prompt_end_mark = None;
             self.command_start = None;
+            self.last_command_input_range = None;
+            self.last_command_text = None;
             self.last_command_range = None;
             self.last_exit_code = None;
         }
@@ -2232,7 +2262,10 @@ impl<T: EventListener> Handler for Term<T> {
     fn reset_state(&mut self) {
         self.prompt_marks.clear();
         self.active_prompt_mark = None;
+        self.prompt_end_mark = None;
         self.command_start = None;
+        self.last_command_input_range = None;
+        self.last_command_text = None;
         self.last_command_range = None;
         self.last_exit_code = None;
         if self.mode.contains(TermMode::ALT_SCREEN) {
@@ -2817,6 +2850,17 @@ impl<T> Term<T> {
     /// output (`OSC 133;C` through `OSC 133;D`), if any.
     pub fn last_command_range(&self) -> Option<(Point, Point)> {
         self.last_command_range
+    }
+
+    /// Grid range covering the command line that was executed, from prompt end
+    /// (`OSC 133;B`) through command start (`OSC 133;C`), if any.
+    pub fn last_command_input_range(&self) -> Option<(Point, Point)> {
+        self.last_command_input_range
+    }
+
+    /// Command line reported by the shell in the `OSC 133;C` payload, if any.
+    pub fn last_command_text(&self) -> Option<&str> {
+        self.last_command_text.as_deref()
     }
 
     /// Close the currently open prompt and push it onto the marks list.
@@ -4308,9 +4352,16 @@ mod tests {
 
         // Prompt at (0, 0), then the user types `echo hi` and presses enter.
         processor.advance(&mut term, b"\x1b]133;A\x07");
+        processor.advance(&mut term, b"\x1b]133;B\x07");
         processor.advance(&mut term, b"echo hi\r\n");
-        // Command starts at (1, 0) and prints its output.
-        processor.advance(&mut term, b"\x1b]133;C\x07");
+        // Command starts at (1, 0) and prints its output. The payload carries
+        // the exact command line (base64-encoded) for "re-run last command".
+        processor.advance(&mut term, b"\x1b]133;C;ZWNobyBoaQ==\x07");
+        let (input_start, input_end) = term.last_command_input_range().unwrap();
+        assert_eq!(input_start, Point::new(Line(0), Column(0)));
+        assert_eq!(input_end, Point::new(Line(1), Column(0)));
+        assert_eq!(term.bounds_to_string(input_start, input_end), "echo hi");
+        assert_eq!(term.last_command_text(), Some("echo hi"));
         processor.advance(&mut term, b"hi\r\n");
         // Command finishes with exit code 42; the cursor sits at (2, 0).
         processor.advance(&mut term, b"\x1b]133;D;42\x07");
@@ -4344,6 +4395,8 @@ mod tests {
 
         // Clearing the screen invalidates the tracked range and code.
         processor.advance(&mut term, b"\x1b[2J");
+        assert_eq!(term.last_command_input_range(), None);
+        assert_eq!(term.last_command_text(), None);
         assert_eq!(term.last_command_range(), None);
         assert_eq!(term.last_exit_code(), None);
     }

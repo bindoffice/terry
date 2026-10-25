@@ -6,7 +6,8 @@ use gpui::{
     PromptLevel, Render, SharedString, Subscription, Task, TaskExt, WeakEntity, Window, div, px,
 };
 use project::Project;
-use terminal_view::TerminalView;
+use terminal::terminal_settings::{TerminalProfile, TerminalSettings};
+use terminal_view::{NewTerminalWithProfile, TerminalView};
 use ui::{
     ContextMenu, IconButton, IconName, Label, LabelSize, PopoverMenu, Tooltip, prelude::*,
     right_click_menu,
@@ -14,7 +15,9 @@ use ui::{
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent, PanelStatusButton};
 use workspace::{ItemHandle, Member, Pane, PaneAxis, PaneGroup};
-use zed_actions::terminal_list_panel::{NewGroup, NewTerminal, ToggleFocus};
+use zed_actions::terminal_list_panel::{
+    NewGroup, NewTerminal, NextGroup, PreviousGroup, ToggleFocus,
+};
 
 use serde::{Deserialize, Serialize};
 use settings::Settings;
@@ -598,6 +601,34 @@ pub fn init(cx: &mut App) {
             };
             window.defer(cx, move |window, cx| {
                 panel.update(cx, |panel, cx| panel.create_group(window, cx));
+            });
+        });
+        workspace.register_action(|workspace, _: &NextGroup, window, cx| {
+            let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
+                return;
+            };
+            window.defer(cx, move |window, cx| {
+                panel.update(cx, |panel, cx| panel.switch_group_offset(1, window, cx));
+            });
+        });
+        workspace.register_action(|workspace, _: &PreviousGroup, window, cx| {
+            let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
+                return;
+            };
+            window.defer(cx, move |window, cx| {
+                panel.update(cx, |panel, cx| panel.switch_group_offset(-1, window, cx));
+            });
+        });
+        workspace.register_action(|workspace, action: &NewTerminalWithProfile, window, cx| {
+            let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
+                return;
+            };
+            let name = action.0.clone();
+            window.defer(cx, move |window, cx| {
+                panel.update(cx, |panel, cx| {
+                    let profile = TerminalSettings::get_global(cx).profile(&name).cloned();
+                    panel.new_terminal_with_profile(profile, window, cx);
+                });
             });
         });
         workspace.register_action(
@@ -1380,6 +1411,7 @@ impl TerminalListPanel {
                 Some(index),
                 p_term.title,
                 None,
+                None,
                 window,
                 cx,
             );
@@ -1403,6 +1435,7 @@ impl TerminalListPanel {
         // panel is created — prefer those cwds over the global session file, which
         // still holds the empty-welcome home directory.
         let project_dirs = self.project_working_directories(cx);
+        let profile = self.default_terminal_profile(cx);
         if !project_dirs.is_empty() {
             let id = self.new_group_id();
             self.groups.push(TerminalGroup {
@@ -1419,7 +1452,18 @@ impl TerminalListPanel {
             });
             self.active_group_id = id;
             for cwd in project_dirs {
-                self.spawn_terminal(id, Some(cwd), None, None, None, None, None, window, cx);
+                self.spawn_terminal(
+                    id,
+                    Some(cwd),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    profile.clone(),
+                    window,
+                    cx,
+                );
             }
             self.save_session(cx);
             return;
@@ -1442,7 +1486,7 @@ impl TerminalListPanel {
             restore_slots: Vec::new(),
         });
         self.active_group_id = id;
-        self.spawn_terminal(id, None, None, None, None, None, None, window, cx);
+        self.spawn_terminal(id, None, None, None, None, None, None, profile, window, cx);
         self.save_session(cx);
     }
 
@@ -1489,9 +1533,28 @@ impl TerminalListPanel {
             .unwrap_or_default()
     }
 
-    /// Adds a new terminal to the currently active group.
+    /// Adds a new terminal to the currently active group, using the configured
+    /// default profile when one is set.
     pub fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.new_terminal_with_destination(None, window, cx);
+        let profile = self.default_terminal_profile(cx);
+        self.new_terminal_with_destination_and_profile(None, profile, window, cx);
+    }
+
+    /// Adds a new terminal using an explicit profile. `None` means the normal
+    /// shell configuration.
+    pub fn new_terminal_with_profile(
+        &mut self,
+        profile: Option<TerminalProfile>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.new_terminal_with_destination_and_profile(None, profile, window, cx);
+    }
+
+    fn default_terminal_profile(&self, cx: &App) -> Option<TerminalProfile> {
+        TerminalSettings::get_global(cx)
+            .default_profile_config()
+            .cloned()
     }
 
     /// Opens a new shell in `cwd` and shows it in the active group.
@@ -1516,6 +1579,7 @@ impl TerminalListPanel {
             None,
             None,
             init_command,
+            None,
             window,
             cx,
         );
@@ -1536,6 +1600,17 @@ impl TerminalListPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let profile = self.default_terminal_profile(cx);
+        self.new_terminal_with_destination_and_profile(destination, profile, window, cx);
+    }
+
+    fn new_terminal_with_destination_and_profile(
+        &mut self,
+        destination: Option<Entity<Pane>>,
+        profile: Option<TerminalProfile>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let destination = destination
             .or_else(|| self.pending_spawn_pane.take().and_then(|p| p.upgrade()))
             .or_else(|| self.display_pane_entity(cx));
@@ -1543,7 +1618,13 @@ impl TerminalListPanel {
             self.pending_spawn_pane = Some(pane.downgrade());
             self.display_pane = pane.downgrade();
         }
-        self.new_terminal_in_group_with_destination(self.active_group_id, destination, window, cx);
+        self.new_terminal_in_group_with_destination(
+            self.active_group_id,
+            destination,
+            profile,
+            window,
+            cx,
+        );
     }
 
     /// Name of the currently selected group, if any.
@@ -1608,13 +1689,25 @@ impl TerminalListPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.new_terminal_in_group_with_destination(group_id, None, window, cx);
+        let profile = self.default_terminal_profile(cx);
+        self.new_terminal_in_group_with_destination(group_id, None, profile, window, cx);
+    }
+
+    fn new_terminal_in_group_with_profile(
+        &mut self,
+        group_id: GroupId,
+        profile: TerminalProfile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.new_terminal_in_group_with_destination(group_id, None, Some(profile), window, cx);
     }
 
     fn new_terminal_in_group_with_destination(
         &mut self,
         group_id: GroupId,
         destination: Option<Entity<Pane>>,
+        profile: Option<TerminalProfile>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1646,6 +1739,7 @@ impl TerminalListPanel {
                 None,
                 None,
                 Some(command),
+                None,
                 window,
                 cx,
             );
@@ -1660,6 +1754,7 @@ impl TerminalListPanel {
             None,
             None,
             None,
+            profile,
             window,
             cx,
         );
@@ -1698,6 +1793,7 @@ impl TerminalListPanel {
             None,
             None,
             None,
+            None,
             window,
             cx,
         );
@@ -1718,6 +1814,7 @@ impl TerminalListPanel {
             .find(|g| g.id == group_id)
             .map(|g| g.layout_mode);
         let agent_actions = panel.read(cx).agent_session_actions(group_id, cx);
+        let profiles = TerminalSettings::get_global(cx).profiles.clone();
         let broadcast_input = panel
             .read(cx)
             .groups
@@ -1751,6 +1848,32 @@ impl TerminalListPanel {
                         this.new_terminal_in_group(group_id, window, cx);
                     });
                 });
+            let menu = if profiles.is_empty() {
+                menu
+            } else {
+                let submenu_panel = panel.clone();
+                menu.submenu(
+                    i18n::t("new_terminal_with_profile"),
+                    move |mut menu, _window, _cx| {
+                        for profile in &profiles {
+                            let panel = submenu_panel.clone();
+                            let label = profile.name.clone();
+                            let profile = profile.clone();
+                            menu = menu.entry(label, None, move |window, cx| {
+                                panel.update(cx, |this, cx| {
+                                    this.new_terminal_in_group_with_profile(
+                                        group_id,
+                                        profile.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            });
+                        }
+                        menu
+                    },
+                )
+            };
             let menu = if let Some(actions) = agent_actions {
                 let mut menu = menu.separator();
                 if actions.resume {
@@ -1823,6 +1946,182 @@ impl TerminalListPanel {
         })
     }
 
+    /// Context menu for a terminal row: clone, rename, move to another group,
+    /// and close.
+    fn build_terminal_context_menu(
+        panel: Entity<Self>,
+        source_group: GroupId,
+        terminal_view: Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<ContextMenu> {
+        let terminal_id = terminal_view.entity_id();
+        let move_targets: Vec<(GroupId, SharedString)> = panel
+            .read(cx)
+            .groups
+            .iter()
+            .filter(|group| group.id != source_group)
+            .map(|group| (group.id, group.name.clone()))
+            .collect();
+
+        ContextMenu::build(window, cx, move |menu, _, _| {
+            let clone_panel = panel.clone();
+            let clone_view = terminal_view.clone();
+            let rename_view = terminal_view.clone();
+            let close_panel = panel.clone();
+            let menu = menu
+                .entry(i18n::t("clone_terminal"), None, move |window, cx| {
+                    clone_panel.update(cx, |this, cx| {
+                        this.clone_terminal(source_group, clone_view.clone(), window, cx);
+                    });
+                })
+                .entry(i18n::t("rename"), None, move |window, cx| {
+                    rename_view.update(cx, |this, cx| {
+                        this.rename_terminal(&terminal_view::RenameTerminal, window, cx)
+                    });
+                });
+
+            let menu = if move_targets.is_empty() {
+                menu
+            } else {
+                let submenu_panel = panel.clone();
+                let targets = move_targets.clone();
+                menu.separator()
+                    .submenu(i18n::t("move_to_group"), move |mut menu, _window, _cx| {
+                        for (target_group_id, name) in &targets {
+                            let panel = submenu_panel.clone();
+                            let target_group_id = *target_group_id;
+                            let name = name.clone();
+                            menu = menu.entry(name, None, move |window, cx| {
+                                panel.update(cx, |this, cx| {
+                                    this.move_terminal_to_group(
+                                        terminal_id,
+                                        target_group_id,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            });
+                        }
+                        menu
+                    })
+            };
+
+            menu.entry(i18n::t("close"), None, move |window, cx| {
+                close_panel.update(cx, |this, cx| {
+                    this.close_terminal(terminal_id, window, cx);
+                });
+            })
+        })
+    }
+
+    /// Moves a terminal into another group without recreating its view or PTY.
+    ///
+    /// The source group's manual split layout is remapped so its persisted
+    /// indices keep pointing at the same terminals; auto-tiling groups re-flow
+    /// from their terminal list. If the source group is active, the tab also
+    /// leaves the center panes; the active group (either source or target) is
+    /// synced afterwards.
+    fn move_terminal_to_group(
+        &mut self,
+        terminal_id: EntityId,
+        target_group_id: GroupId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session_restoring {
+            return;
+        }
+        let Some(source_group_id) = self
+            .groups
+            .iter()
+            .find(|group| {
+                group
+                    .terminals
+                    .iter()
+                    .any(|view| view.entity_id() == terminal_id)
+            })
+            .map(|group| group.id)
+        else {
+            return;
+        };
+        if source_group_id == target_group_id
+            || !self.groups.iter().any(|group| group.id == target_group_id)
+        {
+            return;
+        }
+
+        let Some(source_group_ix) = self
+            .groups
+            .iter()
+            .position(|group| group.id == source_group_id)
+        else {
+            return;
+        };
+        let Some(removed_ix) = self.groups[source_group_ix]
+            .terminals
+            .iter()
+            .position(|view| view.entity_id() == terminal_id)
+        else {
+            return;
+        };
+
+        // Manual layouts store indices into `group.terminals`; keep them
+        // pointing at the same terminals after the list shifts left.
+        if self.groups[source_group_ix].layout_mode == GroupLayoutMode::Manual {
+            if let Some(layout) = self.groups[source_group_ix].saved_layout.as_mut() {
+                Self::remap_layout_after_remove(layout, removed_ix);
+            }
+        }
+        let terminal_view = self.groups[source_group_ix].terminals.remove(removed_ix);
+        if self.groups[source_group_ix].terminals.is_empty() {
+            self.groups[source_group_ix].has_unread = false;
+            if self.groups[source_group_ix].layout_mode == GroupLayoutMode::Manual {
+                self.groups[source_group_ix].saved_layout = None;
+            }
+        }
+
+        let Some(target_group) = self
+            .groups
+            .iter_mut()
+            .find(|group| group.id == target_group_id)
+        else {
+            return;
+        };
+        target_group.collapsed = false;
+        target_group.terminals.push(terminal_view);
+
+        let source_active = source_group_id == self.active_group_id;
+        let target_active = target_group_id == self.active_group_id;
+
+        // Only the active group's terminals belong in the center panes. Remove
+        // the moved tab before syncing so it does not stay visible under the
+        // source group.
+        if source_active {
+            if let Some(workspace) = self.workspace.upgrade() {
+                let panes = workspace.read(cx).panes().to_vec();
+                for pane in panes {
+                    let shows_terminal = pane
+                        .read(cx)
+                        .items()
+                        .any(|item| item.item_id() == terminal_id);
+                    if shows_terminal {
+                        pane.update(cx, |pane, cx| {
+                            pane.remove_item(terminal_id, false, false, window, cx);
+                        });
+                    }
+                }
+            }
+        }
+
+        if source_active || target_active {
+            self.defer_sync_active_group_to_pane(window, cx);
+        }
+
+        self.save_session(cx);
+        cx.notify();
+    }
+
     /// Switches a group's auto-tiling layout mode and re-flows its panes.
     fn set_group_layout(
         &mut self,
@@ -1890,7 +2189,8 @@ impl TerminalListPanel {
             restore_slots: Vec::new(),
         });
         self.switch_group(id, window, cx);
-        self.spawn_terminal(id, cwd, source, None, None, None, None, window, cx);
+        let profile = self.default_terminal_profile(cx);
+        self.spawn_terminal(id, cwd, source, None, None, None, None, profile, window, cx);
         self.save_session(cx);
     }
 
@@ -1937,12 +2237,7 @@ impl TerminalListPanel {
         .detach_and_log_err(cx);
     }
 
-    fn delete_group_now(
-        &mut self,
-        group_id: GroupId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn delete_group_now(&mut self, group_id: GroupId, window: &mut Window, cx: &mut Context<Self>) {
         if self.groups.len() <= 1 {
             return;
         }
@@ -2173,6 +2468,8 @@ impl TerminalListPanel {
     ///
     /// `restore_index` / `restore_title` are used when rehydrating a session so
     /// async completion order cannot scramble layout indices or drop renames.
+    /// When `profile` is set, its shell/env/working directory/startup command
+    /// replace the source terminal and global defaults.
     fn spawn_terminal(
         &mut self,
         group_id: GroupId,
@@ -2182,11 +2479,24 @@ impl TerminalListPanel {
         restore_index: Option<usize>,
         restore_title: Option<String>,
         init_command: Option<String>,
+        profile: Option<TerminalProfile>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let project = self.project.clone();
         let workspace = self.workspace.clone();
+        // A profile describes the whole launch environment; don't inherit the
+        // active terminal's shell/env on top of it.
+        let source = if profile.is_some() { None } else { source };
+        let init_command = profile
+            .as_ref()
+            .and_then(|profile| profile.command.clone())
+            .or(init_command);
+        let profile_shell = profile.as_ref().and_then(|profile| profile.shell.clone());
+        let profile_env = profile.as_ref().map(|profile| profile.env.clone());
+        let profile_working_directory = profile
+            .as_ref()
+            .and_then(|profile| profile.working_directory.clone());
         // Prefer the explicit destination; fall back to any leftover pin.
         let destination_pane = destination
             .map(|p| p.downgrade())
@@ -2195,15 +2505,28 @@ impl TerminalListPanel {
         self.pending_spawn_pane = None;
         let spawn_cwd = cwd.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let working_directory = cwd.or_else(|| {
-                workspace.upgrade().and_then(|workspace| {
+            let working_directory = match profile_working_directory {
+                Some(setting) => workspace.upgrade().and_then(|workspace| {
                     cx.update(|_window, cx| {
-                        terminal_view::default_working_directory(workspace.read(cx), cx)
+                        terminal_view::default_working_directory_with(
+                            workspace.read(cx),
+                            &setting,
+                            cx,
+                        )
                     })
                     .ok()
                     .flatten()
-                })
-            });
+                }),
+                None => cwd.or_else(|| {
+                    workspace.upgrade().and_then(|workspace| {
+                        cx.update(|_window, cx| {
+                            terminal_view::default_working_directory(workspace.read(cx), cx)
+                        })
+                        .ok()
+                        .flatten()
+                    })
+                }),
+            };
             // Remember the directory the shell actually starts in (after
             // defaulting), not the pre-default Option — otherwise session
             // writes store null and wipe restore paths.
@@ -2214,7 +2537,12 @@ impl TerminalListPanel {
                         let terminal = view.read(cx).terminal().clone();
                         project.clone_terminal(&terminal, cx, working_directory.clone())
                     }
-                    None => project.create_terminal_shell(working_directory, cx),
+                    None => project.create_terminal_shell_with_options(
+                        working_directory,
+                        profile_shell,
+                        profile_env,
+                        cx,
+                    ),
                 })?
                 .await?;
 
@@ -2455,6 +2783,7 @@ impl TerminalListPanel {
             });
         }
         let group_id = self.active_group_id;
+        let profile = self.default_terminal_profile(cx);
         self.spawn_terminal(
             group_id,
             Some(cwd),
@@ -2463,6 +2792,7 @@ impl TerminalListPanel {
             None,
             None,
             None,
+            profile,
             window,
             cx,
         );
@@ -2484,83 +2814,80 @@ impl TerminalListPanel {
         // persist to disk so restart does not fall back to $HOME.
         let terminal = terminal_view.read(cx).terminal().clone();
         let mut subscriptions = Vec::new();
-        subscriptions.push(cx.subscribe(
-            &terminal,
-            move |this, term, event, cx| {
-                if matches!(event, terminal::Event::LastCommandFinished(_)) {
-                    // Ignore the synthetic "command finished" emitted for the
-                    // initial prompt while a session is still restoring.
-                    if this.session_restoring
-                        || this
-                            .restore_cwd_guard_until
-                            .is_some_and(|until| std::time::Instant::now() < until)
-                    {
-                        return;
-                    }
-                    // A command finished in a terminal the user is not looking
-                    // at: mark its group so the sidebar shows activity.
-                    if this.focused_terminal_id(cx) != Some(view_id) {
-                        if let Some(group) = this.groups.iter_mut().find(|group| {
-                            group
-                                .terminals
-                                .iter()
-                                .any(|view| view.entity_id() == view_id)
-                        }) {
-                            if !group.has_unread {
-                                group.has_unread = true;
-                                cx.notify();
-                            }
-                        }
-                    }
+        subscriptions.push(cx.subscribe(&terminal, move |this, term, event, cx| {
+            if matches!(event, terminal::Event::LastCommandFinished(_)) {
+                // Ignore the synthetic "command finished" emitted for the
+                // initial prompt while a session is still restoring.
+                if this.session_restoring
+                    || this
+                        .restore_cwd_guard_until
+                        .is_some_and(|until| std::time::Instant::now() < until)
+                {
                     return;
                 }
-                if !matches!(
-                    event,
-                    terminal::Event::TitleChanged | terminal::Event::BreadcrumbsChanged
-                ) {
-                    return;
-                }
-                if matches!(event, terminal::Event::TitleChanged) {
-                    // The sidebar uses the terminal title as its label.
-                    cx.notify();
-                }
-                // TitleChanged is emitted right after the background refresh
-                // updates the cached cwd, so read the cache instead of
-                // force-refreshing again on the UI thread (redundant + blocking).
-                let cwd = term
-                    .read(cx)
-                    .working_directory()
-                    .filter(|cwd| !cwd.as_os_str().is_empty());
-                let Some(cwd) = cwd else {
-                    return;
-                };
-                // Shell init (login rc) often briefly reports $HOME even when we
-                // restored a project path — don't let that wipe the session.
-                let guarding = this
-                    .restore_cwd_guard_until
-                    .is_some_and(|until| std::time::Instant::now() < until);
-                if guarding {
-                    if let Some(prev) = this
-                        .terminal_spawn_cwds
-                        .get(&view_id)
-                        .and_then(|c| c.as_ref())
-                    {
-                        if Self::is_home_cwd(&cwd) && !Self::is_home_cwd(prev) {
-                            return;
+                // A command finished in a terminal the user is not looking
+                // at: mark its group so the sidebar shows activity.
+                if this.focused_terminal_id(cx) != Some(view_id) {
+                    if let Some(group) = this.groups.iter_mut().find(|group| {
+                        group
+                            .terminals
+                            .iter()
+                            .any(|view| view.entity_id() == view_id)
+                    }) {
+                        if !group.has_unread {
+                            group.has_unread = true;
+                            cx.notify();
                         }
                     }
                 }
-                let changed = this
+                return;
+            }
+            if !matches!(
+                event,
+                terminal::Event::TitleChanged | terminal::Event::BreadcrumbsChanged
+            ) {
+                return;
+            }
+            if matches!(event, terminal::Event::TitleChanged) {
+                // The sidebar uses the terminal title as its label.
+                cx.notify();
+            }
+            // TitleChanged is emitted right after the background refresh
+            // updates the cached cwd, so read the cache instead of
+            // force-refreshing again on the UI thread (redundant + blocking).
+            let cwd = term
+                .read(cx)
+                .working_directory()
+                .filter(|cwd| !cwd.as_os_str().is_empty());
+            let Some(cwd) = cwd else {
+                return;
+            };
+            // Shell init (login rc) often briefly reports $HOME even when we
+            // restored a project path — don't let that wipe the session.
+            let guarding = this
+                .restore_cwd_guard_until
+                .is_some_and(|until| std::time::Instant::now() < until);
+            if guarding {
+                if let Some(prev) = this
                     .terminal_spawn_cwds
                     .get(&view_id)
                     .and_then(|c| c.as_ref())
-                    != Some(&cwd);
-                this.terminal_spawn_cwds.insert(view_id, Some(cwd));
-                if changed {
-                    this.schedule_cwd_persist(cx);
+                {
+                    if Self::is_home_cwd(&cwd) && !Self::is_home_cwd(prev) {
+                        return;
+                    }
                 }
-            },
-        ));
+            }
+            let changed = this
+                .terminal_spawn_cwds
+                .get(&view_id)
+                .and_then(|c| c.as_ref())
+                != Some(&cwd);
+            this.terminal_spawn_cwds.insert(view_id, Some(cwd));
+            if changed {
+                this.schedule_cwd_persist(cx);
+            }
+        }));
 
         // Broadcast relay: accepted keystrokes from this view are forwarded to
         // its group peers while the group's broadcast-input flag is on. The
@@ -3251,7 +3578,7 @@ impl TerminalListPanel {
         // Strong item handles keep the underlying views alive; they are
         // re-attached to the new focus pane below.
         let preserved_items: Vec<Box<dyn ItemHandle>> = {
-            let mut seen = HashSet::default();
+            let mut seen: HashSet<EntityId> = HashSet::default();
             let mut items = Vec::new();
             let panes = workspace.read(cx).panes().to_vec();
             for pane in panes {
@@ -3289,6 +3616,22 @@ impl TerminalListPanel {
             }
         });
         self.display_pane = workspace.read(cx).active_pane().downgrade();
+    }
+
+    /// Switches to the group `offset` positions away, wrapping at the ends.
+    fn switch_group_offset(&mut self, offset: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.groups.is_empty() {
+            return;
+        }
+        let current = self
+            .groups
+            .iter()
+            .position(|group| group.id == self.active_group_id)
+            .unwrap_or(0) as isize;
+        let len = self.groups.len() as isize;
+        let next = (current + offset).rem_euclid(len) as usize;
+        let group_id = self.groups[next].id;
+        self.switch_group(group_id, window, cx);
     }
 
     /// Switches the display pane to show the given group's terminals as tabs,
@@ -3770,6 +4113,7 @@ impl TerminalListPanel {
             None,
             None,
             Some(command),
+            None,
             window,
             cx,
         );
@@ -4049,7 +4393,9 @@ impl Render for TerminalListPanel {
                                             }
                                         })
                                         .child(
-                                            h_flex().flex_grow(1.).justify_end()
+                                            h_flex()
+                                                .flex_grow(1.)
+                                                .justify_end()
                                                 .when(has_unread, |this| {
                                                     this.child(
                                                         Label::new("●")
@@ -4058,32 +4404,32 @@ impl Render for TerminalListPanel {
                                                     )
                                                 })
                                                 .child(
-                                                PopoverMenu::new(SharedString::from(format!(
-                                                    "menu-{}",
-                                                    group_id.0
-                                                )))
-                                                .trigger(
-                                                    IconButton::new(
-                                                        SharedString::from(format!(
-                                                            "menu-btn-{}",
-                                                            group_id.0
-                                                        )),
-                                                        IconName::Ellipsis,
+                                                    PopoverMenu::new(SharedString::from(format!(
+                                                        "menu-{}",
+                                                        group_id.0
+                                                    )))
+                                                    .trigger(
+                                                        IconButton::new(
+                                                            SharedString::from(format!(
+                                                                "menu-btn-{}",
+                                                                group_id.0
+                                                            )),
+                                                            IconName::Ellipsis,
+                                                        )
+                                                        .icon_size(IconSize::Small),
                                                     )
-                                                    .icon_size(IconSize::Small),
-                                                )
-                                                .menu({
-                                                    let panel = panel.clone();
-                                                    move |window, cx| {
-                                                        Some(Self::build_group_context_menu(
-                                                            panel.clone(),
-                                                            group_id,
-                                                            window,
-                                                            cx,
-                                                        ))
-                                                    }
-                                                }),
-                                            ),
+                                                    .menu({
+                                                        let panel = panel.clone();
+                                                        move |window, cx| {
+                                                            Some(Self::build_group_context_menu(
+                                                                panel.clone(),
+                                                                group_id,
+                                                                window,
+                                                                cx,
+                                                            ))
+                                                        }
+                                                    }),
+                                                ),
                                         ),
                                 )
                                 .on_click(on_group_click)
@@ -4101,7 +4447,6 @@ impl Render for TerminalListPanel {
             if is_expanded {
                 for (ix, (terminal_view, title)) in terminals.into_iter().enumerate() {
                     let is_terminal_active = Some(terminal_view.entity_id()) == active_terminal_id;
-                    let terminal_id = terminal_view.entity_id();
 
                     let on_click = cx.listener({
                         let terminal_view = terminal_view.clone();
@@ -4158,45 +4503,13 @@ impl Render for TerminalListPanel {
                                 let terminal_view = terminal_view.clone();
                                 let panel = panel.clone();
                                 move |window, cx| {
-                                    let terminal_view = terminal_view.clone();
-                                    let panel = panel.clone();
-                                    ContextMenu::build(window, cx, move |menu, _, _| {
-                                        let clone_panel = panel.clone();
-                                        let close_panel = panel.clone();
-                                        let clone_view = terminal_view.clone();
-                                        menu.entry(
-                                            i18n::t("clone_terminal"),
-                                            None,
-                                            move |window, cx| {
-                                                clone_panel.update(cx, |this, cx| {
-                                                    this.clone_terminal(
-                                                        group_id,
-                                                        clone_view.clone(),
-                                                        window,
-                                                        cx,
-                                                    );
-                                                });
-                                            },
-                                        )
-                                        .entry(i18n::t("rename"), None, move |window, cx| {
-                                            terminal_view.update(cx, |this, cx| {
-                                                this.rename_terminal(
-                                                    &terminal_view::RenameTerminal,
-                                                    window,
-                                                    cx,
-                                                )
-                                            });
-                                        })
-                                        .entry(
-                                            i18n::t("close"),
-                                            None,
-                                            move |window, cx| {
-                                                close_panel.update(cx, |this, cx| {
-                                                    this.close_terminal(terminal_id, window, cx);
-                                                });
-                                            },
-                                        )
-                                    })
+                                    Self::build_terminal_context_menu(
+                                        panel.clone(),
+                                        group_id,
+                                        terminal_view.clone(),
+                                        window,
+                                        cx,
+                                    )
                                 }
                             })
                             .into_any_element(),
@@ -4785,6 +5098,140 @@ mod tests {
         assert_eq!(panel.read_with(cx, |p, _| p.groups[1].terminals.len()), 1);
     }
 
+    /// Moving a terminal between groups must keep the same view (and PTY),
+    /// update both groups' terminal lists, and never leave the moved tab
+    /// visible under its old group in the center panes.
+    #[gpui::test]
+    async fn move_terminal_to_group_preserves_view_and_layouts(cx: &mut TestAppContext) {
+        // Isolate session-file writes from the real data directory.
+        ensure_test_data_dir();
+
+        let params = cx.update(AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let project = Project::test(params.fs.clone(), [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+
+        let panel = window_handle
+            .update(cx, |mw, window, cx| {
+                let workspace = mw.workspace().clone();
+                let project = workspace.read(cx).project().clone();
+                let display_pane = workspace.read(cx).active_pane().clone();
+                let panel = cx.new(|cx| {
+                    TerminalListPanel::new(
+                        workspace.clone(),
+                        display_pane,
+                        project,
+                        None,
+                        window,
+                        cx,
+                    )
+                });
+                workspace.update(cx, |workspace, cx| {
+                    workspace.add_panel(panel.clone(), window, cx);
+                });
+                panel
+            })
+            .unwrap();
+
+        seed_group(&panel, &workspace, &project, &window_handle, cx);
+        // seed_group creates GroupId(0) with two terminals and makes it active.
+        let moved_id = panel.read_with(cx, |p, _| p.groups[0].terminals[0].entity_id());
+
+        // Second, inactive group with its own terminal.
+        let target_id = window_handle
+            .update(cx, |_mw, window, cx| {
+                panel.update(cx, |panel, cx| {
+                    let id = panel.new_group_id();
+                    panel.groups.push(TerminalGroup {
+                        id,
+                        name: SharedString::from("target group"),
+                        terminals: Vec::new(),
+                        collapsed: false,
+                        has_unread: false,
+                        saved_layout: None,
+                        layout_mode: GroupLayoutMode::Manual,
+                        broadcast_input: false,
+                        session_terminal_count: None,
+                        restore_slots: Vec::new(),
+                    });
+                    let tv = new_display_only_terminal_view(&workspace, &project, window, cx);
+                    panel.add_terminal_to_group(id, tv, None, None, cx);
+                    id
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        window_handle
+            .update(cx, |_mw, window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.move_terminal_to_group(moved_id, target_id, window, cx);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.active_group_id, GroupId(0));
+            assert_eq!(panel.groups[0].terminals.len(), 1);
+            assert_eq!(panel.groups[1].terminals.len(), 2);
+            assert!(
+                panel.groups[0]
+                    .terminals
+                    .iter()
+                    .all(|tv| tv.entity_id() != moved_id)
+            );
+            assert!(
+                panel.groups[1]
+                    .terminals
+                    .iter()
+                    .any(|tv| tv.entity_id() == moved_id)
+            );
+        });
+
+        // The source group's manual layout must follow the shrunken list.
+        let source_layout = panel
+            .read_with(cx, |panel, _| panel.groups[0].saved_layout.clone())
+            .expect("source group keeps a layout");
+        let mut referenced: Vec<usize> =
+            TerminalListPanel::layout_referenced_indices(&source_layout)
+                .into_iter()
+                .collect();
+        referenced.sort_unstable();
+        assert_eq!(referenced, vec![0]);
+
+        // The moved terminal belongs to the inactive group, so it must not stay
+        // visible in the center panes.
+        let is_visible = |cx: &mut TestAppContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                workspace
+                    .panes()
+                    .iter()
+                    .any(|pane| pane.read(cx).items().any(|item| item.item_id() == moved_id))
+            })
+        };
+        assert!(!is_visible(cx), "moved tab must leave the active group");
+
+        // Switching to the target group shows it again.
+        window_handle
+            .update(cx, |_mw, window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.switch_group(target_id, window, cx);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(panel.read_with(cx, |p, _| p.active_group_id), target_id);
+        assert!(is_visible(cx), "moved tab must appear in its new group");
+        assert_eq!(panel.read_with(cx, |p, _| p.groups[1].terminals.len()), 2);
+    }
+
     /// Regression test: replacing the center layout (a group switch or an
     /// auto-tiling re-flow) must re-home non-terminal items instead of
     /// dropping them. Dropping an editor here silently loses unsaved buffers.
@@ -4851,7 +5298,10 @@ mod tests {
                 })
             })
         };
-        assert!(editor_is_visible(cx), "editor should start in a center pane");
+        assert!(
+            editor_is_visible(cx),
+            "editor should start in a center pane"
+        );
 
         // Full center-tree rebuild, as performed by a tiling re-flow or a
         // group switch.

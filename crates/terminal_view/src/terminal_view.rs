@@ -85,6 +85,24 @@ fn slice_utf16(text: &str, start: usize, end: usize) -> String {
 }
 
 #[cfg(test)]
+mod paste_tests {
+    use super::paste_needs_confirmation;
+
+    #[test]
+    fn only_multiline_pastes_need_confirmation() {
+        assert!(!paste_needs_confirmation("cargo test", true));
+        assert!(paste_needs_confirmation("cargo test\n", true));
+        assert!(paste_needs_confirmation("cargo test\ncargo clippy", true));
+        assert!(paste_needs_confirmation("cargo test\r\ncargo fmt", true));
+        assert!(!paste_needs_confirmation(
+            "cargo test\ncargo clippy",
+            false
+        ));
+        assert!(!paste_needs_confirmation("   \n  ", true));
+    }
+}
+
+#[cfg(test)]
 mod ime_text_tests {
     use super::{slice_utf16, utf16_len};
 
@@ -134,10 +152,16 @@ actions!(
     [
         /// Reruns the last executed task in the terminal.
         RerunTask,
-        /// Scrolls to the most recent shell prompt (requires OSC 133 shell integration).
+        /// Scrolls to the previous shell prompt (requires OSC 133 shell integration).
         JumpToPreviousPrompt,
-        /// Copies the previous command's input/output (requires OSC 133 shell integration).
+        /// Scrolls to the next shell prompt, or back to the bottom (requires OSC 133 shell integration).
+        JumpToNextPrompt,
+        /// Copies the previous command's output (requires OSC 133 shell integration).
         CopyLastCommandOutput,
+        /// Selects the previous command's output (requires OSC 133 shell integration).
+        SelectLastCommandOutput,
+        /// Re-runs the previous command (requires OSC 133 shell integration).
+        RerunLastCommand,
         /// Toggles broadcast input for the active terminal group: keystrokes
         /// accepted by any terminal in the group are relayed to its peers.
         ToggleBroadcastInput,
@@ -148,6 +172,11 @@ actions!(
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Action)]
 #[action(namespace = terminal)]
 pub struct RenameTerminal;
+
+/// Opens a new terminal using the named launch profile.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Action)]
+#[action(namespace = terminal)]
+pub struct NewTerminalWithProfile(pub String);
 
 pub fn init(cx: &mut App) {
     terminal_panel::init(cx);
@@ -183,6 +212,9 @@ pub struct TerminalView {
     focus_handle: FocusHandle,
     //Currently using iTerm bell, show bell emoji in tab until input is received
     has_bell: bool,
+    /// Latest OSC 9 progress value for the tab title, if the application
+    /// reported one.
+    notification_progress: Option<i64>,
     context_menu: Option<(Entity<ContextMenu>, GpuiPoint<Pixels>, Subscription)>,
     cursor_shape: CursorShape,
     blink_manager: Entity<BlinkManager>,
@@ -331,6 +363,7 @@ impl TerminalView {
             workspace: workspace_handle,
             project,
             has_bell: false,
+            notification_progress: None,
             focus_handle,
             context_menu: None,
             cursor_shape,
@@ -642,7 +675,18 @@ impl TerminalView {
                 .action(i18n::t("select_all"), Box::new(SelectAll))
                 .when(
                     !matches!(self.mode, TerminalMode::Embedded { .. }),
-                    |menu| menu.action(i18n::t("clear"), Box::new(Clear)),
+                    |menu| {
+                        menu.action(i18n::t("clear"), Box::new(Clear))
+                            .separator()
+                            .action(
+                                i18n::t("select_last_command_output"),
+                                Box::new(SelectLastCommandOutput),
+                            )
+                            .action(
+                                i18n::t("rerun_last_command"),
+                                Box::new(RerunLastCommand),
+                            )
+                    },
                 )
                 .when(
                     assistant_enabled && !matches!(self.mode, TerminalMode::Embedded { .. }),
@@ -946,6 +990,25 @@ impl TerminalView {
         }
     }
 
+    fn jump_to_next_prompt(
+        &mut self,
+        _: &JumpToNextPrompt,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_alt_screen(cx) {
+            cx.propagate();
+            return;
+        }
+
+        let jumped = self
+            .terminal
+            .update(cx, |term, _| term.jump_to_next_prompt());
+        if jumped {
+            cx.notify();
+        }
+    }
+
     fn copy_last_command_output(
         &mut self,
         _: &CopyLastCommandOutput,
@@ -954,6 +1017,42 @@ impl TerminalView {
     ) {
         self.terminal
             .update(cx, |term, cx| term.copy_last_command_output(cx));
+    }
+
+    fn select_last_command_output(
+        &mut self,
+        _: &SelectLastCommandOutput,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_alt_screen(cx) {
+            cx.propagate();
+            return;
+        }
+        if self
+            .terminal
+            .update(cx, |term, _| term.select_last_command_output())
+        {
+            cx.notify();
+        }
+    }
+
+    fn rerun_last_command(
+        &mut self,
+        _: &RerunLastCommand,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_alt_screen(cx) {
+            cx.propagate();
+            return;
+        }
+        if self
+            .terminal
+            .update(cx, |term, _| term.rerun_last_command())
+        {
+            cx.notify();
+        }
     }
 
     fn toggle_vi_mode(&mut self, _: &ToggleViMode, _: &mut Window, cx: &mut Context<Self>) {
@@ -1075,11 +1174,42 @@ impl TerminalView {
             }
             _ => {
                 if let Some(text) = clipboard.text() {
-                    self.terminal
-                        .update(cx, |terminal, _cx| terminal.paste(&text));
+                    self.paste_text_with_confirmation(text, window, cx);
                 }
             }
         }
+    }
+
+    fn paste_text_with_confirmation(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let confirm = TerminalSettings::get_global(cx).confirm_multiline_paste;
+        if !paste_needs_confirmation(&text, confirm) {
+            self.terminal
+                .update(cx, |terminal, _cx| terminal.paste(&text));
+            return;
+        }
+
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &i18n::t("paste_multiline_title"),
+            Some(&i18n::t("paste_multiline_detail")),
+            &[i18n::t_str("paste"), i18n::t_str("cancel")],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await == Ok(0) {
+                this.update(cx, |this, cx| {
+                    this.terminal
+                        .update(cx, |terminal, _cx| terminal.paste(&text));
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// Specific handler for the [`editor::actions::Paste`] action in order for
@@ -1095,14 +1225,13 @@ impl TerminalView {
     }
 
     ///Attempt to paste the clipboard text into the terminal
-    fn paste_text(&mut self, _: &PasteText, _: &mut Window, cx: &mut Context<Self>) {
+    fn paste_text(&mut self, _: &PasteText, window: &mut Window, cx: &mut Context<Self>) {
         let Some(clipboard) = cx.read_from_clipboard() else {
             return;
         };
 
         if let Some(text) = clipboard.text() {
-            self.terminal
-                .update(cx, |terminal, _cx| terminal.paste(&text));
+            self.paste_text_with_confirmation(text, window, cx);
         }
     }
 
@@ -1301,7 +1430,12 @@ fn subscribe_for_terminal_events(
                     cx.emit(Event::Wakeup);
                 }
 
-                Event::Notification(title, body, _progress) => {
+                Event::Notification(title, body, progress) => {
+                    terminal_view.notification_progress = *progress;
+                    if progress.is_some() {
+                        cx.emit(ItemEvent::UpdateTab);
+                        cx.notify();
+                    }
                     let title = title
                         .as_deref()
                         .filter(|t| !t.is_empty())
@@ -1421,13 +1555,48 @@ fn subscribe_for_terminal_events(
                 }
                 Event::CommandStarted => {
                     // Clear the previous exit status while the new command runs.
+                    terminal_view.notification_progress = None;
                     cx.emit(ItemEvent::UpdateTab);
                     cx.notify();
                 }
-                Event::LastCommandFinished(_) => {
+                Event::LastCommandFinished(code) => {
+                    terminal_view.notification_progress = None;
                     // Refresh exit-code surfaces (status bar) and the tab.
                     cx.emit(ItemEvent::UpdateTab);
                     cx.notify();
+
+                    // Only notify when the user is not already looking at this
+                    // terminal; otherwise the notification is pure noise.
+                    let settings = TerminalSettings::get_global(cx);
+                    if settings.notify_on_command_finish
+                        && (!window.is_window_active()
+                            || !terminal_view.focus_handle.is_focused(window))
+                    {
+                        let title = terminal_view
+                            .custom_title
+                            .as_deref()
+                            .filter(|title| !title.trim().is_empty())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| terminal.read(cx).title(false))
+                            .trim()
+                            .to_string();
+                        let title = if title.is_empty() {
+                            i18n::t("terminal")
+                        } else {
+                            title
+                        };
+                        let body = match code {
+                            Some(0) => i18n::t("command_finished"),
+                            Some(code) => i18n::t("command_failed").replace("{code}", &code.to_string()),
+                            None => i18n::t("command_finished"),
+                        };
+                        cx.show_system_notification(SystemNotification {
+                            tag: "terminal-command-finished".into(),
+                            title: title.into(),
+                            body: body.into(),
+                            actions: Vec::new(),
+                        });
+                    }
                 }
                 Event::UserInput(_) => {
                     // Broadcast relay is handled by the terminal list panel's
@@ -1439,16 +1608,35 @@ fn subscribe_for_terminal_events(
     vec![terminal_subscription, terminal_events_subscription]
 }
 
+/// Whether a paste should ask for confirmation before reaching the shell.
+/// Single-line pastes are safe; multi-line pastes can execute commands as soon
+/// as they contain a newline.
+fn paste_needs_confirmation(text: &str, confirm_multiline_paste: bool) -> bool {
+    confirm_multiline_paste
+        && !text.trim().is_empty()
+        && (text.contains('\n') || text.contains('\r'))
+}
+
 fn regex_search_for_query(query: &SearchQuery) -> Option<Search> {
     let str = query.as_str();
-    if query.is_regex() {
+    let pattern = if query.is_regex() {
         if str == "." {
             return None;
         }
-        Search::with_case_sensitivity(str, query.case_sensitive())
+        if query.whole_word() {
+            format!(r"\b(?:{str})\b")
+        } else {
+            str.to_string()
+        }
     } else {
-        Search::with_case_sensitivity(&regex::escape(str), query.case_sensitive())
-    }
+        let escaped = regex::escape(str);
+        if query.whole_word() {
+            format!(r"\b(?:{escaped})\b")
+        } else {
+            escaped
+        }
+    };
+    Search::with_case_sensitivity(&pattern, query.case_sensitive())
 }
 
 #[derive(Default)]
@@ -1579,7 +1767,10 @@ impl Render for TerminalView {
             .on_action(cx.listener(TerminalView::scroll_to_top))
             .on_action(cx.listener(TerminalView::scroll_to_bottom))
             .on_action(cx.listener(TerminalView::jump_to_previous_prompt))
+            .on_action(cx.listener(TerminalView::jump_to_next_prompt))
             .on_action(cx.listener(TerminalView::copy_last_command_output))
+            .on_action(cx.listener(TerminalView::select_last_command_output))
+            .on_action(cx.listener(TerminalView::rerun_last_command))
             .on_action(cx.listener(TerminalView::toggle_vi_mode))
             .on_action(cx.listener(TerminalView::open_urls))
             .on_action(cx.listener(TerminalView::show_character_palette))
@@ -1781,11 +1972,19 @@ impl Item for TerminalView {
     }
 
     fn tab_content_text(&self, detail: usize, cx: &App) -> SharedString {
-        if let Some(custom_title) = self.custom_title.as_ref().filter(|l| !l.trim().is_empty()) {
-            return custom_title.clone().into();
+        let title = if let Some(custom_title) =
+            self.custom_title.as_ref().filter(|l| !l.trim().is_empty())
+        {
+            custom_title.clone()
+        } else {
+            let terminal = self.terminal().read(cx);
+            terminal.title(detail == 0)
+        };
+
+        match self.notification_progress {
+            Some(progress) => format!("{title} · {progress}%").into(),
+            None => title.into(),
         }
-        let terminal = self.terminal().read(cx);
-        terminal.title(detail == 0).into()
     }
 
     fn telemetry_event_text(&self) -> Option<&'static str> {
@@ -2250,7 +2449,7 @@ impl SearchableItem for TerminalView {
     fn supported_options(&self) -> SearchOptions {
         SearchOptions {
             case: true,
-            word: false,
+            word: true,
             regex: true,
             replacement: false,
             selection: false,
@@ -2408,8 +2607,19 @@ impl SearchableItem for TerminalView {
 /// local `is_dir` checks) is skipped -- returning `None` lets the remote shell
 /// open in the remote user's home directory by default.
 pub fn default_working_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
+    let setting = TerminalSettings::get_global(cx).working_directory.clone();
+    default_working_directory_with(workspace, &setting, cx)
+}
+
+/// Resolves a working directory with an explicit setting, used by terminal
+/// profiles that override the global `working_directory`.
+pub fn default_working_directory_with(
+    workspace: &Workspace,
+    setting: &WorkingDirectory,
+    cx: &App,
+) -> Option<PathBuf> {
     let is_remote = workspace.project().read(cx).is_remote();
-    let directory = match &TerminalSettings::get_global(cx).working_directory {
+    let directory = match setting {
         WorkingDirectory::CurrentFileDirectory => workspace
             .project()
             .read(cx)
