@@ -2402,7 +2402,6 @@ impl Terminal {
         std::mem::take(self.pty_write_log.get_mut())
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub fn keyboard_input_sent(&self) -> bool {
         self.keyboard_input_sent
     }

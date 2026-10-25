@@ -345,14 +345,28 @@ fn kitty_esc_str(keystroke: &Keystroke) -> Option<Cow<'static, str>> {
     }
 
     // Printable characters.
-    if keystroke.key.chars().count() == 1 {
-        let c = keystroke.key.chars().next().unwrap();
-        if !c.is_ascii_control() {
-            if has_mods {
-                return Some(Cow::Owned(format!("\x1b[{};{mods}u", c as u32)));
-            }
-            return Some(Cow::Owned(keystroke.key.clone()));
+    let printable = if has_mods {
+        // With modifiers kitty expects the base key plus the modifier bits, so
+        // `shift-a` stays `CSI 97;2u` even though `key_char` is "A".
+        keystroke.key.as_str()
+    } else {
+        // Without modifiers the app wants the character the keyboard layout
+        // produced. `key` is the physical key, which differs after dead-key
+        // composition (option-e then e) and on non-Latin layouts.
+        keystroke
+            .key_char
+            .as_deref()
+            .filter(|key_char| !key_char.is_empty())
+            .unwrap_or(keystroke.key.as_str())
+    };
+    let mut chars = printable.chars();
+    if let (Some(c), None) = (chars.next(), chars.next())
+        && !c.is_ascii_control()
+    {
+        if has_mods {
+            return Some(Cow::Owned(format!("\x1b[{};{mods}u", c as u32)));
         }
+        return Some(Cow::Owned(printable.to_string()));
     }
 
     None
@@ -487,6 +501,26 @@ mod test {
         // Legacy behavior without the protocol.
         assert_eq!(to_esc_str(&ctrl_c, Modes::NONE, false), Some("\x03".into()));
         assert_eq!(to_esc_str(&up, Modes::NONE, false), Some("\x1b[A".into()));
+    }
+
+    #[test]
+    fn test_kitty_keyboard_protocol_prefers_key_char() {
+        let kitty = Modes::KITTY_KEYBOARD_PROTOCOL;
+
+        // A dead-key composition reports the physical key in `key` and the
+        // composed character in `key_char`; the composed character must win.
+        let mut composed = Keystroke::parse("a").unwrap();
+        composed.key_char = Some("å".to_string());
+        assert_eq!(to_esc_str(&composed, kitty, false), Some("å".into()));
+
+        // With modifiers the base key is still sent so apps observe the
+        // modifier bits (alt-a stays `CSI 97;3u`).
+        let mut alt_composed = Keystroke::parse("alt-a").unwrap();
+        alt_composed.key_char = Some("å".to_string());
+        assert_eq!(
+            to_esc_str(&alt_composed, kitty, false),
+            Some("\x1b[97;3u".into())
+        );
     }
 
     #[test]

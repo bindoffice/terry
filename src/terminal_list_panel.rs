@@ -2658,6 +2658,13 @@ impl TerminalListPanel {
                 // Session restore: login-shell rc often `cd ~` after spawn, leaving
                 // the PTY in $HOME even when alacritty started in the project path.
                 // Re-apply `cd` once the shell is ready, only if still wrong.
+                //
+                // The injection is deliberately conservative: it happens at most
+                // once, waits for the shell to report a directory when it can,
+                // and never fires after the user has typed. Blindly retrying used
+                // to splice `cd '...'` into whatever the user had started typing
+                // (or into a full-screen program they had launched), which looked
+                // like garbage being typed on its own.
                 if restore_index.is_some() {
                     let path_for_cd = remembered_cwd
                         .clone()
@@ -2665,28 +2672,50 @@ impl TerminalListPanel {
                     if let Some(path) = path_for_cd {
                         let terminal = terminal.clone();
                         cx.spawn(async move |_, cx| {
-                            for delay_ms in [400u64, 1500] {
+                            let Some(path_str) = path.to_str().map(str::to_owned) else {
+                                return;
+                            };
+                            let quoted = path_str.replace('\'', "'\\''");
+                            let cmd = format!("cd '{quoted}'\n").into_bytes();
+
+                            for (is_last_attempt, delay_ms) in [(false, 400u64), (true, 1500)] {
                                 cx.background_executor()
                                     .timer(Duration::from_millis(delay_ms))
                                     .await;
-                                let needs_cd = terminal.update(cx, |term, _cx| {
-                                    // Cached cwd; a stale/None read only causes a
-                                    // harmless redundant `cd`, whereas a live
-                                    // force-refresh would block the UI thread.
-                                    let live = term.working_directory();
-                                    live.as_ref() != Some(&path)
+
+                                let keep_waiting = terminal.update(cx, |term, _cx| {
+                                    // Never splice a `cd` into a line the user
+                                    // (or their program) is typing on.
+                                    if term.keyboard_input_sent() {
+                                        return false;
+                                    }
+                                    match term.working_directory() {
+                                        // The shell reported a directory, so it
+                                        // is up and idle: fix it if the
+                                        // remembered path differs.
+                                        Some(live) => {
+                                            if live.as_path() != path.as_path() {
+                                                term.write_init_command(cmd.clone());
+                                            }
+                                            false
+                                        }
+                                        // No directory report yet (OSC 7 shell
+                                        // integration): give the shell one
+                                        // more chance. On the last attempt
+                                        // (integration disabled or an
+                                        // unsupported shell) fall back to a
+                                        // single best-effort `cd`.
+                                        None if !is_last_attempt => true,
+                                        None => {
+                                            term.write_init_command(cmd.clone());
+                                            false
+                                        }
+                                    }
                                 });
-                                if !needs_cd {
+
+                                if !keep_waiting {
                                     return;
                                 }
-                                let Some(path_str) = path.to_str() else {
-                                    return;
-                                };
-                                let quoted = path_str.replace('\'', "'\\''");
-                                let cmd = format!("cd '{quoted}'\n");
-                                terminal.update(cx, |term, _cx| {
-                                    term.input(cmd.into_bytes());
-                                });
                             }
                         })
                         .detach();

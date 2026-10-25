@@ -2415,6 +2415,13 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
                     && !key_down_event.keystroke.modifiers.platform;
                 if is_composing
                     && is_plain_printable_key
+                    // A live IME that extends or commits the composition always
+                    // calls back (`setMarkedText:` / `insertText:`). Only a
+                    // session that stayed completely silent is stale: tearing
+                    // down a live composition would unmark text the user is
+                    // still editing and replay the key into it, which shows up
+                    // as duplicated or garbled characters.
+                    && !ime_produced_text
                     && with_input_handler(this, |input_handler| input_handler.marked_text_range())
                         .flatten()
                         == marked_range_before
