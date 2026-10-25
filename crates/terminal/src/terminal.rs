@@ -68,12 +68,11 @@ use crate::alacritty::{
     append_text_to_term, apply_config, clear_saved_screen, content_text, display_offset,
     display_only_term_config, find_all_visible_links, find_from_terminal_point, full_content_range,
     last_command_input_text, last_command_output_range, last_command_output_text,
-    last_non_empty_lines, last_prompt_mark as last_term_prompt_mark,
-    make_content, new_term, open_pty, prompt_marks as term_prompt_marks, pty_options,
-    pty_term_config, resize, screen_lines, scroll_display, scroll_to_point,
-    scroll_to_point_aligned, search_matches, selection_text, set_default_cursor_style,
-    set_selection as set_term_selection, shrink_to_used,
-    spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
+    last_non_empty_lines, last_prompt_mark as last_term_prompt_mark, make_content, new_term,
+    open_pty, prompt_marks as term_prompt_marks, pty_options, pty_term_config, resize,
+    screen_lines, scroll_display, scroll_to_point, scroll_to_point_aligned, search_matches,
+    selection_text, set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
+    spawn_event_loop, synchronized_updates, toggle_vi_mode as toggle_term_vi_mode, total_lines,
     update_selection as update_term_selection, update_selection_to_vi_cursor,
     update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
 };
@@ -1703,7 +1702,17 @@ impl Terminal {
             TerminalBackendEvent::Wakeup => {
                 self.content_dirty = true;
                 self.detect_init_command_startup_marker();
-                cx.emit(Event::Wakeup);
+                // `DECSET 2026` (synchronized output) tells us the application
+                // is painting a frame and will signal the end with `DECRST
+                // 2026`. Hold the repaint so we don't render a partial update;
+                // the Wakeup that follows the reset repaints the full frame.
+                let synchronized = {
+                    let term = self.term.lock_unfair();
+                    synchronized_updates(&term)
+                };
+                if !synchronized {
+                    cx.emit(Event::Wakeup);
+                }
 
                 if let TerminalType::Pty { info, .. } = &self.terminal_type {
                     info.emit_title_changed_if_changed(cx);
@@ -3588,10 +3597,7 @@ fn previous_prompt_mark(marks: &[Point], reference: i32) -> Option<Point> {
 /// Smallest prompt mark strictly below `reference`, i.e. the prompt after the
 /// current viewport or cursor.
 fn next_prompt_mark(marks: &[Point], reference: i32) -> Option<Point> {
-    marks
-        .iter()
-        .copied()
-        .find(|mark| mark.line > reference)
+    marks.iter().copied().find(|mark| mark.line > reference)
 }
 
 /// Strip control characters from pasted text so clipboard contents cannot
@@ -3599,9 +3605,7 @@ fn next_prompt_mark(marks: &[Point], reference: i32) -> Option<Point> {
 /// or keyboard shortcuts such as Ctrl-C. Tabs and line breaks are preserved.
 fn sanitize_paste(text: &str) -> String {
     text.chars()
-        .filter(|character| {
-            !character.is_control() || matches!(character, '\n' | '\r' | '\t')
-        })
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t'))
         .collect()
 }
 
@@ -3824,28 +3828,12 @@ mod tests {
 
     #[test]
     fn prompt_navigation_picks_adjacent_marks() {
-        let marks = vec![
-            Point::new(-30, 0),
-            Point::new(-20, 0),
-            Point::new(-10, 0),
-        ];
+        let marks = vec![Point::new(-30, 0), Point::new(-20, 0), Point::new(-10, 0)];
 
-        assert_eq!(
-            previous_prompt_mark(&marks, 0),
-            Some(Point::new(-10, 0))
-        );
-        assert_eq!(
-            previous_prompt_mark(&marks, -10),
-            Some(Point::new(-20, 0))
-        );
-        assert_eq!(
-            previous_prompt_mark(&marks, -30),
-            None
-        );
-        assert_eq!(
-            next_prompt_mark(&marks, -20),
-            Some(Point::new(-10, 0))
-        );
+        assert_eq!(previous_prompt_mark(&marks, 0), Some(Point::new(-10, 0)));
+        assert_eq!(previous_prompt_mark(&marks, -10), Some(Point::new(-20, 0)));
+        assert_eq!(previous_prompt_mark(&marks, -30), None);
+        assert_eq!(next_prompt_mark(&marks, -20), Some(Point::new(-10, 0)));
         assert_eq!(next_prompt_mark(&marks, -10), None);
     }
 

@@ -378,6 +378,13 @@ pub struct Term<T> {
 
     /// Exit code reported for the previous command (`OSC 133;D;<code>`).
     last_exit_code: Option<i64>,
+
+    /// Whether the application enabled synchronized output (`DECSET 2026`).
+    ///
+    /// While set, the UI should hold back repaints until the application
+    /// finishes its frame (`DECRST 2026`) so partially drawn updates are not
+    /// shown.
+    synchronized_updates: bool,
 }
 
 /// Maximum number of shell prompt marks retained in [`Term::prompt_marks`].
@@ -516,6 +523,7 @@ impl<T> Term<T> {
             last_command_text: None,
             last_command_range: None,
             last_exit_code: None,
+            synchronized_updates: false,
         }
     }
 
@@ -853,6 +861,12 @@ impl<T> Term<T> {
         &self.mode
     }
 
+    /// Whether the application enabled synchronized output (`DECSET 2026`).
+    #[inline]
+    pub fn synchronized_updates(&self) -> bool {
+        self.synchronized_updates
+    }
+
     /// Reset terminal modes that a foreground program may have left enabled
     /// (mouse reporting, alternate screen, scroll region, bracketed paste, ...).
     ///
@@ -895,6 +909,7 @@ impl<T> Term<T> {
 
         // Reset the scroll region to the full screen.
         self.scroll_region = Line(0)..Line(self.grid.screen_lines() as i32);
+        self.synchronized_updates = false;
         self.mark_fully_damaged();
     }
 
@@ -2129,7 +2144,10 @@ impl<T: EventListener> Handler for Term<T> {
             // when the integration script provides it, the exact command text
             // encoded as base64 in the payload.
             'C' => {
-                let start = self.prompt_end_mark.take().unwrap_or(self.grid.cursor.point);
+                let start = self
+                    .prompt_end_mark
+                    .take()
+                    .unwrap_or(self.grid.cursor.point);
                 self.last_command_input_range = Some((start, self.grid.cursor.point));
                 self.last_command_text = payload.as_deref().and_then(|payload| {
                     let decoded = Base64.decode(payload.trim()).ok()?;
@@ -2268,6 +2286,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.last_command_text = None;
         self.last_command_range = None;
         self.last_exit_code = None;
+        self.synchronized_updates = false;
         if self.mode.contains(TermMode::ALT_SCREEN) {
             mem::swap(&mut self.grid, &mut self.inactive_grid);
         }
@@ -2429,7 +2448,7 @@ impl<T: EventListener> Handler for Term<T> {
                 style.blinking = true;
                 self.event_proxy.send_event(Event::CursorBlinkingChange);
             }
-            NamedPrivateMode::SyncUpdate => (),
+            NamedPrivateMode::SyncUpdate => self.synchronized_updates = true,
         }
     }
 
@@ -2480,7 +2499,7 @@ impl<T: EventListener> Handler for Term<T> {
                 style.blinking = false;
                 self.event_proxy.send_event(Event::CursorBlinkingChange);
             }
-            NamedPrivateMode::SyncUpdate => (),
+            NamedPrivateMode::SyncUpdate => self.synchronized_updates = false,
         }
     }
 
@@ -4341,6 +4360,31 @@ mod tests {
     }
 
     #[test]
+    fn decset_2026_tracks_synchronized_updates() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize::new(80, 24),
+            RecordingListener(events),
+        );
+        let mut processor = crate::vte::ansi::Processor::<crate::vte::ansi::StdSyncHandler>::new();
+
+        assert!(!term.synchronized_updates());
+
+        // DECSET 2026 starts a synchronized update: the mode is reported and
+        // further input is buffered by the parser until the update ends.
+        processor.advance(&mut term, b"\x1b[?2026h");
+        assert!(term.synchronized_updates());
+        processor.advance(&mut term, b"hello");
+        assert_eq!(term.grid().cursor.point, Point::new(Line(0), Column(0)));
+
+        // DECRST 2026 ends it: buffered input is applied and the flag clears.
+        processor.advance(&mut term, b"\x1b[?2026l");
+        assert!(!term.synchronized_updates());
+        assert_eq!(term.grid().cursor.point, Point::new(Line(0), Column(5)));
+    }
+
+    #[test]
     fn osc133_command_lifecycle_tracked() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let mut term = Term::new(
@@ -4373,10 +4417,7 @@ mod tests {
         assert_eq!(term.bounds_to_string(start, end), "hi");
 
         assert_eq!(events.lock().unwrap().len(), 2);
-        assert!(matches!(
-            &events.lock().unwrap()[0],
-            Event::CommandStarted
-        ));
+        assert!(matches!(&events.lock().unwrap()[0], Event::CommandStarted));
         match &events.lock().unwrap()[1] {
             Event::CommandFinished(code) => assert_eq!(*code, Some(42)),
             other => panic!("unexpected event: {other:?}"),

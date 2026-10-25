@@ -10,10 +10,11 @@ use editor::{
     ui_scrollbar_settings_from_raw,
 };
 use gpui::{
-    Action, AnyElement, App, ClipboardEntry, DismissEvent, Entity, EventEmitter, ExternalPaths,
-    FocusHandle, Focusable, Font, KeyContext, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
-    Pixels, Point as GpuiPoint, PromptLevel, Render, ScrollWheelEvent, Styled, Subscription,
-    SystemNotification, Task, TaskExt, WeakEntity, actions, anchored, deferred, div,
+    A11ySubtreeBuilder, Action, AnyElement, App, ClipboardEntry, DismissEvent, Entity,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, KeyContext, KeyDownEvent, Keystroke,
+    MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, PromptLevel, Render, Role,
+    ScrollWheelEvent, Styled, Subscription, SystemNotification, Task, TaskExt, WeakEntity,
+    accesskit, actions, anchored, deferred, div,
 };
 use menu;
 use persistence::TerminalDb;
@@ -84,6 +85,86 @@ fn slice_utf16(text: &str, start: usize, end: usize) -> String {
     String::from_utf16_lossy(&units)
 }
 
+/// AccessKit's per-run `word_starts` indices are `u8`, so text runs are capped
+/// at this many characters.
+const MAX_A11Y_RUN_CHARS: usize = 255;
+
+/// Plain text of the visible screen plus the cursor's byte offset, for screen
+/// readers. Rows are joined with newlines.
+fn accessible_screen_text(content: &terminal::Content) -> (String, usize) {
+    let mut text = String::with_capacity(content.cells.len() + 16);
+    let mut caret = 0;
+    let mut current_line = None;
+    for cell in &content.cells {
+        if current_line != Some(cell.point.line) {
+            if current_line.is_some() {
+                text.push('\n');
+            }
+            current_line = Some(cell.point.line);
+        }
+        if cell.point == content.cursor.point {
+            caret = text.len();
+        }
+        text.push(cell.cell.character());
+    }
+    let caret = caret.min(text.len());
+    (text, caret)
+}
+
+/// Exposes the terminal's screen as AccessKit text runs with a caret, so screen
+/// readers can review and follow the output natively.
+fn push_accessible_text_runs(builder: &mut A11ySubtreeBuilder, text: &str, caret: usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let chunk_count = chars.len().div_ceil(MAX_A11Y_RUN_CHARS).max(1);
+
+    for chunk in 0..chunk_count {
+        let start = chunk * MAX_A11Y_RUN_CHARS;
+        let end = (start + MAX_A11Y_RUN_CHARS).min(chars.len());
+        let chunk_chars = &chars[start..end];
+
+        let mut node = accesskit::Node::new(accesskit::Role::TextRun);
+        node.set_text_direction(accesskit::TextDirection::LeftToRight);
+        node.set_value(chunk_chars.iter().collect::<String>());
+        node.set_character_lengths(
+            chunk_chars
+                .iter()
+                .map(|character| character.len_utf8() as u8)
+                .collect::<Vec<u8>>(),
+        );
+        if chunk > 0 {
+            node.set_previous_on_line(builder.synthetic_node_id(chunk as u64 - 1));
+        }
+        if chunk + 1 < chunk_count {
+            node.set_next_on_line(builder.synthetic_node_id(chunk as u64 + 1));
+        }
+
+        let id = builder.synthetic_node_id(chunk as u64);
+        builder.push_child(id, node);
+    }
+
+    let caret_chars = text
+        .char_indices()
+        .take_while(|(byte_index, _)| *byte_index < caret)
+        .count();
+    // A caret landing exactly on a chunk boundary belongs to the end of the
+    // previous chunk.
+    let chunk_index = if caret_chars > 0 && caret_chars.is_multiple_of(MAX_A11Y_RUN_CHARS) {
+        caret_chars / MAX_A11Y_RUN_CHARS - 1
+    } else {
+        caret_chars / MAX_A11Y_RUN_CHARS
+    };
+    let position = accesskit::TextPosition {
+        node: builder.synthetic_node_id(chunk_index as u64),
+        character_index: caret_chars - chunk_index * MAX_A11Y_RUN_CHARS,
+    };
+    builder
+        .parent_node()
+        .set_text_selection(accesskit::TextSelection {
+            anchor: position,
+            focus: position,
+        });
+}
+
 #[cfg(test)]
 mod paste_tests {
     use super::paste_needs_confirmation;
@@ -94,10 +175,7 @@ mod paste_tests {
         assert!(paste_needs_confirmation("cargo test\n", true));
         assert!(paste_needs_confirmation("cargo test\ncargo clippy", true));
         assert!(paste_needs_confirmation("cargo test\r\ncargo fmt", true));
-        assert!(!paste_needs_confirmation(
-            "cargo test\ncargo clippy",
-            false
-        ));
+        assert!(!paste_needs_confirmation("cargo test\ncargo clippy", false));
         assert!(!paste_needs_confirmation("   \n  ", true));
     }
 }
@@ -682,10 +760,7 @@ impl TerminalView {
                                 i18n::t("select_last_command_output"),
                                 Box::new(SelectLastCommandOutput),
                             )
-                            .action(
-                                i18n::t("rerun_last_command"),
-                                Box::new(RerunLastCommand),
-                            )
+                            .action(i18n::t("rerun_last_command"), Box::new(RerunLastCommand))
                     },
                 )
                 .when(
@@ -1037,12 +1112,7 @@ impl TerminalView {
         }
     }
 
-    fn rerun_last_command(
-        &mut self,
-        _: &RerunLastCommand,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn rerun_last_command(&mut self, _: &RerunLastCommand, _: &mut Window, cx: &mut Context<Self>) {
         if self.is_alt_screen(cx) {
             cx.propagate();
             return;
@@ -1587,7 +1657,9 @@ fn subscribe_for_terminal_events(
                         };
                         let body = match code {
                             Some(0) => i18n::t("command_finished"),
-                            Some(code) => i18n::t("command_failed").replace("{code}", &code.to_string()),
+                            Some(code) => {
+                                i18n::t("command_failed").replace("{code}", &code.to_string())
+                            }
                             None => i18n::t("command_finished"),
                         };
                         cx.show_system_notification(SystemNotification {
@@ -1746,8 +1818,23 @@ impl Render for TerminalView {
 
         let focused = self.focus_handle.is_focused(window);
 
+        let (a11y_text, a11y_caret) = accessible_screen_text(&self.terminal.read(cx).last_content);
+        let a11y_label: gpui::SharedString = match self
+            .custom_title
+            .as_ref()
+            .filter(|title| !title.trim().is_empty())
+        {
+            Some(title) => title.clone().into(),
+            None => self.terminal.read(cx).title(true).into(),
+        };
+
         div()
             .id("terminal-view")
+            .role(Role::TextInput)
+            .aria_label(a11y_label)
+            .a11y_synthetic_children(move |builder| {
+                push_accessible_text_runs(builder, &a11y_text, a11y_caret);
+            })
             .size_full()
             .relative()
             .track_focus(&self.focus_handle(cx))
@@ -2210,11 +2297,7 @@ impl Item for TerminalView {
             }
             terminal
                 .foreground_process_command_name()
-                .or_else(|| {
-                    terminal
-                        .task()
-                        .map(|task| task.spawned_task.label.clone())
-                })
+                .or_else(|| terminal.task().map(|task| task.spawned_task.label.clone()))
                 .unwrap_or_else(|| terminal.title(false))
         };
 

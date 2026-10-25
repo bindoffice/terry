@@ -275,6 +275,13 @@ pub(super) fn scroll_to_point_aligned(term: &mut AlacrittyTerm, point: Point) {
     }
 }
 
+/// Whether the application enabled synchronized output (`DECSET 2026`).
+/// While set, the application is painting a frame and the UI should not
+/// repaint until it clears the mode (`DECRST 2026`).
+pub(super) fn synchronized_updates(term: &AlacrittyTerm) -> bool {
+    term.synchronized_updates()
+}
+
 pub(super) fn prompt_marks(term: &AlacrittyTerm) -> Vec<Point> {
     term.prompt_marks()
         .map(|point| terminal_point_from_alacritty(*point))
