@@ -311,6 +311,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("kill_process", "Kill process");
             m.insert("refresh", "Refresh");
             m.insert("switch_worktree", "Switch worktree…");
+            m.insert("start_recording", "Start recording session");
+            m.insert("stop_recording", "Stop recording session");
+            m.insert("open_recordings", "Open recordings folder");
+            m.insert("recording", "Recording");
             m.insert("recent_terminals", "Recent Terminals");
             m.insert("recent_folders", "Recent Folders");
             m.insert("open_recent_project", "Open Recent Project");
@@ -708,6 +712,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("kill_process", "结束进程");
             m.insert("refresh", "刷新");
             m.insert("switch_worktree", "切换 worktree…");
+            m.insert("start_recording", "开始录制会话");
+            m.insert("stop_recording", "停止录制会话");
+            m.insert("open_recordings", "打开录制文件夹");
+            m.insert("recording", "录制中");
             m.insert("recent_terminals", "最近终端");
             m.insert("recent_folders", "最近文件夹");
             m.insert("open_recent_project", "打开最近项目");
@@ -1105,6 +1113,10 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("kill_process", "結束程序");
             m.insert("refresh", "重新整理");
             m.insert("switch_worktree", "切換 worktree…");
+            m.insert("start_recording", "開始錄製工作階段");
+            m.insert("stop_recording", "停止錄製工作階段");
+            m.insert("open_recordings", "開啟錄製資料夾");
+            m.insert("recording", "錄製中");
             m.insert("open_recent_project", "開啟最近專案");
             m.insert("agent", "Agent");
             m.insert("split_pane", "分割窗格");

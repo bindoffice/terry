@@ -989,6 +989,15 @@ pub fn init(cx: &mut App) {
             });
         });
         workspace.register_action(
+            |workspace, _: &crate::session_recording::ToggleSessionRecording, window, cx| {
+                if let Some(view) = crate::scrollback_export::active_terminal(workspace, cx) {
+                    window.defer(cx, move |_window, cx| {
+                        crate::session_recording::toggle(&view, cx);
+                    });
+                }
+            },
+        );
+        workspace.register_action(
             |workspace, _: &crate::agent_switcher::OpenAgentSwitcher, _window, cx| {
                 let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
                     return;
@@ -1162,6 +1171,8 @@ pub struct TerminalListPanel {
     git_subscriptions: Vec<Subscription>,
     git_subscribed: HashSet<EntityId>,
     _git_store_subscription: Subscription,
+    /// Re-renders the sidebar when a terminal starts or stops recording.
+    _recording_observation: Subscription,
     /// Pending refresh that lets the agent badge fall back to idle once output
     /// stops, so the panel does not re-render continuously.
     agent_idle_refresh: Option<Task<()>>,
@@ -1249,6 +1260,8 @@ impl TerminalListPanel {
         });
 
         // Refresh the sidebar when git status or the checked-out branch changes.
+        let _recording_observation =
+            cx.observe_global::<crate::session_recording::SessionRecording>(|_, cx| cx.notify());
         let _git_store_subscription = {
             let git_store = project.read(cx).git_store().clone();
             cx.subscribe(
@@ -1316,6 +1329,7 @@ impl TerminalListPanel {
             git_subscriptions,
             git_subscribed,
             _git_store_subscription,
+            _recording_observation,
             agent_idle_refresh: None,
             cwd_persist_task: Task::ready(()),
             command_history_persist: Task::ready(()),
@@ -2677,6 +2691,7 @@ impl TerminalListPanel {
         cx: &mut App,
     ) -> Entity<ContextMenu> {
         let terminal_id = terminal_view.entity_id();
+        let recording = crate::session_recording::is_recording(terminal_id, cx);
         let move_targets: Vec<(GroupId, SharedString)> = panel
             .read(cx)
             .groups
@@ -2749,6 +2764,22 @@ impl TerminalListPanel {
                             this.detach_terminal(terminal_id, window, cx);
                         });
                     });
+
+            let record_view = terminal_view.clone();
+            let menu = menu.entry(
+                i18n::t(if recording {
+                    "stop_recording"
+                } else {
+                    "start_recording"
+                }),
+                None,
+                move |_window, cx| {
+                    crate::session_recording::toggle(&record_view, cx);
+                },
+            );
+            let menu = menu.entry(i18n::t("open_recordings"), None, move |_window, cx| {
+                crate::session_recording::reveal_recordings(cx);
+            });
 
             let inspect_view = terminal_view.clone();
             let menu = menu
@@ -5693,6 +5724,7 @@ impl Render for TerminalListPanel {
                 Option<AgentBadge>,
                 Option<i64>,
                 Option<GitBadge>,
+                bool,
             )>,
         )> = Vec::new();
         for group in &self.groups {
@@ -5707,12 +5739,14 @@ impl Render for TerminalListPanel {
                     let progress = tv.read(cx).notification_progress();
                     let cwd = tv.read(cx).terminal().read(cx).working_directory();
                     let git = self.git_badge_for(cwd.as_deref(), cx);
+                    let recording = crate::session_recording::is_recording(tv.entity_id(), cx);
                     terminals.push((
                         tv.clone(),
                         sidebar_terminal_name(tv, cx),
                         badge,
                         progress,
                         git,
+                        recording,
                     ));
                 }
             }
@@ -5892,7 +5926,7 @@ impl Render for TerminalListPanel {
             );
 
             if is_expanded {
-                for (ix, (terminal_view, title, agent_badge, progress, git_badge)) in
+                for (ix, (terminal_view, title, agent_badge, progress, git_badge, recording)) in
                     terminals.into_iter().enumerate()
                 {
                     let is_terminal_active = Some(terminal_view.entity_id()) == active_terminal_id;
@@ -5947,6 +5981,19 @@ impl Render for TerminalListPanel {
                                                         .truncate(),
                                                 ),
                                             )
+                                            .map({
+                                                move |this| {
+                                                    if recording {
+                                                        this.child(
+                                                            Label::new("\u{25cf}")
+                                                                .size(LabelSize::XSmall)
+                                                                .color(Color::Error),
+                                                        )
+                                                    } else {
+                                                        this
+                                                    }
+                                                }
+                                            })
                                             .map({
                                                 let git_badge = git_badge.clone();
                                                 move |this| match git_badge {

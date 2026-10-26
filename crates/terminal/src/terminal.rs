@@ -62,11 +62,13 @@ use gpui::{
     Point as GpuiPoint, Rgba, ScrollWheelEvent, Size, Task, TouchPhase, Window, actions, black, px,
 };
 
+pub use crate::alacritty::OutputSink;
 #[cfg(not(windows))]
 use crate::alacritty::current_child_signal_mask;
+
 use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
-    AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
+    AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, OutputTap, PtySender, RegexSearches,
     append_text_to_term, apply_config, clear_saved_screen, content_text, display_offset,
     display_only_term_config, find_all_visible_links, find_from_terminal_point, full_content_range,
     last_command_input_text, last_command_output_range, last_command_output_text,
@@ -1035,7 +1037,14 @@ impl TerminalBuilder {
         let config = display_only_term_config(scrolling_history, cursor_shape);
 
         let (events_tx, events_rx) = async_channel::bounded(1024);
-        let term = new_term(&config, terminal_bounds, events_tx, alternate_scroll);
+        let output_tap = OutputTap::default();
+        let term = new_term(
+            &config,
+            terminal_bounds,
+            events_tx,
+            output_tap.clone(),
+            alternate_scroll,
+        );
 
         let terminal = Terminal {
             content_dirty: true,
@@ -1044,6 +1053,7 @@ impl TerminalBuilder {
             subprocess: None,
             completion_tx: None,
             term,
+            output_tap,
             term_config: config,
             output_processor: Processor::<StdSyncHandler>::new(),
             title_override: None,
@@ -1263,11 +1273,13 @@ impl TerminalBuilder {
             //Spawn a task so the Alacritty EventLoop (or the subprocess reader) can communicate with us
             //TODO: Remove with a bounded sender which can be dispatched on &self
             let (events_tx, events_rx) = async_channel::bounded(1024);
+            let output_tap = OutputTap::default();
             //Set up the terminal...
             let term = new_term(
                 &config,
                 TerminalBounds::default(),
                 events_tx.clone(),
+                output_tap.clone(),
                 alternate_scroll,
             );
 
@@ -1341,8 +1353,13 @@ impl TerminalBuilder {
                 let pty_info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
 
                 //And connect them together
-                let pty_tx =
-                    spawn_event_loop(term.clone(), events_tx, pty, pty_options.drain_on_exit)?;
+                let pty_tx = spawn_event_loop(
+                    term.clone(),
+                    events_tx,
+                    output_tap.clone(),
+                    pty,
+                    pty_options.drain_on_exit,
+                )?;
 
                 (
                     TerminalType::Pty {
@@ -1358,6 +1375,7 @@ impl TerminalBuilder {
                 content_dirty: true,
                 task,
                 terminal_type,
+                output_tap,
                 subprocess,
                 completion_tx,
                 term,
@@ -1544,6 +1562,8 @@ pub struct Terminal {
     completion_tx: Option<Sender<Option<ExitStatus>>>,
     term: Arc<AlacrittyTermLock>,
     term_config: AlacrittyTermConfig,
+    /// Tap for raw PTY output, used by session recording.
+    output_tap: OutputTap,
     output_processor: Processor<StdSyncHandler>,
     events: VecDeque<InternalEvent>,
     /// This is only used for mouse mode cell change detection
@@ -2681,6 +2701,12 @@ impl Terminal {
         self.write_to_pty(input);
         self.events.push_back(InternalEvent::Scroll(Scroll::Bottom));
         true
+    }
+
+    /// Installs a sink that receives every chunk of raw PTY output. Used to
+    /// record a session; pass `None` to stop.
+    pub fn set_output_sink(&mut self, sink: Option<OutputSink>) {
+        self.output_tap.set(sink);
     }
 
     pub fn last_n_non_empty_lines(&self, n: usize) -> Vec<String> {

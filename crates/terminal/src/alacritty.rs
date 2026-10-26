@@ -57,7 +57,29 @@ pub(super) type AlacrittyGridIterator<'a> = GridIterator<'a, AlacCell>;
 pub(super) type AlacrittyHyperlink = AlacHyperlink;
 
 #[derive(Clone)]
-pub(super) struct ZedListener(async_channel::Sender<PtyEvent>);
+pub(super) struct ZedListener {
+    events: async_channel::Sender<PtyEvent>,
+    output_tap: OutputTap,
+}
+
+/// Shared tap for raw PTY output. The sink is invoked on the PTY reader thread.
+pub type OutputSink = std::sync::Arc<dyn Fn(&[u8]) + Send + Sync + 'static>;
+
+#[derive(Clone, Default)]
+pub(super) struct OutputTap(std::sync::Arc<parking_lot::Mutex<Option<OutputSink>>>);
+
+impl OutputTap {
+    pub(super) fn set(&self, sink: Option<OutputSink>) {
+        *self.0.lock() = sink;
+    }
+
+    fn emit(&self, bytes: &[u8]) {
+        let sink = self.0.lock().clone();
+        if let Some(sink) = sink {
+            sink(bytes);
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct AlacrittySearch {
@@ -215,9 +237,17 @@ pub(super) fn new_term(
     config: &AlacrittyTermConfig,
     bounds: TerminalBounds,
     events_tx: async_channel::Sender<PtyEvent>,
+    output_tap: OutputTap,
     alternate_scroll: AlternateScroll,
 ) -> Arc<AlacrittyTermLock> {
-    let mut term = Term::new(config.clone(), &bounds, ZedListener(events_tx));
+    let mut term = Term::new(
+        config.clone(),
+        &bounds,
+        ZedListener {
+            events: events_tx,
+            output_tap,
+        },
+    );
 
     if let AlternateScroll::Off = alternate_scroll {
         term.unset_private_mode(PrivateMode::Named(NamedPrivateMode::AlternateScroll));
@@ -229,11 +259,21 @@ pub(super) fn new_term(
 pub(super) fn spawn_event_loop(
     term: Arc<AlacrittyTermLock>,
     events_tx: async_channel::Sender<PtyEvent>,
+    output_tap: OutputTap,
     pty: AlacrittyPty,
     drain_on_exit: bool,
 ) -> Result<PtySender> {
-    let event_loop = EventLoop::new(term, ZedListener(events_tx), pty, drain_on_exit, false)
-        .context("failed to create event loop")?;
+    let event_loop = EventLoop::new(
+        term,
+        ZedListener {
+            events: events_tx,
+            output_tap,
+        },
+        pty,
+        drain_on_exit,
+        false,
+    )
+    .context("failed to create event loop")?;
     let pty_tx = event_loop.channel();
     let _io_thread = event_loop.spawn();
 
@@ -460,7 +500,11 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
 
 impl EventListener for ZedListener {
     fn send_event(&self, event: AlacTermEvent) {
-        self.0.try_send(PtyEvent::Event(event.into())).ok();
+        self.events.try_send(PtyEvent::Event(event.into())).ok();
+    }
+
+    fn pty_output(&self, bytes: &[u8]) {
+        self.output_tap.emit(bytes);
     }
 }
 

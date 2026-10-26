@@ -13,6 +13,7 @@ mod quake_terminal;
 mod remote_hosts;
 mod resource_usage;
 mod scrollback_export;
+mod session_recording;
 mod settings_window;
 mod status_bar_items;
 mod terminal_list_panel;
@@ -347,6 +348,7 @@ fn main() {
         app_title_bar::init(cx);
         clipboard_history::init(cx);
         command_history::init(cx);
+        cx.set_global(crate::session_recording::SessionRecording::default());
         search::init(cx);
         cx.set_global(workspace::PaneSearchBarCallbacks {
             setup_search_bar: |languages, toolbar, window, cx| {

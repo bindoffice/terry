@@ -128,6 +128,10 @@ pub trait OnResize {
 /// Event Loop for notifying the renderer about terminal events.
 pub trait EventListener {
     fn send_event(&self, _event: Event) {}
+
+    /// Called with the raw bytes read from the PTY, before they are parsed.
+    /// Used to tap the output stream (for example to record a session).
+    fn pty_output(&self, _bytes: &[u8]) {}
 }
 
 /// Null sink for events.
