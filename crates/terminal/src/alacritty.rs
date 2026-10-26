@@ -1122,6 +1122,10 @@ pub(super) fn screen_lines(term: &Term<ZedListener>) -> usize {
     term.screen_lines()
 }
 
+pub(super) fn columns(term: &Term<ZedListener>) -> usize {
+    term.grid().columns()
+}
+
 pub(super) fn full_content_range(term: &Term<ZedListener>) -> Range {
     let start = AlacPoint::new(term.topmost_line(), Column(0));
     let end = AlacPoint::new(term.bottommost_line(), term.last_column());

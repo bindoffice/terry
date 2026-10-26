@@ -57,6 +57,7 @@ pub fn attach(target: String, window: &mut Window, cx: &mut Context<TerminalList
     cx.spawn_in(window, async move |panel, cx| {
         let mut panes: HashMap<u32, Entity<Terminal>> = HashMap::new();
         let mut pending: HashMap<u32, Vec<u8>> = HashMap::new();
+        let mut pane_order: Vec<u32> = Vec::new();
         let mut requested = false;
 
         while let Some(event) = rx.next().await {
@@ -85,16 +86,38 @@ pub fn attach(target: String, window: &mut Window, cx: &mut Context<TerminalList
                         continue;
                     }
                     let buffered = pending.remove(&pane_id).unwrap_or_default();
-                    let client = client.clone();
+                    let pane_client = client.clone();
                     let created = panel.update_in(cx, |panel, window, cx| {
-                        panel.add_mirrored_pane(pane_id, cwd, buffered, client, window, cx)
+                        panel.add_mirrored_pane(pane_id, cwd, buffered, pane_client, window, cx)
                     });
                     match created {
                         Ok(Some(terminal)) => {
+                            pane_order.push(pane_id);
+                            // Best-effort: tell tmux the client viewport size so
+                            // its panes match the mirrored terminals.
+                            let (columns, rows) =
+                                terminal.update(cx, |terminal, _cx| terminal.grid_size());
+                            if columns > 0 && rows > 0 {
+                                if let Ok(mut client) = client.lock() {
+                                    let _ = client.send(&crate::tmux_control::refresh_client_size(
+                                        columns, rows,
+                                    ));
+                                }
+                            }
                             panes.insert(pane_id, terminal);
                         }
                         Ok(None) => {}
                         Err(_) => break,
+                    }
+                }
+                ControlEvent::LayoutChange { layout, .. } => {
+                    let pane_order = pane_order.clone();
+                    let layout = layout.clone();
+                    let applied = panel.update_in(cx, |panel, window, cx| {
+                        panel.apply_tmux_layout(&pane_order, &layout, window, cx);
+                    });
+                    if applied.is_err() {
+                        break;
                     }
                 }
                 ControlEvent::Exit(_) => break,

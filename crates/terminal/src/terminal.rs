@@ -69,7 +69,7 @@ use crate::alacritty::current_child_signal_mask;
 use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, OutputTap, PtySender, RegexSearches,
-    append_text_to_term, apply_config, clear_saved_screen, content_text, display_offset,
+    append_text_to_term, apply_config, clear_saved_screen, columns, content_text, display_offset,
     display_only_term_config, find_all_visible_links, find_from_terminal_point, full_content_range,
     last_command_input_text, last_command_output_range, last_command_output_text,
     last_non_empty_lines, last_prompt_mark as last_term_prompt_mark, make_content, new_term,
@@ -2727,6 +2727,15 @@ impl Terminal {
     pub fn last_n_non_empty_lines(&self, n: usize) -> Vec<String> {
         let terminal = self.term.lock_unfair();
         last_non_empty_lines(&terminal, n)
+    }
+
+    /// Visible grid size as `(columns, rows)`.
+    pub fn grid_size(&self) -> (u16, u16) {
+        let term = self.term.lock_unfair();
+        (
+            columns(&term).min(u16::MAX as usize) as u16,
+            screen_lines(&term).min(u16::MAX as usize) as u16,
+        )
     }
 
     /// Text of the command that most recently finished (`OSC 133`), if the

@@ -908,6 +908,66 @@ struct WorkspaceTemplate {
     broadcast_input: bool,
 }
 
+/// Converts a parsed tmux layout into a group layout tree. Leaves resolve to
+/// the terminal index that mirrors the pane; `fallback` assigns indices in
+/// traversal order when the layout does not carry pane ids.
+fn tmux_layout_to_node(
+    layout: &crate::tmux_control::Layout,
+    pane_order: &[u32],
+    fallback: &mut usize,
+) -> Option<GroupLayoutNode> {
+    use crate::tmux_control::{Layout, Orientation};
+
+    let child_extent = |orientation: Orientation, child: &Layout| -> f32 {
+        match (orientation, child) {
+            (Orientation::LeftRight, Layout::Leaf { width, .. })
+            | (Orientation::LeftRight, Layout::Split { width, .. }) => *width as f32,
+            (Orientation::TopBottom, Layout::Leaf { height, .. })
+            | (Orientation::TopBottom, Layout::Split { height, .. }) => *height as f32,
+        }
+    };
+
+    match layout {
+        Layout::Leaf { pane, .. } => {
+            let index = pane
+                .and_then(|pane| pane_order.iter().position(|id| *id == pane))
+                .unwrap_or_else(|| {
+                    let index = *fallback;
+                    *fallback += 1;
+                    index
+                });
+            Some(GroupLayoutNode::Pane {
+                terminals: vec![index],
+                active: None,
+            })
+        }
+        Layout::Split {
+            orientation,
+            children,
+            ..
+        } => {
+            let axis = match orientation {
+                Orientation::LeftRight => PersistedAxis::Horizontal,
+                Orientation::TopBottom => PersistedAxis::Vertical,
+            };
+            let mut nodes = Vec::with_capacity(children.len());
+            let mut flexes = Vec::with_capacity(children.len());
+            for child in children {
+                nodes.push(tmux_layout_to_node(child, pane_order, fallback)?);
+                flexes.push(child_extent(*orientation, child));
+            }
+            if nodes.len() < 2 {
+                return nodes.pop();
+            }
+            Some(GroupLayoutNode::Split {
+                axis,
+                flexes,
+                children: nodes,
+            })
+        }
+    }
+}
+
 fn templates_path() -> std::path::PathBuf {
     paths::data_dir().join("workspace_templates.json")
 }
@@ -4737,6 +4797,30 @@ impl TerminalListPanel {
             );
         }
 
+        self.restore_active_group_layout(window, cx);
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Applies a tmux layout tree to the active group. `pane_order` maps the
+    /// order panes were added to their tmux pane ids, so layout leaves land on
+    /// the right terminal.
+    pub(crate) fn apply_tmux_layout(
+        &mut self,
+        pane_order: &[u32],
+        layout: &crate::tmux_control::Layout,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut fallback = 0usize;
+        let Some(node) = tmux_layout_to_node(layout, pane_order, &mut fallback) else {
+            return;
+        };
+        let group_id = self.active_group_id;
+        if let Some(group) = self.groups.iter_mut().find(|group| group.id == group_id) {
+            group.saved_layout = Some(node);
+            group.layout_mode = GroupLayoutMode::Manual;
+        }
         self.restore_active_group_layout(window, cx);
         self.save_session(cx);
         cx.notify();
