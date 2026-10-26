@@ -447,6 +447,45 @@ struct PersistedTerminal {
     /// User-renamed tab/sidebar title. Optional for older session files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     title: Option<String>,
+    /// Theme name from the launch profile that created this terminal, so a
+    /// restored terminal keeps its per-profile colors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color_scheme: Option<String>,
+    /// Per-terminal font size from the zoom actions, so a zoomed terminal keeps
+    /// its size across restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    font_size: Option<f32>,
+    /// How this terminal was launched (profile name or a raw command such as
+    /// `ssh`/`tmux`), so restore can replay it instead of opening a plain shell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch: Option<PersistedLaunch>,
+}
+
+/// Replayable launch information for a persisted terminal.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum PersistedLaunch {
+    /// A named profile from `terminal.profiles`.
+    Profile { name: String },
+    /// A direct program invocation (SSH, tmux, ...).
+    Command {
+        program: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+}
+
+/// Restore hints passed through the async spawn path. Indexed separately from
+/// the spawn arguments because async completion can reorder terminals.
+#[derive(Clone, Default)]
+struct SpawnRestore {
+    index: Option<usize>,
+    title: Option<String>,
+    color_scheme: Option<String>,
+    font_size: Option<f32>,
+    launch: Option<PersistedLaunch>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -774,6 +813,9 @@ pub struct TerminalListPanel {
     /// the shell was actually started in (after defaulting), and refreshed from
     /// live process info so session writes don't permanently store `null`.
     terminal_spawn_cwds: HashMap<EntityId, Option<PathBuf>>,
+    /// Launch origin per terminal view (profile or direct command), persisted so
+    /// restore can replay `ssh`/`tmux` terminals instead of opening a shell.
+    terminal_launches: HashMap<EntityId, PersistedLaunch>,
     /// Subscription objects for each terminal view keyed by its entity id.
     /// Removed when the terminal is closed so long sessions do not accumulate
     /// dead subscriptions.
@@ -885,6 +927,7 @@ impl TerminalListPanel {
             session_file_stem,
             owns_workspace_session,
             terminal_spawn_cwds: HashMap::default(),
+            terminal_launches: HashMap::default(),
             _terminal_subscriptions: HashMap::default(),
             cwd_persist_task: Task::ready(()),
             restore_cwd_guard_until: None,
@@ -1235,7 +1278,16 @@ impl TerminalListPanel {
                     .map(|title| title.trim())
                     .filter(|title| !title.is_empty())
                     .map(|title| title.to_string());
-                p_group.terminals.push(PersistedTerminal { cwd, title });
+                let color_scheme = view_ent.read(cx).color_scheme().map(str::to_owned);
+                let font_size = view_ent.read(cx).font_size_override().map(f32::from);
+                let launch = self.terminal_launches.get(&view_id).cloned();
+                p_group.terminals.push(PersistedTerminal {
+                    cwd,
+                    title,
+                    color_scheme,
+                    font_size,
+                    launch,
+                });
             }
 
             session.groups.push(p_group);
@@ -1447,15 +1499,61 @@ impl TerminalListPanel {
         .detach();
 
         for (id, index, p_term) in to_spawn {
+            let PersistedTerminal {
+                cwd,
+                title,
+                color_scheme,
+                font_size,
+                launch,
+            } = p_term;
+            // Replay the original launch (named profile, `ssh`, `tmux`, ...)
+            // instead of opening a plain shell. A profile that no longer exists
+            // falls back to the default shell rather than failing the restore.
+            let (profile, launch) = match launch {
+                Some(PersistedLaunch::Profile { name }) => {
+                    let profile = TerminalSettings::get_global(cx).profile(&name).cloned();
+                    (profile, Some(PersistedLaunch::Profile { name }))
+                }
+                Some(PersistedLaunch::Command {
+                    program,
+                    args,
+                    title,
+                }) => {
+                    let launch = PersistedLaunch::Command {
+                        program: program.clone(),
+                        args: args.clone(),
+                        title: title.clone(),
+                    };
+                    let profile = TerminalProfile {
+                        name: format!("restored:{program}"),
+                        shell: Some(task::Shell::WithArguments {
+                            program,
+                            args,
+                            title_override: title,
+                        }),
+                        working_directory: None,
+                        env: Default::default(),
+                        command: None,
+                        color_scheme: None,
+                    };
+                    (Some(profile), Some(launch))
+                }
+                None => (None, None),
+            };
             self.spawn_terminal(
                 id,
-                p_term.cwd,
+                cwd,
                 None,
                 None,
-                Some(index),
-                p_term.title,
+                SpawnRestore {
+                    index: Some(index),
+                    title,
+                    color_scheme,
+                    font_size,
+                    launch,
+                },
                 None,
-                None,
+                profile,
                 window,
                 cx,
             );
@@ -1501,8 +1599,7 @@ impl TerminalListPanel {
                     Some(cwd),
                     None,
                     None,
-                    None,
-                    None,
+                    SpawnRestore::default(),
                     None,
                     profile.clone(),
                     window,
@@ -1530,7 +1627,17 @@ impl TerminalListPanel {
             restore_slots: Vec::new(),
         });
         self.active_group_id = id;
-        self.spawn_terminal(id, None, None, None, None, None, None, profile, window, cx);
+        self.spawn_terminal(
+            id,
+            None,
+            None,
+            None,
+            SpawnRestore::default(),
+            None,
+            profile,
+            window,
+            cx,
+        );
         self.save_session(cx);
     }
 
@@ -1620,8 +1727,7 @@ impl TerminalListPanel {
             Some(cwd),
             None,
             self.display_pane_entity(cx),
-            None,
-            None,
+            SpawnRestore::default(),
             init_command,
             None,
             window,
@@ -1780,8 +1886,7 @@ impl TerminalListPanel {
                 session_cwd.or(cwd),
                 source,
                 destination,
-                None,
-                None,
+                SpawnRestore::default(),
                 Some(command),
                 None,
                 window,
@@ -1795,8 +1900,7 @@ impl TerminalListPanel {
             cwd,
             source,
             destination,
-            None,
-            None,
+            SpawnRestore::default(),
             None,
             profile,
             window,
@@ -1834,8 +1938,7 @@ impl TerminalListPanel {
             cwd,
             Some(terminal_view),
             None,
-            None,
-            None,
+            SpawnRestore::default(),
             None,
             None,
             window,
@@ -2243,7 +2346,17 @@ impl TerminalListPanel {
         });
         self.switch_group(id, window, cx);
         let profile = self.default_terminal_profile(cx);
-        self.spawn_terminal(id, cwd, source, None, None, None, None, profile, window, cx);
+        self.spawn_terminal(
+            id,
+            cwd,
+            source,
+            None,
+            SpawnRestore::default(),
+            None,
+            profile,
+            window,
+            cx,
+        );
         self.save_session(cx);
     }
 
@@ -2519,23 +2632,32 @@ impl TerminalListPanel {
     /// When `destination` is set, the new tab is added to that pane (the split
     /// whose "+" was clicked) instead of whatever happens to be active.
     ///
-    /// `restore_index` / `restore_title` are used when rehydrating a session so
-    /// async completion order cannot scramble layout indices or drop renames.
-    /// When `profile` is set, its shell/env/working directory/startup command
-    /// replace the source terminal and global defaults.
+    /// `restore` carries the persisted title, color scheme, font size and
+    /// launch origin for a rehydrated terminal.
     fn spawn_terminal(
         &mut self,
         group_id: GroupId,
         cwd: Option<std::path::PathBuf>,
         source: Option<Entity<TerminalView>>,
         destination: Option<Entity<Pane>>,
-        restore_index: Option<usize>,
-        restore_title: Option<String>,
+        restore: SpawnRestore,
         init_command: Option<String>,
         profile: Option<TerminalProfile>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let SpawnRestore {
+            index: restore_index,
+            title: restore_title,
+            color_scheme: restore_color_scheme,
+            font_size: restore_font_size,
+            launch: restore_launch,
+        } = restore;
+        let launch = restore_launch.or_else(|| {
+            profile.as_ref().map(|profile| PersistedLaunch::Profile {
+                name: profile.name.clone(),
+            })
+        });
         let project = self.project.clone();
         let workspace = self.workspace.clone();
         // A profile describes the whole launch environment; don't inherit the
@@ -2622,6 +2744,30 @@ impl TerminalListPanel {
                         cx,
                     )
                 });
+
+                // A profile's color scheme wins; otherwise a cloned terminal
+                // keeps the source terminal's colors.
+                if let Some(color_scheme) = profile_color_scheme
+                    .clone()
+                    .or_else(|| source_color_scheme.clone())
+                    .or_else(|| restore_color_scheme.clone())
+                {
+                    terminal_view.update(cx, |view, cx| {
+                        view.set_color_scheme(Some(color_scheme), cx);
+                    });
+                }
+
+                // Remember how this terminal was launched so session writes can
+                // replay profiles and `ssh`/`tmux` commands after a restart.
+                if let Some(launch) = launch.clone() {
+                    let view_id = terminal_view.entity_id();
+                    this.terminal_launches.insert(view_id, launch);
+                }
+                if let Some(size) = restore_font_size {
+                    terminal_view.update(cx, |view, cx| {
+                        view.set_font_size_override(Some(px(size)), cx);
+                    });
+                }
 
                 if let Some(title) = restore_title
                     .as_deref()
@@ -2877,8 +3023,7 @@ impl TerminalListPanel {
             Some(cwd),
             None,
             None,
-            None,
-            None,
+            SpawnRestore::default(),
             None,
             profile,
             window,
@@ -4009,6 +4154,7 @@ impl TerminalListPanel {
         let id = session.view.entity_id();
         self._terminal_subscriptions.remove(&id);
         self.terminal_spawn_cwds.remove(&id);
+        self.terminal_launches.remove(&id);
         drop(session.view);
         cx.notify();
     }
@@ -4372,8 +4518,7 @@ impl TerminalListPanel {
             cwd,
             source,
             None,
-            None,
-            None,
+            SpawnRestore::default(),
             Some(command),
             None,
             window,
@@ -4419,6 +4564,7 @@ impl TerminalListPanel {
             {
                 let removed = group.terminals.remove(removed_ix);
                 let remembered_cwd = self.terminal_spawn_cwds.remove(&item_id).flatten();
+                self.terminal_launches.remove(&item_id);
                 let cwd = remembered_cwd
                     .or_else(|| removed.read(cx).terminal().read(cx).working_directory());
                 if let Some((agent, bin)) = coding_agent_from_view(&removed, cx) {
@@ -5787,6 +5933,56 @@ mod tests {
                     .to_string_lossy(),
             );
         });
+    }
+
+    /// Session files written before per-profile color schemes existed must
+    /// still load, and the field must round-trip when set.
+    #[test]
+    fn persisted_terminal_color_scheme_is_backwards_compatible() {
+        let old: PersistedTerminal = serde_json::from_str(r#"{ "cwd": null }"#).unwrap();
+        assert_eq!(old.color_scheme, None);
+        assert_eq!(old.font_size, None);
+        assert_eq!(old.launch, None);
+
+        let round_trip: PersistedTerminal =
+            serde_json::from_str(r#"{ "cwd": null, "color_scheme": "One Dark" }"#).unwrap();
+        assert_eq!(round_trip.color_scheme.as_deref(), Some("One Dark"));
+
+        // Unset schemes are omitted so session files stay small.
+        let serialized = serde_json::to_string(&old).unwrap();
+        assert!(!serialized.contains("color_scheme"));
+    }
+
+    /// A zoomed terminal and a non-shell launch (ssh/tmux/profile) survive a
+    /// restart: font size, launch origin and profile name round-trip.
+    #[test]
+    fn persisted_terminal_restores_font_size_and_launch() {
+        let json = r#"{
+            "cwd": "/tmp",
+            "font_size": 15.5,
+            "launch": { "type": "command", "program": "ssh", "args": ["box"], "title": "box" }
+        }"#;
+        let terminal: PersistedTerminal = serde_json::from_str(json).unwrap();
+        assert_eq!(terminal.font_size, Some(15.5));
+        assert_eq!(
+            terminal.launch,
+            Some(PersistedLaunch::Command {
+                program: "ssh".into(),
+                args: vec!["box".into()],
+                title: Some("box".into()),
+            })
+        );
+
+        let profile: PersistedTerminal = serde_json::from_str(
+            r#"{ "cwd": null, "launch": { "type": "profile", "name": "Work" } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            profile.launch,
+            Some(PersistedLaunch::Profile {
+                name: "Work".into()
+            })
+        );
     }
 
     /// Auto-tiling groups must persist a layout that matches the current
