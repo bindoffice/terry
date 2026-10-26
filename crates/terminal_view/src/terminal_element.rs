@@ -17,7 +17,7 @@ use terminal::{
     TerminalBounds, is_app_chosen_exact_color as terminal_is_app_chosen_exact_color,
     is_default_background_color, terminal_settings::TerminalSettings,
 };
-use theme::{ActiveTheme, Theme};
+use theme::Theme;
 use theme_settings::ThemeSettings;
 use ui::utils::ensure_minimum_contrast;
 use ui::{ParentElement, Tooltip};
@@ -146,10 +146,14 @@ impl BatchedTextRun {
         self.style.len += c.len_utf8();
     }
 
+    /// `force_width` snaps every glyph to the cell grid. It must be `None` when
+    /// ligatures are enabled: a ligature glyph spans multiple cells, and
+    /// snapping it to a single cell's width misaligns the rest of the line.
     pub fn paint(
         &self,
         origin: GpuiPoint<Pixels>,
         dimensions: &TerminalBounds,
+        force_width: Option<Pixels>,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -164,7 +168,7 @@ impl BatchedTextRun {
                 self.text.clone().into(),
                 self.font_size.to_pixels(window.rem_size()),
                 std::slice::from_ref(&self.style),
-                Some(dimensions.cell_width),
+                force_width,
             )
             .paint(
                 pos,
@@ -376,10 +380,9 @@ impl TerminalElement {
         text_style: &TextStyle,
         hyperlink: Option<(HighlightStyle, &Range)>,
         minimum_contrast: f32,
-        cx: &App,
+        theme: &Theme,
     ) -> (Vec<LayoutRect>, Vec<BatchedTextRun>) {
         let start_time = Instant::now();
-        let theme = cx.theme();
 
         // Pre-allocate with estimated capacity to reduce reallocations
         let estimated_cells = grid.size_hint().0;
@@ -883,9 +886,11 @@ impl Element for TerminalElement {
                 total_lines: _,
             } => {
                 let rem_size = window.rem_size();
+                let padding_y = TerminalSettings::get_global(cx).padding_y;
                 let line_height = f32::from(window.text_style().font_size.to_pixels(rem_size))
                     * TerminalSettings::get_global(cx).line_height.value();
-                px(displayed_lines as f32 * line_height).into()
+                let content_height = px(displayed_lines as f32 * line_height);
+                (content_height + padding_y + padding_y).into()
             }
             ContentMode::Scrollable => {
                 if let TerminalMode::Embedded { .. } = &self.mode {
@@ -951,11 +956,14 @@ impl Element for TerminalElement {
                     .or(settings.buffer_font.fallbacks.as_ref())
                     .cloned();
 
-                let font_features = terminal_settings
-                    .font_features
-                    .as_ref()
-                    .unwrap_or(&FontFeatures::disable_ligatures())
-                    .clone();
+                // An explicit `font_features` list always wins; otherwise
+                // ligatures are disabled unless the user opted in, since
+                // terminals expect the cell grid to stay aligned.
+                let font_features = match &terminal_settings.font_features {
+                    Some(features) => features.clone(),
+                    None if terminal_settings.ligatures => FontFeatures::default(),
+                    None => FontFeatures::disable_ligatures(),
+                };
 
                 let font_weight = terminal_settings.font_weight.unwrap_or_default();
 
@@ -971,8 +979,18 @@ impl Element for TerminalElement {
                             theme_settings::adjusted_font_size(size, cx)
                         }),
                 };
+                // A per-terminal zoom (ctrl/cmd + = / - / 0) overrides the
+                // configured size for this terminal only.
+                let font_size = self
+                    .terminal_view
+                    .read(cx)
+                    .font_size_override()
+                    .unwrap_or(font_size);
 
-                let theme = cx.theme().clone();
+                let theme = self.terminal_view.read(cx).theme(cx);
+                let background_opacity = terminal_settings.background_opacity.clamp(0.0, 1.0);
+                let padding_x = terminal_settings.padding_x;
+                let padding_y = terminal_settings.padding_y;
 
                 let link_style = HighlightStyle {
                     color: Some(theme.colors().link_text_hover),
@@ -996,7 +1014,12 @@ impl Element for TerminalElement {
                     font_size: font_size.into(),
                     font_style: FontStyle::Normal,
                     line_height: px(line_height).into(),
-                    background_color: Some(theme.colors().terminal_ansi_background),
+                    background_color: Some(
+                        theme
+                            .colors()
+                            .terminal_ansi_background
+                            .opacity(background_opacity),
+                    ),
                     white_space: WhiteSpace::Normal,
                     // These are going to be overridden per-cell
                     color: theme.colors().terminal_foreground,
@@ -1021,6 +1044,10 @@ impl Element for TerminalElement {
 
                     let mut size = bounds.size;
                     size.width -= gutter;
+                    size.width -= padding_x;
+                    size.width -= padding_x;
+                    size.height -= padding_y;
+                    size.height -= padding_y;
                     let available_height = size.height;
 
                     // https://github.com/zed-industries/zed/issues/2750
@@ -1029,9 +1056,17 @@ impl Element for TerminalElement {
                     if size.width < cell_width * 2.0 {
                         size.width = cell_width * 2.0;
                     }
+                    // Neither dimension may collapse to zero when padding is
+                    // large relative to the terminal, or the emulator would be
+                    // resized to an empty grid.
+                    if size.height < px(line_height) {
+                        size.height = px(line_height);
+                    }
 
                     let mut origin = bounds.origin;
                     origin.x += gutter;
+                    origin.x += padding_x;
+                    origin.y += padding_y;
 
                     if matches!(self.terminal_view.read(cx).mode, TerminalMode::Standalone) {
                         // Bottom-anchor whenever we're scrolled to the bottom.
@@ -1086,7 +1121,10 @@ impl Element for TerminalElement {
 
                 let search_matches = self.terminal.read(cx).matches.clone();
 
-                let background_color = theme.colors().terminal_background;
+                let background_color = theme
+                    .colors()
+                    .terminal_background
+                    .opacity(background_opacity);
 
                 let (last_hovered_word, hover_tooltip) =
                     self.terminal.update(cx, |terminal, cx| {
@@ -1143,8 +1181,23 @@ impl Element for TerminalElement {
                     relative_highlighted_ranges.push((search_match, match_color))
                 }
                 if let Some(selection) = selection {
-                    relative_highlighted_ranges
-                        .push((selection.point_range(), player_color.selection));
+                    if selection.is_block {
+                        // Block selections cover the same columns on every line,
+                        // so paint one rectangle per line instead of a single
+                        // range, which would extend to the line ends.
+                        for line in selection.start.line..=selection.end.line {
+                            relative_highlighted_ranges.push((
+                                Range::new(
+                                    Point::new(line, selection.start.column),
+                                    Point::new(line, selection.end.column),
+                                ),
+                                player_color.selection,
+                            ));
+                        }
+                    } else {
+                        relative_highlighted_ranges
+                            .push((selection.point_range(), player_color.selection));
+                    }
                 }
 
                 // then have that representation be converted to the appropriate highlight data structure
@@ -1182,7 +1235,7 @@ impl Element for TerminalElement {
                             .as_ref()
                             .map(|last_hovered_word| (link_style, &last_hovered_word.word_match)),
                         minimum_contrast,
-                        cx,
+                        &theme,
                     )
                 } else {
                     // Calculate which screen rows are visible based on pixel positions.
@@ -1213,7 +1266,7 @@ impl Element for TerminalElement {
                             .as_ref()
                             .map(|last_hovered_word| (link_style, &last_hovered_word.word_match)),
                         minimum_contrast,
-                        cx,
+                        &theme,
                     )
                 };
 
@@ -1489,8 +1542,13 @@ impl Element for TerminalElement {
 
                     // Paint batched text runs instead of individual cells
                     let text_paint_start = Instant::now();
+                    let force_width = if TerminalSettings::get_global(cx).ligatures {
+                        None
+                    } else {
+                        Some(layout.dimensions.cell_width)
+                    };
                     for batch in &layout.batched_text_runs {
-                        batch.paint(origin, &layout.dimensions, window, cx);
+                        batch.paint(origin, &layout.dimensions, force_width, window, cx);
                     }
                     let text_paint_time = text_paint_start.elapsed();
 
@@ -1594,11 +1652,7 @@ impl InputHandler for TerminalInputHandler {
         // While composing, the selection has to sit inside the marked text.
         // Reporting 0..0 against a longer marked range makes some IMEs discard
         // the rest of the composition.
-        let range = self
-            .terminal_view
-            .read(cx)
-            .ime_selection()
-            .unwrap_or(0..0);
+        let range = self.terminal_view.read(cx).ime_selection().unwrap_or(0..0);
         Some(UTF16Selection {
             range,
             reversed: false,

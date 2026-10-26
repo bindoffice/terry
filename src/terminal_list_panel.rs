@@ -2540,6 +2540,12 @@ impl TerminalListPanel {
         let workspace = self.workspace.clone();
         // A profile describes the whole launch environment; don't inherit the
         // active terminal's shell/env on top of it.
+        let source_color_scheme = source
+            .as_ref()
+            .and_then(|view| view.read(cx).color_scheme().map(str::to_owned));
+        let profile_color_scheme = profile
+            .as_ref()
+            .and_then(|profile| profile.color_scheme.clone());
         let source = if profile.is_some() { None } else { source };
         let init_command = profile
             .as_ref()

@@ -1,6 +1,7 @@
 mod mappings;
 
 mod alacritty;
+pub mod color_scheme;
 mod pty_info;
 mod shell_integration;
 pub mod terminal_settings;

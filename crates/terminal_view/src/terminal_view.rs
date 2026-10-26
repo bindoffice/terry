@@ -264,6 +264,7 @@ pub struct NewTerminalWithProfile(pub String);
 
 pub fn init(cx: &mut App) {
     terminal_panel::init(cx);
+    terminal::color_scheme::ColorSchemeRegistry::init(cx);
 
     // Terry owns terminal persistence via TerminalListPanel's session file.
     // Do not register TerminalView as a workspace-serializable item — otherwise
@@ -317,6 +318,19 @@ pub struct TerminalView {
     scroll_top: Pixels,
     scroll_handle: TerminalScrollHandle,
     ime_state: Option<ImeState>,
+    /// Per-terminal font size override set by the font-zoom actions. `None`
+    /// uses the configured (or theme) size.
+    font_size_override: Option<Pixels>,
+    /// Name of the theme used for this terminal's colors instead of the active
+    /// UI theme. Set from the launch profile's `color_scheme`.
+    color_scheme: Option<String>,
+    /// True while `color_scheme` still mirrors `terminal.color_scheme`. Cleared
+    /// when a profile, the picker, or session restore sets one explicitly, so
+    /// later settings changes do not override an explicit choice.
+    color_scheme_follows_settings: bool,
+    /// Whether this view already asked the window for a blurred background, so
+    /// the platform call only happens when the state changes.
+    blur_applied: bool,
     self_handle: WeakEntity<Self>,
     rename_editor: Option<Entity<Editor>>,
     rename_editor_subscription: Option<Subscription>,
@@ -472,6 +486,10 @@ impl TerminalView {
             needs_serialize: false,
             custom_title: None,
             ime_state: None,
+            font_size_override: None,
+            color_scheme: TerminalSettings::get_global(cx).color_scheme.clone(),
+            color_scheme_follows_settings: true,
+            blur_applied: false,
             self_handle: cx.entity().downgrade(),
             rename_editor: None,
             rename_editor_subscription: None,
@@ -823,6 +841,10 @@ impl TerminalView {
         let breadcrumb_visibility_changed = self.show_breadcrumbs != settings.toolbar.breadcrumbs;
         self.show_breadcrumbs = settings.toolbar.breadcrumbs;
 
+        if self.color_scheme_follows_settings && self.color_scheme != settings.color_scheme {
+            self.color_scheme = settings.color_scheme.clone();
+        }
+
         let should_blink = match settings.blinking {
             TerminalBlink::Off => false,
             TerminalBlink::On => true,
@@ -1058,6 +1080,96 @@ impl TerminalView {
             self.scroll_top = self.max_scroll_top(cx);
         }
         cx.notify();
+    }
+
+    /// The per-terminal font size set by the zoom actions, if any.
+    pub fn font_size_override(&self) -> Option<Pixels> {
+        self.font_size_override
+    }
+
+    /// Restores or clears the per-terminal font size (used when rehydrating a
+    /// session so a zoomed terminal keeps its size across restarts).
+    pub fn set_font_size_override(&mut self, size: Option<Pixels>, cx: &mut Context<Self>) {
+        if self.font_size_override == size {
+            return;
+        }
+        self.font_size_override = size;
+        cx.notify();
+    }
+
+    /// The theme name used for this terminal's colors, if a profile overrode
+    /// it.
+    pub fn color_scheme(&self) -> Option<&str> {
+        self.color_scheme.as_deref()
+    }
+
+    /// Overrides the theme used for this terminal's colors. `None` follows the
+    /// active UI theme.
+    pub fn set_color_scheme(&mut self, color_scheme: Option<String>, cx: &mut Context<Self>) {
+        self.color_scheme_follows_settings = false;
+        if self.color_scheme == color_scheme {
+            return;
+        }
+        self.color_scheme = color_scheme;
+        cx.notify();
+    }
+
+    /// The theme this terminal renders with: a terminal color scheme when the
+    /// name matches one, otherwise the named UI theme, otherwise the active UI
+    /// theme. Terminal color schemes only override terminal colors, so the
+    /// surrounding UI keeps the user's theme.
+    pub fn theme(&self, cx: &App) -> Arc<theme::Theme> {
+        if let Some(name) = &self.color_scheme {
+            if let Some(scheme) = terminal::color_scheme::ColorSchemeRegistry::try_global(cx)
+                .and_then(|registry| registry.get(name))
+            {
+                return Arc::new(scheme.to_theme(cx.theme()));
+            }
+            if let Ok(theme) = theme::ThemeRegistry::global(cx).get(name) {
+                return theme;
+            }
+        }
+        cx.theme().clone()
+    }
+
+    /// The font size this terminal would use without a per-terminal zoom.
+    fn base_font_size(&self, cx: &App) -> Pixels {
+        let theme_settings = theme_settings::ThemeSettings::get_global(cx);
+        let buffer_font_size = theme_settings.buffer_font_size(cx);
+        match &self.mode {
+            TerminalMode::Embedded { .. } => buffer_font_size,
+            TerminalMode::Standalone => TerminalSettings::get_global(cx)
+                .font_size
+                .map_or(buffer_font_size, |size| {
+                    theme_settings::adjusted_font_size(size, cx)
+                }),
+        }
+    }
+
+    fn zoom_font_size(&mut self, delta: f32, cx: &mut Context<Self>) {
+        const MIN_FONT_SIZE: f32 = 4.0;
+        const MAX_FONT_SIZE: f32 = 72.0;
+
+        let base = self
+            .font_size_override
+            .unwrap_or_else(|| self.base_font_size(cx));
+        let size = (f32::from(base) + delta).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        self.font_size_override = Some(px(size));
+        cx.notify();
+    }
+
+    fn increase_font_size(&mut self, _: &IncreaseFontSize, _: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_font_size(1.0, cx);
+    }
+
+    fn decrease_font_size(&mut self, _: &DecreaseFontSize, _: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_font_size(-1.0, cx);
+    }
+
+    fn reset_font_size(&mut self, _: &ResetFontSize, _: &mut Window, cx: &mut Context<Self>) {
+        if self.font_size_override.take().is_some() {
+            cx.notify();
+        }
     }
 
     fn jump_to_previous_prompt(
@@ -1832,6 +1944,29 @@ impl Render for TerminalView {
 
         let focused = self.focus_handle.is_focused(window);
 
+        let terminal_settings = TerminalSettings::get_global(cx);
+        let background_opacity = terminal_settings.background_opacity;
+        let wants_blur = terminal_settings.background_blur && background_opacity < 1.0;
+        if wants_blur != self.blur_applied {
+            self.blur_applied = wants_blur;
+            window.set_background_appearance(if wants_blur {
+                gpui::WindowBackgroundAppearance::Blurred
+            } else {
+                gpui::WindowBackgroundAppearance::Opaque
+            });
+        }
+
+        let theme = self.theme(cx);
+        // The terminal element paints its own background over its full bounds,
+        // so the wrapper only needs a color when the terminal is opaque.
+        // Stacking two translucent layers would make the grid darker than the
+        // rest of the terminal.
+        let container_background = if background_opacity >= 1.0 {
+            Some(theme.colors().editor_background)
+        } else {
+            None
+        };
+
         let (a11y_text, a11y_caret) = accessible_screen_text(&self.terminal.read(cx).last_content);
         let a11y_label: gpui::SharedString = match self
             .custom_title
@@ -1867,6 +2002,9 @@ impl Render for TerminalView {
             .on_action(cx.listener(TerminalView::scroll_page_down))
             .on_action(cx.listener(TerminalView::scroll_to_top))
             .on_action(cx.listener(TerminalView::scroll_to_bottom))
+            .on_action(cx.listener(TerminalView::increase_font_size))
+            .on_action(cx.listener(TerminalView::decrease_font_size))
+            .on_action(cx.listener(TerminalView::reset_font_size))
             .on_action(cx.listener(TerminalView::jump_to_previous_prompt))
             .on_action(cx.listener(TerminalView::jump_to_next_prompt))
             .on_action(cx.listener(TerminalView::copy_last_command_output))
@@ -1907,7 +2045,7 @@ impl Render for TerminalView {
                 div()
                     .id("terminal-view-container")
                     .size_full()
-                    .bg(cx.theme().colors().editor_background)
+                    .when_some(container_background, |div, background| div.bg(background))
                     .child(TerminalElement::new(
                         terminal_handle,
                         terminal_view_handle,
@@ -1919,7 +2057,7 @@ impl Render for TerminalView {
                         self.mode.clone(),
                     ))
                     .when(self.content_mode(window, cx).is_scrollable(), |div| {
-                        let colors = cx.theme().colors();
+                        let colors = theme.colors();
                         div.custom_scrollbars(
                             Scrollbars::for_settings::<TerminalScrollbarSettingsWrapper>()
                                 .show_along(ScrollAxes::Vertical)
