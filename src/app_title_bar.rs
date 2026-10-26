@@ -1,6 +1,4 @@
-use gpui::{
-    Action, AppContext as _, Context, IntoElement, ParentElement, Render, Window, div,
-};
+use gpui::{Action, AppContext as _, Context, IntoElement, ParentElement, Render, Window, div};
 use platform_title_bar::PlatformTitleBar;
 use ui::{IconButton, IconName, IconSize, Tooltip, prelude::*};
 use workspace::Workspace;
@@ -27,15 +25,24 @@ impl Render for AppTitleBar {
                 .justify_end()
                 .w_full()
                 .pr_2()
+                .gap_1()
+                .child(
+                    IconButton::new("open-clipboard-history", IconName::Copy)
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text(i18n::t("clipboard")))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(
+                                Box::new(crate::clipboard_history::OpenClipboardHistory),
+                                cx,
+                            );
+                        }),
+                )
                 .child(
                     IconButton::new("open-settings", IconName::Settings)
                         .icon_size(IconSize::Small)
                         .tooltip(Tooltip::text(i18n::t("settings")))
                         .on_click(|_, window, cx| {
-                            window.dispatch_action(
-                                zed_actions::OpenSettings.boxed_clone(),
-                                cx,
-                            );
+                            window.dispatch_action(zed_actions::OpenSettings.boxed_clone(), cx);
                         }),
                 )
                 .into_any_element()]);
