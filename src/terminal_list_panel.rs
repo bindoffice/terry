@@ -17,7 +17,8 @@ use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent, PanelStatusButton};
 use workspace::{ItemHandle, Member, Pane, PaneAxis, PaneGroup};
 use zed_actions::terminal_list_panel::{
-    NewGroup, NewTerminal, NextGroup, PreviousGroup, ToggleFocus,
+    AttachTmuxSession, ConnectSshHost, ConnectSshHostWithTmux, ImportTerminalColorScheme, NewGroup,
+    NewTerminal, NextGroup, PreviousGroup, SelectTerminalColorScheme, ToggleFocus,
 };
 
 use serde::{Deserialize, Serialize};
@@ -690,6 +691,46 @@ pub fn init(cx: &mut App) {
             };
             window.defer(cx, move |window, cx| {
                 panel.update(cx, |panel, cx| panel.switch_group_offset(-1, window, cx));
+            });
+        });
+        workspace.register_action(|workspace, _: &ConnectSshHost, window, cx| {
+            let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
+                return;
+            };
+            window.defer(cx, move |window, cx| {
+                panel.update(cx, |panel, cx| panel.open_ssh_picker(false, window, cx));
+            });
+        });
+        workspace.register_action(|workspace, _: &ConnectSshHostWithTmux, window, cx| {
+            let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
+                return;
+            };
+            window.defer(cx, move |window, cx| {
+                panel.update(cx, |panel, cx| panel.open_ssh_picker(true, window, cx));
+            });
+        });
+        workspace.register_action(|workspace, _: &AttachTmuxSession, window, cx| {
+            let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
+                return;
+            };
+            window.defer(cx, move |window, cx| {
+                panel.update(cx, |panel, cx| panel.open_tmux_picker(window, cx));
+            });
+        });
+        workspace.register_action(|workspace, _: &SelectTerminalColorScheme, window, cx| {
+            let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
+                return;
+            };
+            window.defer(cx, move |window, cx| {
+                panel.update(cx, |panel, cx| panel.open_color_scheme_picker(window, cx));
+            });
+        });
+        workspace.register_action(|workspace, _: &ImportTerminalColorScheme, window, cx| {
+            let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
+                return;
+            };
+            window.defer(cx, move |window, cx| {
+                panel.update(cx, |panel, cx| panel.import_color_scheme(window, cx));
             });
         });
         workspace.register_action(|workspace, action: &NewTerminalWithProfile, window, cx| {
@@ -2021,6 +2062,20 @@ impl TerminalListPanel {
                     },
                 )
             };
+            let panel_a = panel.clone();
+            let panel_b = panel.clone();
+            let panel_c = panel.clone();
+            let menu = menu
+                .separator()
+                .entry(i18n::t("connect_ssh_host"), None, move |window, cx| {
+                    panel_a.update(cx, |this, cx| this.open_ssh_picker(false, window, cx));
+                })
+                .entry(i18n::t("connect_ssh_host_tmux"), None, move |window, cx| {
+                    panel_b.update(cx, |this, cx| this.open_ssh_picker(true, window, cx));
+                })
+                .entry(i18n::t("attach_tmux_session"), None, move |window, cx| {
+                    panel_c.update(cx, |this, cx| this.open_tmux_picker(window, cx));
+                });
             let menu = if let Some(actions) = agent_actions {
                 let mut menu = menu.separator();
                 if actions.resume {
@@ -2153,6 +2208,19 @@ impl TerminalListPanel {
                         menu
                     })
             };
+
+            let color_panel = panel.clone();
+            let import_panel = panel.clone();
+            let menu = menu
+                .separator()
+                .entry(i18n::t("terminal_color_scheme"), None, move |window, cx| {
+                    color_panel.update(cx, |this, cx| {
+                        this.open_color_scheme_picker_for(terminal_id, window, cx);
+                    });
+                })
+                .entry(i18n::t("import_color_scheme"), None, move |window, cx| {
+                    import_panel.update(cx, |this, cx| this.import_color_scheme(window, cx));
+                });
 
             let detach_panel = panel.clone();
             let menu =
@@ -4484,6 +4552,254 @@ impl TerminalListPanel {
             return;
         };
         self.spawn_agent_command(group_id, actions.cwd, command, window, cx);
+    }
+
+    /// Opens the SSH host picker for the active group. When `remote_tmux` is
+    /// set, the selected host is launched into an attach-or-create tmux session
+    /// instead of a plain shell.
+    pub fn open_ssh_picker(
+        &mut self,
+        remote_tmux: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let targets = crate::remote_hosts::ssh_targets(TerminalSettings::get_global(cx));
+        let panel = cx.entity();
+        workspace.update(cx, |workspace, cx| {
+            crate::terminal_picker::TerminalPicker::open(
+                workspace,
+                panel,
+                crate::terminal_picker::TerminalPickerMode::SshHosts {
+                    targets,
+                    remote_tmux,
+                },
+                window,
+                cx,
+            );
+        });
+    }
+
+    /// Lists local tmux sessions off the UI thread, then opens the picker.
+    pub fn open_tmux_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let sessions = cx
+                .background_executor()
+                .spawn(async { crate::remote_hosts::list_tmux_sessions() })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                let Some(workspace) = this.workspace.upgrade() else {
+                    return;
+                };
+                let panel = cx.entity();
+                let mode = crate::terminal_picker::TerminalPickerMode::TmuxSessions { sessions };
+                workspace.update(cx, |workspace, cx| {
+                    crate::terminal_picker::TerminalPicker::open(
+                        workspace, panel, mode, window, cx,
+                    );
+                });
+            })
+            .ok();
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// Opens the color-scheme picker for the focused terminal.
+    pub fn open_color_scheme_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.active_terminal_view(cx) else {
+            return;
+        };
+        let terminal_id = view.entity_id();
+        self.open_color_scheme_picker_for(terminal_id, window, cx);
+    }
+
+    /// Opens the color-scheme picker for a specific terminal.
+    pub fn open_color_scheme_picker_for(
+        &mut self,
+        terminal_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let Some(view) = self
+            .groups
+            .iter()
+            .flat_map(|group| group.terminals.iter())
+            .find(|view| view.entity_id() == terminal_id)
+            .cloned()
+        else {
+            return;
+        };
+        let current = view.read(cx).color_scheme().map(str::to_owned);
+        let panel = cx.entity();
+        workspace.update(cx, |workspace, cx| {
+            crate::terminal_picker::TerminalPicker::open(
+                workspace,
+                panel,
+                crate::terminal_picker::TerminalPickerMode::ColorSchemes {
+                    terminal_id,
+                    current,
+                },
+                window,
+                cx,
+            );
+        });
+    }
+
+    /// Imports Alacritty / iTerm2 / Terry JSON color scheme files, saves them
+    /// into the user scheme directory, then opens the picker.
+    pub fn import_color_scheme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Import terminal color scheme".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return anyhow::Ok(());
+            };
+            let mut imported = Vec::new();
+            for path in paths {
+                match terminal::color_scheme::parse_scheme_file(&path) {
+                    Some(scheme) => match terminal::color_scheme::save_user_scheme(&scheme) {
+                        Ok(saved) => {
+                            log::info!("imported terminal color scheme into {saved:?}");
+                            imported.push(scheme);
+                        }
+                        Err(error) => {
+                            log::warn!("could not save terminal color scheme: {error:#}");
+                        }
+                    },
+                    None => log::warn!("unrecognized terminal color scheme: {path:?}"),
+                }
+            }
+            this.update_in(cx, |this, window, cx| {
+                if let Some(registry) = terminal::color_scheme::ColorSchemeRegistry::try_global(cx)
+                {
+                    for scheme in imported {
+                        registry.insert(scheme);
+                    }
+                }
+                this.open_color_scheme_picker(window, cx);
+            })
+            .ok();
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// Applies `name` (a terminal color scheme or theme name, or `None` for the
+    /// UI theme) to one terminal and persists it with the session.
+    pub fn set_terminal_color_scheme(
+        &mut self,
+        terminal_id: EntityId,
+        name: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self
+            .groups
+            .iter()
+            .flat_map(|group| group.terminals.iter())
+            .find(|view| view.entity_id() == terminal_id)
+            .cloned()
+        else {
+            return;
+        };
+        view.update(cx, |view, cx| view.set_color_scheme(name, cx));
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Connects to `target` in the active group, optionally attaching a remote
+    /// tmux session so the shell survives a dropped connection.
+    pub fn connect_ssh(
+        &mut self,
+        target: crate::remote_hosts::SshTarget,
+        remote_tmux: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (program, args, title) = {
+            let settings = TerminalSettings::get_global(cx);
+            let options = crate::remote_hosts::SshOptions {
+                reuse_connections: settings.ssh_reuse_connections,
+                extra_args: &settings.ssh_extra_args,
+            };
+            crate::remote_hosts::ssh_invocation(&target, options, remote_tmux.as_deref())
+        };
+        crate::remote_hosts::record_recent_host(&target.host);
+        let launch = PersistedLaunch::Command {
+            program: program.clone(),
+            args: args.clone(),
+            title: Some(title.clone()),
+        };
+        self.spawn_program_terminal(program, args, title, Some(launch), window, cx);
+    }
+
+    /// Attaches to (or creates) a local tmux session in the active group.
+    pub fn attach_tmux_session(
+        &mut self,
+        session: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (program, args, title) = crate::remote_hosts::local_tmux_invocation(&session);
+        let launch = PersistedLaunch::Command {
+            program: program.clone(),
+            args: args.clone(),
+            title: Some(title.clone()),
+        };
+        self.spawn_program_terminal(program, args, title, Some(launch), window, cx);
+    }
+
+    /// Spawns a terminal whose "shell" is a direct program (ssh, tmux, ...).
+    fn spawn_program_terminal(
+        &mut self,
+        program: String,
+        args: Vec<String>,
+        title: String,
+        launch: Option<PersistedLaunch>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let group_id = self.active_group_id;
+        if !self.groups.iter().any(|group| group.id == group_id) {
+            return;
+        }
+        let profile = TerminalProfile {
+            name: format!("program:{title}"),
+            shell: Some(task::Shell::WithArguments {
+                program,
+                args,
+                title_override: Some(title),
+            }),
+            working_directory: None,
+            env: Default::default(),
+            command: None,
+            color_scheme: None,
+        };
+        self.prepare_group_for_terminal(group_id, window, cx);
+        self.spawn_terminal(
+            group_id,
+            None,
+            None,
+            None,
+            SpawnRestore {
+                launch,
+                ..Default::default()
+            },
+            None,
+            Some(profile),
+            window,
+            cx,
+        );
+        self.save_session(cx);
     }
 
     fn prepare_group_for_terminal(

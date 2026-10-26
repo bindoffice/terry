@@ -10,6 +10,15 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("terminals", "Terminals");
             m.insert("new_terminal", "New Terminal");
             m.insert("new_terminal_with_profile", "New Terminal with Profile");
+            m.insert("connect_ssh_host", "Connect to SSH Host…");
+            m.insert(
+                "connect_ssh_host_tmux",
+                "Connect to SSH Host with tmux…",
+            );
+            m.insert("attach_tmux_session", "Attach tmux Session…");
+            m.insert("terminal_color_scheme", "Terminal Color Scheme…");
+            m.insert("import_color_scheme", "Import Color Scheme…");
+            m.insert("remote", "Remote");
             m.insert("resume_agent_session", "Resume Agent Session");
             m.insert("fork_agent_session", "Fork Agent Session");
             m.insert("past_agent_sessions", "Past Agent Sessions");
@@ -275,6 +284,12 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("terminals", "终端");
             m.insert("new_terminal", "新建终端");
             m.insert("new_terminal_with_profile", "按配置档新建终端");
+            m.insert("connect_ssh_host", "连接到 SSH 主机…");
+            m.insert("connect_ssh_host_tmux", "通过 tmux 连接 SSH 主机…");
+            m.insert("attach_tmux_session", "附加 tmux 会话…");
+            m.insert("terminal_color_scheme", "终端配色方案…");
+            m.insert("import_color_scheme", "导入配色方案…");
+            m.insert("remote", "远程");
             m.insert("resume_agent_session", "继续 Agent 会话");
             m.insert("fork_agent_session", "分叉 Agent 会话");
             m.insert("past_agent_sessions", "历史 Agent 会话");

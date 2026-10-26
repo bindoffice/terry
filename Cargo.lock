@@ -14959,6 +14959,7 @@ dependencies = [
  "outline",
  "parking_lot",
  "paths",
+ "picker",
  "platform_title_bar",
  "project",
  "recent_projects",

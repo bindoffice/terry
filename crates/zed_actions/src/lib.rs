@@ -974,6 +974,17 @@ pub mod terminal_list_panel {
             NextGroup,
             /// Switches to the previous terminal group.
             PreviousGroup,
+            /// Opens the SSH host picker.
+            ConnectSshHost,
+            /// Opens the SSH host picker and attaches a tmux session on the
+            /// remote host.
+            ConnectSshHostWithTmux,
+            /// Opens the local tmux session picker.
+            AttachTmuxSession,
+            /// Opens the terminal color scheme picker.
+            SelectTerminalColorScheme,
+            /// Imports Alacritty / iTerm2 color scheme files.
+            ImportTerminalColorScheme,
         ]
     );
 }

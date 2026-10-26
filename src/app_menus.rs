@@ -306,6 +306,28 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
                     ),
                     MenuItem::separator(),
                     MenuItem::action(
+                        i18n::t("connect_ssh_host"),
+                        zed_actions::terminal_list_panel::ConnectSshHost,
+                    ),
+                    MenuItem::action(
+                        i18n::t("connect_ssh_host_tmux"),
+                        zed_actions::terminal_list_panel::ConnectSshHostWithTmux,
+                    ),
+                    MenuItem::action(
+                        i18n::t("attach_tmux_session"),
+                        zed_actions::terminal_list_panel::AttachTmuxSession,
+                    ),
+                    MenuItem::separator(),
+                    MenuItem::action(
+                        i18n::t("terminal_color_scheme"),
+                        zed_actions::terminal_list_panel::SelectTerminalColorScheme,
+                    ),
+                    MenuItem::action(
+                        i18n::t("import_color_scheme"),
+                        zed_actions::terminal_list_panel::ImportTerminalColorScheme,
+                    ),
+                    MenuItem::separator(),
+                    MenuItem::action(
                         i18n::t("toggle_quake_terminal"),
                         crate::quake_terminal::Toggle,
                     ),
