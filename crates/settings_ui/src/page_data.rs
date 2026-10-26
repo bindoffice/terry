@@ -7076,7 +7076,7 @@ fn terminal_page() -> SettingsPage {
         ]
     }
 
-    fn display_settings_section() -> [SettingsPageItem; 6] {
+    fn display_settings_section() -> [SettingsPageItem; 9] {
         [
             SettingsPageItem::SectionHeader("Display Settings"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -7175,6 +7175,67 @@ fn terminal_page() -> SettingsPage {
                             .terminal
                             .get_or_insert_default()
                             .minimum_contrast = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Background Opacity",
+                description: "Opacity of the terminal background, from 0 (transparent) to 1 (opaque). Values below 1 show the desktop through the terminal.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("terminal.background_opacity"),
+                    pick: |settings_content| {
+                        settings_content
+                            .terminal
+                            .as_ref()?
+                            .background_opacity
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .terminal
+                            .get_or_insert_default()
+                            .background_opacity = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Background Blur",
+                description: "Blur the desktop behind a translucent terminal background. Requires an opacity below 1.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("terminal.background_blur"),
+                    pick: |settings_content| {
+                        settings_content.terminal.as_ref()?.background_blur.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .terminal
+                            .get_or_insert_default()
+                            .background_blur = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Vi Cursor Shape",
+                description: "Cursor shape used while vi mode is active. Defaults to the regular cursor shape.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("terminal.vi_cursor_shape"),
+                    pick: |settings_content| {
+                        settings_content.terminal.as_ref()?.vi_cursor_shape.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .terminal
+                            .get_or_insert_default()
+                            .vi_cursor_shape = value;
                     },
                 }),
                 metadata: None,
@@ -7287,7 +7348,7 @@ fn terminal_page() -> SettingsPage {
         ]
     }
 
-    fn layout_settings_section() -> [SettingsPageItem; 3] {
+    fn layout_settings_section() -> [SettingsPageItem; 5] {
         [
             SettingsPageItem::SectionHeader("Layout Settings"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -7323,6 +7384,34 @@ fn terminal_page() -> SettingsPage {
                             .terminal
                             .get_or_insert_default()
                             .default_height = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Padding X",
+                description: "Horizontal padding between the terminal edge and the character grid, in pixels.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("terminal.padding_x"),
+                    pick: |settings_content| settings_content.terminal.as_ref()?.padding_x.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.terminal.get_or_insert_default().padding_x = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Padding Y",
+                description: "Vertical padding between the terminal edge and the character grid, in pixels.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("terminal.padding_y"),
+                    pick: |settings_content| settings_content.terminal.as_ref()?.padding_y.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.terminal.get_or_insert_default().padding_y = value;
                     },
                 }),
                 metadata: None,

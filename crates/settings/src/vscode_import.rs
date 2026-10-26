@@ -899,6 +899,17 @@ impl VsCodeSettings {
             clipboard_read: None,
             notify_on_command_finish: None,
             confirm_multiline_paste: None,
+            background_opacity: None,
+            background_blur: None,
+            padding_x: None,
+            padding_y: None,
+            word_separators: None,
+            vi_cursor_shape: None,
+            smart_selection: None,
+            ssh_hosts: None,
+            ssh_reuse_connections: None,
+            ssh_extra_args: None,
+            color_scheme: None,
             default_profile: None,
             profiles: None,
             cursor_shape: self.read_enum("terminal.integrated.cursorStyle", |s| match s {
@@ -913,6 +924,8 @@ impl VsCodeSettings {
             font_fallbacks,
             font_family,
             font_features: None,
+            ligatures: self.read_bool("terminal.integrated.fontLigatures"),
+            unlimited_scroll_history: None,
             font_size: self
                 .read_f32("terminal.integrated.fontSize")
                 .map(FontSize::from),

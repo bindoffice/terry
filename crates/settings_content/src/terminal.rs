@@ -80,6 +80,12 @@ pub struct TerminalProfileContent {
     /// Command to write to the shell after it starts. The command is typed
     /// into the terminal, so it can use shell syntax and aliases.
     pub command: Option<String>,
+    /// Name of the theme to use for this profile's terminals instead of the
+    /// active UI theme. Only the colors are overridden: fonts, cursor shape,
+    /// opacity and padding still come from the terminal settings.
+    ///
+    /// Example: `"One Dark"`.
+    pub color_scheme: Option<String>,
 }
 
 #[with_fallible_options]
@@ -110,6 +116,15 @@ pub struct TerminalSettingsContent {
     /// Default: comfortable
     pub line_height: Option<TerminalLineHeight>,
     pub font_features: Option<FontFeaturesContent>,
+    /// Whether to use programming ligatures (contextual alternates, `calt`)
+    /// from the terminal font.
+    ///
+    /// Most programming fonts implement ligatures through `calt`; when this is
+    /// disabled Terry turns that feature off so every glyph occupies exactly one
+    /// cell. Enable it to render ligatures such as `->` or `=>`.
+    ///
+    /// Default: false
+    pub ligatures: Option<bool>,
     /// Sets the terminal's font weight in CSS weight units 0-900.
     pub font_weight: Option<FontWeightContent>,
     /// Default cursor shape for the terminal.
@@ -169,13 +184,21 @@ pub struct TerminalSettingsContent {
     #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
     pub default_height: Option<f32>,
     /// The maximum number of lines to keep in the scrollback history.
-    /// Maximum allowed value is 100_000, all values above that will be treated as 100_000.
     /// 0 disables the scrolling.
     /// Existing terminals will not pick up this change until they are recreated.
     /// See <a href="https://github.com/alacritty/alacritty/blob/cb3a79dbf6472740daca8440d5166c1d4af5029e/extra/man/alacritty.5.scd?plain=1#L207-L213">Alacritty documentation</a> for more information.
     ///
     /// Default: 10_000
     pub max_scroll_history_lines: Option<usize>,
+    /// Keep the entire scrollback history instead of evicting old lines once
+    /// `max_scroll_history_lines` is reached.
+    ///
+    /// Memory usage grows with the amount of output the terminal produces, so
+    /// this is intended for people who regularly need to scroll far back.
+    /// `max_scroll_history_lines` is ignored when this is enabled.
+    ///
+    /// Default: false
+    pub unlimited_scroll_history: Option<bool>,
     /// The multiplier for scrolling with the mouse wheel.
     ///
     /// Default: 1.0
@@ -243,9 +266,85 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: true
     pub confirm_multiline_paste: Option<bool>,
+    /// Terminal background opacity, from `0.0` (fully transparent) to `1.0`
+    /// (fully opaque).
+    ///
+    /// Values below 1 make the window translucent so the desktop shows
+    /// through the terminal background. Combine with `background_blur` for a
+    /// frosted-glass effect on platforms that support it (macOS, Windows 11).
+    ///
+    /// Default: 1.0
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub background_opacity: Option<f32>,
+    /// Blurs the desktop behind a translucent terminal background. Only has an
+    /// effect when `background_opacity` is below 1.0.
+    ///
+    /// Blur is a window-level effect, so enabling it also disables subpixel
+    /// text antialiasing for the whole window.
+    ///
+    /// Default: false
+    pub background_blur: Option<bool>,
+    /// Horizontal padding between the terminal's edge and the character grid,
+    /// in pixels.
+    ///
+    /// Default: 0
+    pub padding_x: Option<f32>,
+    /// Vertical padding between the terminal's edge and the character grid, in
+    /// pixels.
+    ///
+    /// Default: 0
+    pub padding_y: Option<f32>,
+    /// Characters that terminate a word for semantic selection (double-click)
+    /// and word-wise navigation in vi mode. Any character in this list
+    /// separates words.
+    ///
+    /// Default: ",│`|:\"' ()[]{}<>\t"
+    pub word_separators: Option<String>,
+    /// Cursor shape used while vi mode is active. When unset, vi mode uses the
+    /// regular `cursor_shape`.
+    ///
+    /// Can be "bar", "block", "underline", or "hollow".
+    ///
+    /// Default: null
+    pub vi_cursor_shape: Option<CursorShapeContent>,
+    /// Rules that refine what a double-click selects. The first rule whose
+    /// regex matches the clicked cell wins; when no rule matches, Terry falls
+    /// back to selecting the word around the click.
+    ///
+    /// Regexes are matched against the text of the clicked line, so anchor
+    /// them only when needed. Named captures are ignored and the whole match is
+    /// selected.
+    ///
+    /// Default: []
+    pub smart_selection: Option<Vec<SmartSelectionRuleContent>>,
+    /// Extra SSH hosts offered by the "Connect to SSH Host…" picker, in
+    /// addition to the hosts discovered in `~/.ssh/config`.
+    ///
+    /// Default: []
+    pub ssh_hosts: Option<Vec<SshHostContent>>,
+    /// Reuse SSH connections with `ControlMaster=auto` and `ControlPersist`, so
+    /// opening a second terminal on the same host is instant (and does not ask
+    /// for the password / passphrase again).
+    ///
+    /// Default: true
+    pub ssh_reuse_connections: Option<bool>,
+    /// Extra arguments appended to every SSH command Terry launches.
+    ///
+    /// Default: []
+    pub ssh_extra_args: Option<Vec<String>>,
+    /// Default terminal color scheme. Accepts a bundled or user-imported
+    /// terminal color scheme (see `terminal_schemes/` in the config directory)
+    /// or a UI theme name. Terminal color schemes only change terminal colors;
+    /// a theme name uses that theme for the terminal.
+    ///
+    /// Profiles can override this per launch, and the color-scheme picker sets
+    /// it per terminal.
+    ///
+    /// Default: null
+    pub color_scheme: Option<String>,
     /// Named terminal profiles. Each profile can override the shell, working
-    /// directory, environment, and run a startup command after the shell is
-    /// ready.
+    /// directory, environment, color scheme, and run a startup command after
+    /// the shell is ready.
     ///
     /// Default: []
     pub profiles: Option<Vec<TerminalProfileContent>>,
@@ -384,6 +483,45 @@ pub enum ShowScrollbar {
     Always,
     /// Never show the scrollbar.
     Never,
+}
+
+/// A smart-selection rule: a regex and what double-clicking a match does.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct SmartSelectionRuleContent {
+    /// Regular expression matched against the clicked line.
+    pub regex: String,
+    /// What to do with the matched text.
+    ///
+    /// Default: "select"
+    pub action: Option<SmartSelectionActionContent>,
+    /// Optional human-readable description, for documentation only.
+    pub description: Option<String>,
+}
+
+/// What a smart-selection rule does with a match.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
+#[serde(rename_all = "snake_case")]
+pub enum SmartSelectionActionContent {
+    /// Select the matched text.
+    #[default]
+    Select,
+    /// Select the matched text and copy it to the clipboard.
+    Copy,
+}
+
+/// A user-defined SSH host offered by the terminal's SSH picker.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct SshHostContent {
+    /// Display name / picker label. Defaults to `host`.
+    pub name: Option<String>,
+    /// Hostname or `~/.ssh/config` alias passed to `ssh`.
+    pub host: String,
+    /// User to log in as.
+    pub user: Option<String>,
+    /// Port to connect to.
+    pub port: Option<u16>,
+    /// Identity file, passed as `-i`.
+    pub identity_file: Option<String>,
 }
 
 #[derive(

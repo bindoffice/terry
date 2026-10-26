@@ -40,7 +40,10 @@ use crate::{
     Modes, Point, PtyEvent, Range, RenderableCells, Scroll, Search, Selection, SelectionRange,
     SelectionSide, SelectionType, TerminalBackendEvent, TerminalBounds, ViMotion,
     pty_info::ProcessIdGetter,
-    terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape},
+    terminal_settings::{
+        AlternateScroll, CursorShape as SettingsCursorShape, SmartSelectionAction,
+        SmartSelectionRule,
+    },
 };
 
 pub(super) use hyperlinks::{HyperlinkMatch, RegexSearches, find_all_visible_links};
@@ -159,6 +162,19 @@ pub(super) fn set_default_cursor_style(
     config.default_cursor_style = alacritty_cursor_style(cursor_shape);
 }
 
+/// Apply text-matching options (word separators and the vi mode cursor shape)
+/// to a terminal config.
+pub(super) fn set_text_options(
+    config: &mut AlacrittyTermConfig,
+    word_separators: Option<&str>,
+    vi_cursor_shape: Option<SettingsCursorShape>,
+) {
+    if let Some(word_separators) = word_separators {
+        config.semantic_escape_chars = word_separators.to_string();
+    }
+    config.vi_mode_cursor_style = vi_cursor_shape.map(alacritty_cursor_style);
+}
+
 pub(super) fn apply_config(term: &AlacrittyTermLock, config: &AlacrittyTermConfig) {
     term.lock().set_options(config.clone());
 }
@@ -257,6 +273,80 @@ pub(super) fn update_selection(
 
 pub(super) fn selection_text(term: &AlacrittyTerm) -> Option<String> {
     term.selection_to_string()
+}
+
+/// Find the first smart-selection rule whose regex matches the cell at `point`
+/// on its display line, returning the selected range.
+///
+/// Rules are evaluated in order and the whole match is used, expanded to the
+/// cells it covers. Invalid regexes are skipped.
+pub(super) fn smart_selection_range(
+    term: &AlacrittyTerm,
+    point: Point,
+    rules: &[SmartSelectionRule],
+) -> Option<(Range, SmartSelectionAction)> {
+    if rules.is_empty() || point.column >= term.columns() {
+        return None;
+    }
+
+    let line = Line(point.line);
+    let grid = term.grid();
+    let columns = term.columns();
+
+    // Flatten the line to a string while recording, for every column, the byte
+    // offset where the cell's character starts. Spacer cells of wide characters
+    // share the offset of the character they belong to.
+    let mut text = String::with_capacity(columns);
+    let mut cell_starts = Vec::with_capacity(columns);
+    let mut last_char_start = None;
+    for column in 0..columns {
+        let cell = &grid[line][Column(column)];
+        let is_spacer = cell
+            .flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER);
+        if is_spacer {
+            cell_starts.push(last_char_start.unwrap_or(text.len()));
+            continue;
+        }
+
+        let start = text.len();
+        last_char_start = Some(start);
+        cell_starts.push(start);
+        text.push(cell.c);
+    }
+
+    let target = *cell_starts.get(point.column)?;
+    let column_for_byte = |byte: usize| {
+        cell_starts
+            .partition_point(|start| *start <= byte)
+            .saturating_sub(1)
+    };
+
+    for rule in rules {
+        let Some(regex) = rule.compiled.as_ref() else {
+            // Invalid patterns are reported when settings are loaded.
+            continue;
+        };
+
+        for matched in regex.find_iter(&text) {
+            if matched.start() == matched.end() {
+                continue;
+            }
+            if matched.start() <= target && target < matched.end() {
+                let start_column = column_for_byte(matched.start());
+                let end_column = column_for_byte(matched.end() - 1);
+                return Some((
+                    Range::new(
+                        Point::new(point.line, start_column),
+                        Point::new(point.line, end_column),
+                    ),
+                    rule.action,
+                ));
+            }
+        }
+    }
+
+    None
 }
 
 pub(super) fn scroll_to_point(term: &mut AlacrittyTerm, point: Point) {
@@ -446,6 +536,7 @@ impl SelectionType {
     fn to_alacritty(self) -> AlacSelectionType {
         match self {
             Self::Simple => AlacSelectionType::Simple,
+            Self::Block => AlacSelectionType::Block,
             Self::Semantic => AlacSelectionType::Semantic,
             Self::Lines => AlacSelectionType::Lines,
         }

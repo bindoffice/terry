@@ -2,7 +2,6 @@ mod mappings;
 
 mod alacritty;
 mod pty_info;
-#[cfg(unix)]
 mod shell_integration;
 pub mod terminal_settings;
 
@@ -30,7 +29,9 @@ use pty_info::{ProcessIdGetter, PtyProcessInfo};
 use serde::{Deserialize, Serialize};
 use settings::Settings;
 use task::{HideStrategy, Shell, ShellKind, SpawnInTerminal};
-use terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape, TerminalSettings};
+use terminal_settings::{
+    AlternateScroll, CursorShape as SettingsCursorShape, SmartSelectionAction, TerminalSettings,
+};
 use theme::{ActiveTheme, Theme};
 use urlencoding;
 use util::{ResultExt as _, paths::PathStyle, truncate_and_trailoff};
@@ -71,8 +72,9 @@ use crate::alacritty::{
     last_non_empty_lines, last_prompt_mark as last_term_prompt_mark, make_content, new_term,
     open_pty, prompt_marks as term_prompt_marks, pty_options, pty_term_config, resize,
     screen_lines, scroll_display, scroll_to_point, scroll_to_point_aligned, search_matches,
-    selection_text, set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
-    spawn_event_loop, synchronized_updates, toggle_vi_mode as toggle_term_vi_mode, total_lines,
+    selection_text, set_default_cursor_style, set_selection as set_term_selection,
+    set_text_options, shrink_to_used, smart_selection_range, spawn_event_loop,
+    synchronized_updates, toggle_vi_mode as toggle_term_vi_mode, total_lines,
     update_selection as update_term_selection, update_selection_to_vi_cursor,
     update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
 };
@@ -153,6 +155,7 @@ pub(crate) enum SelectionSide {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SelectionType {
     Simple,
+    Block,
     Semantic,
     Lines,
 }
@@ -942,6 +945,14 @@ impl Display for TerminalError {
 // https://github.com/alacritty/alacritty/blob/cb3a79dbf6472740daca8440d5166c1d4af5029e/extra/man/alacritty.5.scd?plain=1#L207-L213
 const DEFAULT_SCROLL_HISTORY_LINES: usize = 10_000;
 pub const MAX_SCROLL_HISTORY_LINES: usize = 100_000;
+/// Upper bound for values configured through `terminal.max_scroll_history_lines`.
+/// This is higher than [`MAX_SCROLL_HISTORY_LINES`] (which caps task output) so
+/// interactive terminals can keep a much deeper history. It matches the
+/// `unlimited_scroll_history` sentinel so that setting is never silently
+/// clamped to a smaller value. History is allocated incrementally, so a large
+/// limit does not reserve memory up front.
+const MAX_CONFIGURED_SCROLL_HISTORY_LINES: usize =
+    crate::terminal_settings::UNLIMITED_SCROLL_HISTORY_LINES;
 static NEXT_INIT_COMMAND_STARTUP_MARKER_ID: AtomicU64 = AtomicU64::new(1);
 
 const INIT_COMMAND_STARTUP_MARKER_PREFIX: &str = "__zed_init_command_ready_";
@@ -1019,7 +1030,7 @@ impl TerminalBuilder {
 
         let scrolling_history = max_scroll_history_lines
             .unwrap_or(DEFAULT_SCROLL_HISTORY_LINES)
-            .min(MAX_SCROLL_HISTORY_LINES);
+            .min(MAX_CONFIGURED_SCROLL_HISTORY_LINES);
         let config = display_only_term_config(scrolling_history, cursor_shape);
 
         let (events_tx, events_rx) = async_channel::bounded(1024);
@@ -1055,6 +1066,7 @@ impl TerminalBuilder {
             vi_mode_enabled: false,
             is_remote_terminal: false,
             osc7_cwd: None,
+            block_selection_pressed: false,
             last_exit_code: None,
             last_mouse_move_time: Instant::now(),
             last_hyperlink_search_position: None,
@@ -1105,7 +1117,7 @@ impl TerminalBuilder {
         window_id: u64,
         completion_tx: Option<Sender<Option<ExitStatus>>>,
         cx: &App,
-        activation_script: Vec<String>,
+        mut activation_script: Vec<String>,
         path_style: PathStyle,
     ) -> Task<Result<TerminalBuilder>> {
         let version = release_channel::AppVersion::global(cx);
@@ -1125,7 +1137,6 @@ impl TerminalBuilder {
         // outside the spawned future. Only regular interactive terminals get
         // the integration: task runs are non-interactive, and the headless
         // (`no_pty`) path never renders a prompt.
-        #[cfg(unix)]
         let inject_shell_integration = task.is_none()
             && !no_pty
             && TerminalSettings::try_get(cx).is_some_and(|settings| settings.shell_integration);
@@ -1217,17 +1228,22 @@ impl TerminalBuilder {
 
             // Terry shell integration: inject environment variables so
             // supported shells load our scripts, which emit OSC 133 prompt
-            // marks and OSC 7 working directory reports.
-            #[cfg(unix)]
+            // marks and OSC 7 working directory reports. Shells that cannot be
+            // configured through the environment (PowerShell, Nushell) get an
+            // activation command that is typed into the freshly spawned shell.
             if inject_shell_integration {
                 let integration_program = match &shell_params {
                     Some(params) => params.program.clone(),
                     None => util::shell::get_system_shell(),
                 };
-                if let Err(error) =
-                    shell_integration::inject_shell_integration_env(&mut env, &integration_program)
-                {
-                    log::warn!("Failed to set up shell integration: {error:#}");
+                match shell_integration::inject_shell_integration_env(
+                    &mut env,
+                    &integration_program,
+                ) {
+                    Ok(commands) => activation_script.extend(commands),
+                    Err(error) => {
+                        log::warn!("Failed to set up shell integration: {error:#}");
+                    }
                 }
             }
 
@@ -1239,7 +1255,7 @@ impl TerminalBuilder {
             } else {
                 max_scroll_history_lines
                     .unwrap_or(DEFAULT_SCROLL_HISTORY_LINES)
-                    .min(MAX_SCROLL_HISTORY_LINES)
+                    .min(MAX_CONFIGURED_SCROLL_HISTORY_LINES)
             };
             let config = pty_term_config(scrolling_history, cursor_shape, clipboard_read);
 
@@ -1367,6 +1383,7 @@ impl TerminalBuilder {
                 vi_mode_enabled: false,
                 is_remote_terminal,
                 osc7_cwd: None,
+                block_selection_pressed: false,
                 last_exit_code: None,
                 last_mouse_move_time: Instant::now(),
                 last_hyperlink_search_position: None,
@@ -1563,6 +1580,10 @@ pub struct Terminal {
     last_mouse_move_time: Instant,
     last_hyperlink_search_position: Option<GpuiPoint<Pixels>>,
     mouse_down_hyperlink: Option<HyperlinkMatch>,
+    /// Whether the current mouse press started an Alt block selection. The
+    /// matching release must not be reported to the application, since the
+    /// press was not either.
+    block_selection_pressed: bool,
     #[cfg(windows)]
     shell_program: Option<String>,
     template: CopyTemplate,
@@ -2005,6 +2026,17 @@ impl Terminal {
 
     pub fn set_cursor_shape(&mut self, cursor_shape: SettingsCursorShape) {
         set_default_cursor_style(&mut self.term_config, cursor_shape);
+        apply_config(&self.term, &self.term_config);
+    }
+
+    /// Apply text-matching settings: word separators and the vi mode cursor
+    /// shape.
+    pub fn apply_text_settings(&mut self, settings: &TerminalSettings) {
+        set_text_options(
+            &mut self.term_config,
+            settings.word_separators.as_deref(),
+            settings.vi_cursor_shape,
+        );
         apply_config(&self.term, &self.term_config);
     }
 
@@ -2690,7 +2722,9 @@ impl Terminal {
 
     pub fn mouse_move(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
-        if self.mouse_mode(e.modifiers.shift) {
+        // An Alt block drag suppresses the press/release it sent, so motion must
+        // not be forwarded either.
+        if self.mouse_mode(e.modifiers.shift) && !self.block_selection_pressed {
             // A ctrl/cmd press on a link suppressed its button-press report in
             // `mouse_down`. Since the app never saw the press, we must swallow
             // the whole gesture rather than forward later motion/release
@@ -2773,7 +2807,9 @@ impl Terminal {
         cx: &mut Context<Self>,
     ) {
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
-        if !self.mouse_mode(e.modifiers.shift) {
+        // A block selection started with Alt keeps tracking the pointer even
+        // while the application has mouse reporting enabled.
+        if !self.mouse_mode(e.modifiers.shift) || self.block_selection_pressed {
             if let Some(hyperlink) = &self.mouse_down_hyperlink {
                 let point = grid_point(
                     position,
@@ -2843,6 +2879,9 @@ impl Terminal {
             self.last_content.terminal_bounds,
             self.last_content.display_offset,
         );
+        // Reset here as well as on release, so a lost mouse-up cannot leave the
+        // flag suppressing mouse reporting for later gestures.
+        self.block_selection_pressed = false;
 
         if e.button == MouseButton::Left
             && e.modifiers.secondary()
@@ -2873,15 +2912,21 @@ impl Terminal {
                         self.last_content.display_offset,
                     );
 
-                    let selection_type = match e.click_count {
-                        0 => return, //This is a release
-                        1 => Some(SelectionType::Simple),
-                        2 => Some(SelectionType::Semantic),
-                        3 => Some(SelectionType::Lines),
-                        _ => None,
-                    };
+                    // Alt-drag selects a rectangular block, matching iTerm2 and
+                    // VS Code. It takes precedence over application mouse
+                    // reporting so it works in full-screen programs too.
+                    if e.modifiers.alt && e.click_count >= 1 {
+                        self.block_selection_pressed = true;
+                        self.events
+                            .push_back(InternalEvent::SetSelection(Some(Selection::new(
+                                SelectionType::Block,
+                                point,
+                                side,
+                            ))));
+                        return;
+                    }
 
-                    if selection_type == Some(SelectionType::Simple) && e.modifiers.shift {
+                    if e.click_count == 1 && e.modifiers.shift {
                         if self.last_content.selection.is_some() {
                             // Shift+click extends the existing selection to this point.
                             self.events
@@ -2897,8 +2942,37 @@ impl Terminal {
                         return;
                     }
 
-                    let selection = selection_type
-                        .map(|selection_type| Selection::new(selection_type, point, side));
+                    let selection = match e.click_count {
+                        0 => return, //This is a release
+                        1 => Some(Selection::new(SelectionType::Simple, point, side)),
+                        2 => {
+                            // Smart selection rules refine what a double-click
+                            // selects; without a match this is a word selection.
+                            let rules = TerminalSettings::get_global(cx).smart_selection.clone();
+                            let smart = if rules.is_empty() {
+                                None
+                            } else {
+                                let term = self.term.lock();
+                                smart_selection_range(&term, point, &rules)
+                            };
+
+                            match smart {
+                                Some((range, SmartSelectionAction::Copy)) => {
+                                    self.events.push_back(InternalEvent::SetSelection(Some(
+                                        Selection::simple_range(range),
+                                    )));
+                                    self.events.push_back(InternalEvent::Copy(Some(true)));
+                                    return;
+                                }
+                                Some((range, SmartSelectionAction::Select)) => {
+                                    Some(Selection::simple_range(range))
+                                }
+                                None => Some(Selection::new(SelectionType::Semantic, point, side)),
+                            }
+                        }
+                        3 => Some(Selection::new(SelectionType::Lines, point, side)),
+                        _ => None,
+                    };
 
                     if let Some(selection) = selection {
                         self.events
@@ -2930,6 +3004,9 @@ impl Terminal {
 
     pub fn mouse_up(&mut self, e: &MouseUpEvent, cx: &Context<Self>) {
         let setting = TerminalSettings::get_global(cx);
+        // Clear the block-drag flag on every path so a suppressed press never
+        // leaks into the next gesture.
+        let block_selection_pressed = std::mem::take(&mut self.block_selection_pressed);
 
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
         if let Some(mouse_down_hyperlink) = self.mouse_down_hyperlink.take() {
@@ -2959,7 +3036,7 @@ impl Terminal {
             }
         }
 
-        if self.mouse_mode(e.modifiers.shift) {
+        if self.mouse_mode(e.modifiers.shift) && !block_selection_pressed {
             let point = grid_point(
                 position,
                 self.last_content.terminal_bounds,
@@ -3824,6 +3901,7 @@ mod tests {
     use parking_lot::Mutex;
     use rand::{Rng, distr, rngs::StdRng};
     use task::{Shell, ShellBuilder};
+    use terminal_settings::SmartSelectionRule;
 
     #[test]
     fn prompt_navigation_picks_adjacent_marks() {
@@ -4623,6 +4701,116 @@ mod tests {
                     .iter()
                     .any(|event| matches!(event, InternalEvent::SetSelection(Some(_)))),
                 "shift+click should extend, not re-anchor, an existing selection"
+            );
+        });
+    }
+
+    /// Alt+drag must anchor a rectangular selection and must not forward the
+    /// press to an application that enabled mouse reporting.
+    #[gpui::test]
+    async fn test_alt_drag_starts_block_selection(cx: &mut TestAppContext) {
+        let terminal = init_ctrl_click_hyperlink_test(cx, b"abcdef\r\nghijkl\r\n");
+
+        terminal.update(cx, |terminal, cx| {
+            let alt = Modifiers {
+                alt: true,
+                ..Modifiers::none()
+            };
+            terminal.mouse_down(
+                &MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: point(px(15.0), px(10.0)),
+                    modifiers: alt,
+                    click_count: 1,
+                    first_mouse: true,
+                },
+                cx,
+            );
+
+            assert!(
+                terminal.events.iter().any(|event| matches!(
+                    event,
+                    InternalEvent::SetSelection(Some(selection))
+                        if selection.ty == SelectionType::Block
+                )),
+                "alt+click should anchor a block selection"
+            );
+            assert!(
+                terminal.take_pty_write_log().is_empty(),
+                "alt+click must not be reported to the application"
+            );
+
+            // Dragging extends the block selection.
+            terminal.mouse_drag(
+                &MouseMoveEvent {
+                    position: point(px(35.0), px(30.0)),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: alt,
+                },
+                terminal.last_content.terminal_bounds.bounds,
+                cx,
+            );
+
+            assert!(
+                terminal
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, InternalEvent::UpdateSelection(_)))
+            );
+            assert!(terminal.selection_phase == SelectionPhase::Selecting);
+        });
+    }
+
+    /// A block selection must copy the same column span from every line.
+    #[gpui::test]
+    async fn test_block_selection_copies_rectangle(cx: &mut TestAppContext) {
+        let terminal = init_ctrl_click_hyperlink_test(cx, b"abcdef\r\nghijkl\r\nmnopqr\r\n");
+
+        terminal.update(cx, |terminal, _cx| {
+            let mut term = terminal.term.lock();
+            let mut selection =
+                Selection::new(SelectionType::Block, Point::new(0, 1), SelectionSide::Left);
+            selection.update(Point::new(1, 3), SelectionSide::Right);
+            set_term_selection(&mut term, Some(&selection));
+
+            assert_eq!(selection_text(&term).as_deref(), Some("bcd\nhij"));
+
+            let content = make_content(&mut term, &terminal.last_content);
+            let selection = content
+                .selection
+                .expect("block selection should be visible");
+            assert!(selection.is_block);
+            assert_eq!(selection.start, Point::new(0, 1));
+            assert_eq!(selection.end, Point::new(1, 3));
+        });
+    }
+
+    /// Smart selection rules select their whole match and only when the click
+    /// lands inside it.
+    #[gpui::test]
+    async fn test_smart_selection_uses_rules(cx: &mut TestAppContext) {
+        let terminal = init_ctrl_click_hyperlink_test(cx, b"see 192.168.0.1 now\r\n");
+
+        terminal.update(cx, |terminal, _cx| {
+            let term = terminal.term.lock();
+            let rules: Vec<SmartSelectionRule> = vec![
+                settings::SmartSelectionRuleContent {
+                    regex: r"\d{1,3}(\.\d{1,3}){3}".to_string(),
+                    action: Some(settings::SmartSelectionActionContent::Copy),
+                    description: None,
+                }
+                .into(),
+            ];
+
+            let (range, action) = smart_selection_range(&term, Point::new(0, 6), &rules)
+                .expect("clicking an IP address should match the rule");
+            assert_eq!(range.start(), Point::new(0, 4));
+            assert_eq!(range.end(), Point::new(0, 14));
+            assert_eq!(action, SmartSelectionAction::Copy);
+
+            assert!(
+                smart_selection_range(&term, Point::new(0, 0), &rules).is_none(),
+                "clicking outside the match should fall back to word selection"
             );
         });
     }

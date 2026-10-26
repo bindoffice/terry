@@ -417,7 +417,6 @@ impl Domain for TerminalDb {
             ALTER TABLE terminals ADD COLUMN shell TEXT;
             ALTER TABLE terminals ADD COLUMN shell_args TEXT;
         ),
-
     ];
 }
 

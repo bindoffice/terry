@@ -243,6 +243,12 @@ actions!(
         /// Toggles broadcast input for the active terminal group: keystrokes
         /// accepted by any terminal in the group are relayed to its peers.
         ToggleBroadcastInput,
+        /// Increases this terminal's font size without changing the global setting.
+        IncreaseFontSize,
+        /// Decreases this terminal's font size without changing the global setting.
+        DecreaseFontSize,
+        /// Restores this terminal's configured font size.
+        ResetFontSize,
     ]
 );
 
@@ -415,6 +421,13 @@ impl TerminalView {
         let cursor_shape = TerminalSettings::get_global(cx).cursor_shape;
 
         let scroll_handle = TerminalScrollHandle::new(terminal.read(cx));
+
+        // Text-matching options (word separators, vi cursor) live in the
+        // emulator config, so apply them once the terminal exists.
+        let text_settings = TerminalSettings::get_global(cx).clone();
+        terminal.update(cx, |terminal, _| {
+            terminal.apply_text_settings(&text_settings);
+        });
 
         let blink_manager = cx.new(|cx| {
             BlinkManager::new(
@@ -826,6 +839,7 @@ impl TerminalView {
 
         self.terminal.update(cx, |term, _| {
             term.apply_graphics_settings(&settings);
+            term.apply_text_settings(&settings);
         });
 
         self.blink_manager.update(
