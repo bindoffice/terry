@@ -1320,6 +1320,12 @@ impl TerminalView {
         &self.terminal
     }
 
+    /// The latest `OSC 9` progress value reported by the application, if any.
+    /// `-1` means indeterminate progress.
+    pub fn notification_progress(&self) -> Option<i64> {
+        self.notification_progress
+    }
+
     pub fn set_block_below_cursor(
         &mut self,
         block: BlockProperties,

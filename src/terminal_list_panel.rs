@@ -3409,6 +3409,12 @@ impl TerminalListPanel {
                 }
                 return;
             }
+            if matches!(event, terminal::Event::Notification(..)) {
+                // `OSC 9` progress updates change the progress badge in the
+                // sidebar, so re-render even though nothing else changed.
+                cx.notify();
+                return;
+            }
             if !matches!(
                 event,
                 terminal::Event::TitleChanged | terminal::Event::BreadcrumbsChanged
@@ -5290,7 +5296,7 @@ impl Render for TerminalListPanel {
         let theme = cx.theme().clone();
         let active_group_id = self.active_group_id;
         let group_switch_hint = self.group_switch_hint.clone().map(|(text, _)| text);
-        let detached_snapshot: Vec<(usize, SharedString, Option<AgentBadge>)> = self
+        let detached_snapshot: Vec<(usize, SharedString, Option<AgentBadge>, Option<i64>)> = self
             .detached_sessions
             .iter()
             .enumerate()
@@ -5299,6 +5305,7 @@ impl Render for TerminalListPanel {
                     index,
                     session.title.clone(),
                     agent_badge_for(&session.view, &self.terminal_activity, cx),
+                    session.view.read(cx).notification_progress(),
                 )
             })
             .collect();
@@ -5317,7 +5324,12 @@ impl Render for TerminalListPanel {
             bool,
             bool,
             bool,
-            Vec<(Entity<TerminalView>, SharedString, Option<AgentBadge>)>,
+            Vec<(
+                Entity<TerminalView>,
+                SharedString,
+                Option<AgentBadge>,
+                Option<i64>,
+            )>,
         )> = Vec::new();
         for group in &self.groups {
             let is_active = group.id == active_group_id;
@@ -5327,7 +5339,8 @@ impl Render for TerminalListPanel {
             if !collapsed {
                 for tv in &group.terminals {
                     let badge = agent_badge_for(tv, &self.terminal_activity, cx);
-                    terminals.push((tv.clone(), sidebar_terminal_name(tv, cx), badge));
+                    let progress = tv.read(cx).notification_progress();
+                    terminals.push((tv.clone(), sidebar_terminal_name(tv, cx), badge, progress));
                 }
             }
             groups_snapshot.push((
@@ -5506,7 +5519,9 @@ impl Render for TerminalListPanel {
             );
 
             if is_expanded {
-                for (ix, (terminal_view, title, agent_badge)) in terminals.into_iter().enumerate() {
+                for (ix, (terminal_view, title, agent_badge, progress)) in
+                    terminals.into_iter().enumerate()
+                {
                     let is_terminal_active = Some(terminal_view.entity_id()) == active_terminal_id;
 
                     let on_click = cx.listener({
@@ -5560,6 +5575,24 @@ impl Render for TerminalListPanel {
                                                 ),
                                             )
                                             .map({
+                                                move |this| match progress {
+                                                    Some(progress) if progress >= 0 => this.child(
+                                                        Label::new(format!(
+                                                            "{}%",
+                                                            progress.min(100)
+                                                        ))
+                                                        .size(LabelSize::XSmall)
+                                                        .color(Color::Accent),
+                                                    ),
+                                                    Some(_) => this.child(
+                                                        Label::new("…")
+                                                            .size(LabelSize::XSmall)
+                                                            .color(Color::Accent),
+                                                    ),
+                                                    None => this,
+                                                }
+                                            })
+                                            .map({
                                                 let agent_badge = agent_badge.clone();
                                                 let badge_id = SharedString::from(format!(
                                                     "term-agent-{}-{ix}",
@@ -5610,7 +5643,7 @@ impl Render for TerminalListPanel {
                     )
                     .into_any_element(),
             );
-            for (index, title, agent_badge) in detached_snapshot {
+            for (index, title, agent_badge, progress) in detached_snapshot {
                 let hover_background = cx.theme().colors().element_hover;
                 let on_click = cx.listener(move |this, _, window, cx| {
                     this.reattach_detached(index, window, cx);
@@ -5644,6 +5677,21 @@ impl Render for TerminalListPanel {
                                         .min_w_0()
                                         .child(Label::new(title).size(LabelSize::Small).truncate()),
                                 )
+                                .map({
+                                    move |this| match progress {
+                                        Some(progress) if progress >= 0 => this.child(
+                                            Label::new(format!("{}%", progress.min(100)))
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Accent),
+                                        ),
+                                        Some(_) => this.child(
+                                            Label::new("…")
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Accent),
+                                        ),
+                                        None => this,
+                                    }
+                                })
                                 .map({
                                     let agent_badge = agent_badge.clone();
                                     let badge_id =
