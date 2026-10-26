@@ -281,6 +281,8 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
                 "terminal_unlimited_scroll_history_description",
                 "Keep the entire scrollback history.",
             );
+            m.insert("agent_working", "Working");
+            m.insert("agent_idle", "Idle");
             m.insert("recent_terminals", "Recent Terminals");
             m.insert("recent_folders", "Recent Folders");
             m.insert("open_recent_project", "Open Recent Project");
@@ -645,6 +647,8 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
                 "terminal_unlimited_scroll_history_description",
                 "保留完整的滚动历史。",
             );
+            m.insert("agent_working", "工作中");
+            m.insert("agent_idle", "空闲");
             m.insert("recent_terminals", "最近终端");
             m.insert("recent_folders", "最近文件夹");
             m.insert("open_recent_project", "打开最近项目");
@@ -1009,6 +1013,8 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
                 "terminal_unlimited_scroll_history_description",
                 "保留完整的捲動歷史。",
             );
+            m.insert("agent_working", "工作中");
+            m.insert("agent_idle", "閒置");
             m.insert("open_recent_project", "開啟最近專案");
             m.insert("agent", "Agent");
             m.insert("split_pane", "分割窗格");

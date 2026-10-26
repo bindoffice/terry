@@ -2,9 +2,10 @@ use editor::{Editor, MultiBufferOffset};
 use futures::FutureExt;
 use gpui::Keystroke;
 use gpui::{
-    Action, AnyElement, App, Axis, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    PromptLevel, Render, SharedString, StatefulInteractiveElement, Subscription, Task, TaskExt,
-    WeakEntity, Window, div, px,
+    Action, Animation, AnimationExt, AnyElement, App, Axis, Context, Entity, EntityId,
+    EventEmitter, FocusHandle, Focusable, PromptLevel, Render, SharedString,
+    StatefulInteractiveElement, Subscription, Task, TaskExt, WeakEntity, Window, div,
+    pulsating_between, px,
 };
 use project::Project;
 use terminal::terminal_settings::{TerminalProfile, TerminalSettings};
@@ -425,6 +426,138 @@ fn coding_agent_from_view(
     }
     agent_mentioned_in_text(&terminal.title(false))
         .or_else(|| agent_mentioned_in_text(&terminal.breadcrumb_text))
+}
+
+/// How long after the last output a terminal running an agent is still treated
+/// as "working" rather than waiting for input.
+const AGENT_WORKING_WINDOW: Duration = Duration::from_secs(5);
+
+/// Snapshot of an agent terminal's state, rendered as a badge in the sidebar.
+#[derive(Clone)]
+struct AgentBadge {
+    name: SharedString,
+    working: bool,
+    /// Accent used for the agent's icon and name while it is working.
+    color: Color,
+    /// Small icon that identifies the agent CLI.
+    icon: IconName,
+}
+
+fn agent_display_name(agent: &AgentCli) -> SharedString {
+    let label = match agent.id {
+        "claude" => "Claude".to_string(),
+        "codex" => "Codex".to_string(),
+        "gemini" => "Gemini".to_string(),
+        "cursor" => "Cursor".to_string(),
+        "opencode" => "OpenCode".to_string(),
+        "qoder" => "Qoder".to_string(),
+        "qoder-cn" => "Qoder CN".to_string(),
+        "qwen" => "Qwen".to_string(),
+        "copilot" => "Copilot".to_string(),
+        "antigravity" => "Antigravity".to_string(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        }
+    };
+    SharedString::from(label)
+}
+
+/// Icon and color that tell agent CLIs apart at a glance.
+fn agent_style(agent: &AgentCli) -> (Color, IconName) {
+    match agent.id {
+        "claude" => (Color::Warning, IconName::AiClaude),
+        "codex" | "copilot" => (Color::Success, IconName::AiOpenAi),
+        "gemini" => (Color::Info, IconName::AiGemini),
+        "opencode" => (Color::Accent, IconName::AiOpenCode),
+        "grok" => (Color::Default, IconName::AiXAi),
+        "qwen" => (Color::Created, IconName::AiGoogle),
+        "antigravity" => (Color::Info, IconName::AiGoogle),
+        "cursor" | "aider" => (Color::Modified, IconName::Code),
+        "kimi" => (Color::Accent, IconName::Star),
+        _ => (Color::Accent, IconName::Sparkle),
+    }
+}
+
+/// Builds the sidebar agent badge for a terminal, if a coding agent is running.
+fn agent_badge_for(
+    view: &Entity<TerminalView>,
+    terminal_activity: &HashMap<EntityId, std::time::Instant>,
+    cx: &App,
+) -> Option<AgentBadge> {
+    // Only trust the foreground process here: title/breadcrumb matching is fine
+    // for a one-off "park this session" decision, but would light up the badge
+    // for ordinary terminals whose title happens to mention an agent.
+    let view_id = view.entity_id();
+    let view = view.read(cx);
+    let terminal = view.terminal().read(cx);
+    let command = terminal.foreground_process_command_name()?;
+    let agent = agent_for_basename(&command_basename(&command))?;
+    let working = terminal_activity
+        .get(&view_id)
+        .is_some_and(|last| last.elapsed() < AGENT_WORKING_WINDOW);
+    let (color, icon) = agent_style(agent);
+    Some(AgentBadge {
+        name: agent_display_name(agent),
+        working,
+        color,
+        icon,
+    })
+}
+
+/// Renders `[icon] Name ●` for an agent terminal. The dot breathes while the
+/// agent is producing output and is muted when it is waiting for input.
+fn agent_badge_view(id: SharedString, badge: &AgentBadge) -> AnyElement {
+    let state = if badge.working {
+        i18n::t("agent_working")
+    } else {
+        i18n::t("agent_idle")
+    };
+    let tooltip = format!("{} · {}", badge.name, state);
+
+    let dot: AnyElement = if badge.working {
+        Label::new("●")
+            .size(LabelSize::XSmall)
+            .color(badge.color)
+            .with_animation(
+                SharedString::from(id.to_string() + "-pulse"),
+                Animation::new(Duration::from_secs(2))
+                    .repeat()
+                    .with_easing(pulsating_between(0.35, 1.0)),
+                |label, delta| label.alpha(delta),
+            )
+            .into_any_element()
+    } else {
+        Label::new("●")
+            .size(LabelSize::XSmall)
+            .color(Color::Muted)
+            .into_any_element()
+    };
+
+    h_flex()
+        .id(id)
+        .gap_1()
+        .items_center()
+        .tooltip(Tooltip::text(tooltip))
+        .child(
+            ui::Icon::new(badge.icon)
+                .size(IconSize::Small)
+                .color(badge.color),
+        )
+        .child(
+            Label::new(badge.name.clone())
+                .size(LabelSize::XSmall)
+                .color(if badge.working {
+                    badge.color
+                } else {
+                    Color::Muted
+                }),
+        )
+        .child(dot)
+        .into_any_element()
 }
 
 fn should_park_agent_session(view: &Entity<TerminalView>, cx: &App) -> bool {
@@ -861,6 +994,12 @@ pub struct TerminalListPanel {
     /// Removed when the terminal is closed so long sessions do not accumulate
     /// dead subscriptions.
     _terminal_subscriptions: HashMap<EntityId, Vec<Subscription>>,
+    /// Timestamp of the most recent output per terminal, used to decide whether
+    /// the sidebar's agent badge should show as working or idle.
+    terminal_activity: HashMap<EntityId, std::time::Instant>,
+    /// Pending refresh that lets the agent badge fall back to idle once output
+    /// stops, so the panel does not re-render continuously.
+    agent_idle_refresh: Option<Task<()>>,
     /// Debounced disk write after a terminal cwd change.
     cwd_persist_task: Task<()>,
     /// After session restore, ignore process-info reports of `$HOME` that would
@@ -970,6 +1109,8 @@ impl TerminalListPanel {
             terminal_spawn_cwds: HashMap::default(),
             terminal_launches: HashMap::default(),
             _terminal_subscriptions: HashMap::default(),
+            terminal_activity: HashMap::default(),
+            agent_idle_refresh: None,
             cwd_persist_task: Task::ready(()),
             restore_cwd_guard_until: None,
             parked_agent_sessions: Vec::new(),
@@ -2485,6 +2626,7 @@ impl TerminalListPanel {
             removed.terminals.iter().map(|tv| tv.entity_id()).collect();
         for id in &terminal_ids {
             self._terminal_subscriptions.remove(id);
+            self.terminal_activity.remove(id);
         }
 
         // Pull closed items out of panes before dropping Entities.
@@ -3201,6 +3343,39 @@ impl TerminalListPanel {
                     return;
                 };
                 this.forward_broadcast(&sender, keystroke, cx);
+            },
+        ));
+
+        // Track output activity so the sidebar can show whether an agent is
+        // actively working or waiting for input.
+        subscriptions.push(cx.subscribe(
+            &terminal,
+            move |this, _term, event: &terminal::Event, cx| {
+                if !matches!(event, terminal::Event::Wakeup) {
+                    return;
+                }
+                let now = std::time::Instant::now();
+                let was_working = this
+                    .terminal_activity
+                    .get(&view_id)
+                    .is_some_and(|last| now.duration_since(*last) < AGENT_WORKING_WINDOW);
+                this.terminal_activity.insert(view_id, now);
+                if !was_working {
+                    cx.notify();
+                }
+                if this.agent_idle_refresh.is_none() {
+                    this.agent_idle_refresh = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(AGENT_WORKING_WINDOW).await;
+                        this.update(cx, |this, cx| {
+                            this.agent_idle_refresh = None;
+                            let now = std::time::Instant::now();
+                            this.terminal_activity
+                                .retain(|_, last| now.duration_since(*last) < AGENT_WORKING_WINDOW);
+                            cx.notify();
+                        })
+                        .ok();
+                    }));
+                }
             },
         ));
         self._terminal_subscriptions.insert(view_id, subscriptions);
@@ -4221,6 +4396,7 @@ impl TerminalListPanel {
         let session = self.detached_sessions.remove(index);
         let id = session.view.entity_id();
         self._terminal_subscriptions.remove(&id);
+        self.terminal_activity.remove(&id);
         self.terminal_spawn_cwds.remove(&id);
         self.terminal_launches.remove(&id);
         drop(session.view);
@@ -4867,6 +5043,7 @@ impl TerminalListPanel {
         cx: &mut Context<Self>,
     ) {
         self._terminal_subscriptions.remove(&item_id);
+        self.terminal_activity.remove(&item_id);
         let mut changed = false;
         let mut emptied_group: Option<GroupId> = None;
         let mut removed_from_active_auto = false;
@@ -4989,11 +5166,17 @@ impl Render for TerminalListPanel {
         let theme = cx.theme().clone();
         let active_group_id = self.active_group_id;
         let group_switch_hint = self.group_switch_hint.clone().map(|(text, _)| text);
-        let detached_snapshot: Vec<(usize, SharedString)> = self
+        let detached_snapshot: Vec<(usize, SharedString, Option<AgentBadge>)> = self
             .detached_sessions
             .iter()
             .enumerate()
-            .map(|(index, session)| (index, session.title.clone()))
+            .map(|(index, session)| {
+                (
+                    index,
+                    session.title.clone(),
+                    agent_badge_for(&session.view, &self.terminal_activity, cx),
+                )
+            })
             .collect();
 
         let active_terminal_id = self
@@ -5010,7 +5193,7 @@ impl Render for TerminalListPanel {
             bool,
             bool,
             bool,
-            Vec<(Entity<TerminalView>, SharedString)>,
+            Vec<(Entity<TerminalView>, SharedString, Option<AgentBadge>)>,
         )> = Vec::new();
         for group in &self.groups {
             let is_active = group.id == active_group_id;
@@ -5019,7 +5202,8 @@ impl Render for TerminalListPanel {
             let mut terminals = Vec::new();
             if !collapsed {
                 for tv in &group.terminals {
-                    terminals.push((tv.clone(), sidebar_terminal_name(tv, cx)));
+                    let badge = agent_badge_for(tv, &self.terminal_activity, cx);
+                    terminals.push((tv.clone(), sidebar_terminal_name(tv, cx), badge));
                 }
             }
             groups_snapshot.push((
@@ -5198,7 +5382,7 @@ impl Render for TerminalListPanel {
             );
 
             if is_expanded {
-                for (ix, (terminal_view, title)) in terminals.into_iter().enumerate() {
+                for (ix, (terminal_view, title, agent_badge)) in terminals.into_iter().enumerate() {
                     let is_terminal_active = Some(terminal_view.entity_id()) == active_terminal_id;
 
                     let on_click = cx.listener({
@@ -5245,10 +5429,26 @@ impl Render for TerminalListPanel {
                                                     }),
                                             )
                                             .child(
-                                                Label::new(title.clone())
-                                                    .size(LabelSize::Small)
-                                                    .truncate(),
-                                            ),
+                                                div().flex_1().min_w_0().child(
+                                                    Label::new(title.clone())
+                                                        .size(LabelSize::Small)
+                                                        .truncate(),
+                                                ),
+                                            )
+                                            .map({
+                                                let agent_badge = agent_badge.clone();
+                                                let badge_id = SharedString::from(format!(
+                                                    "term-agent-{}-{ix}",
+                                                    group_id.0
+                                                ));
+                                                move |this| match agent_badge {
+                                                    Some(badge) => this.child(agent_badge_view(
+                                                        badge_id.clone(),
+                                                        &badge,
+                                                    )),
+                                                    None => this,
+                                                }
+                                            }),
                                     )
                                     .on_click(on_click)
                             })
@@ -5286,7 +5486,7 @@ impl Render for TerminalListPanel {
                     )
                     .into_any_element(),
             );
-            for (index, title) in detached_snapshot {
+            for (index, title, agent_badge) in detached_snapshot {
                 let hover_background = cx.theme().colors().element_hover;
                 let on_click = cx.listener(move |this, _, window, cx| {
                     this.reattach_detached(index, window, cx);
@@ -5314,8 +5514,23 @@ impl Render for TerminalListPanel {
                                         .size(IconSize::Small)
                                         .color(Color::Muted),
                                 )
-                                .child(Label::new(title).size(LabelSize::Small).truncate())
-                                .child(div().flex_grow(1.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(Label::new(title).size(LabelSize::Small).truncate()),
+                                )
+                                .map({
+                                    let agent_badge = agent_badge.clone();
+                                    let badge_id =
+                                        SharedString::from(format!("detached-agent-{index}"));
+                                    move |this| match agent_badge {
+                                        Some(badge) => {
+                                            this.child(agent_badge_view(badge_id.clone(), &badge))
+                                        }
+                                        None => this,
+                                    }
+                                })
                                 .child(
                                     IconButton::new(
                                         SharedString::from(format!("detached-close-{index}")),
