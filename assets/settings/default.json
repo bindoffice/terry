@@ -1887,10 +1887,36 @@
     //     "shell": { "program": "/bin/zsh" },
     //     "env": { "VIRTUAL_ENV_DISABLE_PROMPT": "1" },
     //     "working_directory": "current_project_directory",
-    //     "command": "source .venv/bin/activate"
+    //     "command": "source .venv/bin/activate",
+    //     // Colours for this profile's terminals; fonts and padding still
+    //     // come from the settings above. Accepts a bundled terminal color
+    //     // scheme (Dracula, Nord, Solarized Dark, Gruvbox Dark, One Dark,
+    //     // Tokyo Night, Catppuccin Mocha, ...) or a UI theme name.
+    //     "color_scheme": "One Dark"
     //   }
     // ],
     // "default_profile": "tmux",
+    // Default terminal color scheme for terminals that do not set one. Same
+    // values as a profile's `color_scheme`: a bundled/imported terminal color
+    // scheme, or a UI theme name. Terminal color schemes only change terminal
+    // colors; the rest of the UI keeps the active theme. More schemes can be
+    // imported from Alacritty (`.toml`), iTerm2 (`.itermcolors`), or Terry JSON
+    // with the "terminal: import color scheme" action.
+    //
+    // "color_scheme": "Catppuccin Mocha",
+    // SSH hosts offered by the "Connect to SSH Host…" picker, in addition to
+    // the hosts discovered in ~/.ssh/config. Connections are reused for 60s
+    // with ControlMaster by default, so opening another terminal on the same
+    // host does not ask for a password again.
+    //
+    // "ssh_hosts": [
+    //   { "name": "Production", "host": "prod.example.com", "user": "deploy", "port": 2222 }
+    // ],
+    // "ssh_reuse_connections": true,
+    // Extra arguments for every ssh invocation, e.g.
+    // ["-o", "ServerAliveInterval=30"].
+    //
+    // "ssh_extra_args": [],
     // Where to dock terminals panel. Can be `left`, `right`, `bottom`.
     "dock": "bottom",
     // Whether the terminal panel should use flexible (proportional) sizing.
@@ -2046,10 +2072,20 @@
     // "font_fallbacks": ["FiraCode Nerd Fonts"],
     // The weight of the editor font in standard CSS units from 100 to 900.
     "font_weight": 400,
+    // Whether to render font ligatures (e.g. `fi` → `ﬁ`, or programming
+    // ligatures in fonts like Fira Code). Disabled by default because
+    // ligatures can span multiple cells, which makes the cell grid less
+    // predictable for wide glyphs.
+    // "ligatures": true,
     // Sets the maximum number of lines in the terminal's scrollback buffer.
-    // Default: 10_000, maximum: 100_000 (all bigger values set will be treated as 100_000), 0 disables the scrolling.
+    // Default: 10_000, maximum: 1_000_000 (larger values are treated as
+    // 1_000_000), 0 disables the scrolling.
     // Existing terminals will not pick up this change until they are recreated.
     "max_scroll_history_lines": 10000,
+    // Keep all scrollback instead of evicting old lines once
+    // `max_scroll_history_lines` is reached. Memory usage grows with the
+    // amount of output a terminal produces.
+    // "unlimited_scroll_history": true,
     // The multiplier for scrolling speed in the terminal.
     "scroll_multiplier": 1.0,
     // The minimum APCA perceptual contrast between foreground and background colors.
@@ -2146,6 +2182,34 @@
     // default.
     // Default: true
     "confirm_multiline_paste": true,
+    // Terminal background opacity, from 0.0 (fully transparent) to 1.0
+    // (opaque). Values below 1 show the desktop through the terminal.
+    // Combine with `background_blur` for a frosted-glass effect.
+    // Default: 1.0
+    // "background_opacity": 0.9,
+    // Blur the desktop behind a translucent terminal background. Only has an
+    // effect when `background_opacity` is below 1.0. Blur is a window-level
+    // effect, so it disables subpixel text antialiasing for the window.
+    // Default: false
+    // "background_blur": true,
+    // Padding between the terminal's edge and the character grid, in pixels.
+    // Default: 0
+    // "padding_x": 4,
+    // "padding_y": 4,
+    // Characters that terminate a word for double-click (semantic) selection
+    // and word-wise vi motion. Any character in this list separates words.
+    // Default: ",│`|:\"' ()[]{}<>\t"
+    // "word_separators": ",│`|:\"' ()[]{}<>\t",
+    // Cursor shape used while vi mode is active: "block", "bar",
+    // "underline" or "hollow". Defaults to `cursor_shape` when unset.
+    // "vi_cursor_shape": "block",
+    // Rules that refine what a double-click selects. The first rule whose
+    // regex matches the clicked cell wins; without a match Terry selects the
+    // word around the click. `action` may be "select" or "copy".
+    // "smart_selection": [
+    //   { "regex": "\\b\\d{1,3}(\\.\\d{1,3}){3}\\b", "action": "copy" },
+    //   { "regex": "https?://\\S+", "action": "select" }
+    // ],
   },
   "code_actions_on_format": {},
   // Settings related to running tasks.

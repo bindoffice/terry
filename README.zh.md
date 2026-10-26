@@ -27,6 +27,10 @@
 - **粘贴安全** — 多行粘贴默认先确认（可用 `"terminal": { "confirm_multiline_paste": false }` 关闭）
 - **Shell 集成** — zsh / fish 开箱即用：提示符标记（OSC 133 / VS Code OSC 633）与工作目录跟踪（OSC 7）；`ctrl-shift-up` / `ctrl-shift-down` 在各条命令的提示符之间跳转
 - **终端配置档** — 命名 Profile 可覆盖 Shell、环境变量与工作目录，并在 Shell 启动后执行命令（例如 `tmux` 或激活项目虚拟环境）；可在分组右键菜单中选择，或用 `default_profile` 设为默认
+- **SSH 主机** — 从 `~/.ssh/config` 与 `terminal.ssh_hosts` 生成主机选择器；连接会复用 60 秒（`ControlMaster`），同一主机的第二个终端瞬间打开。「通过 tmux 连接」会在远端 attach 或新建 tmux 会话
+- **tmux 会话** — 选择器可直接 attach 或新建本地 tmux 会话；远端等价于 `ssh … tmux new -A -s <名称>`。（原生 tmux **control mode**，即把远端 pane 渲染成 Terry 的分屏，尚未实现）
+- **终端配色方案** — 内置配色库（Dracula、Nord、Solarized、Gruvbox、One Dark、Tokyo Night、Catppuccin、Rosé Pine 等），只改变终端颜色；可按终端、按 Profile 或用 `terminal.color_scheme` 选择。可从「终端」菜单导入 Alacritty `.toml`、iTerm2 `.itermcolors` 或 Terry JSON
+- **会话恢复** — 重启后恢复分组、分屏布局、工作目录、标题、Profile 配色、每终端字号缩放，以及 Profile / SSH / tmux 启动方式
 - **链接跳转** — `Ctrl+Shift+E` 列出当前可见的所有链接（URL / 路径 / OSC 8），键盘选择打开
 - **AI Agent** — 侧边栏与大模型对话，通过可配置的 Profile 调用命令与工具
 - **MCP** — 接入 Model Context Protocol 服务器，扩展 Agent 能力
@@ -61,7 +65,7 @@ terry send-text "cargo test"       # 向活动终端粘贴文本
 
 `send-text` 只粘贴不执行 —— 永远不会自动附加换行。
 
-已有实例在运行时再次启动 `terry` 会聚焦现有窗口，而不是启动第二个进程。
+已有实例在运行时再次启动 `terry` 会聚焦现有窗口，而不是启动第二个进程，并在 stderr 打印它把启动转交给了哪个进程（pid）。如果要在旧实例仍打开时运行新编译的二进制，使用 `terry --new-instance` 强制启动新实例。
 
 ### 自动化 API
 

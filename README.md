@@ -27,6 +27,10 @@ Group shells, browse files, and keep an AI agent beside you — built for people
 - **Paste safety** — multi-line pastes ask for confirmation by default (`"terminal": { "confirm_multiline_paste": false }` to disable)
 - **Shell integration** — automatic for zsh and fish: prompt marks (OSC 133 / VS Code OSC 633) and working-directory tracking (OSC 7); `ctrl-shift-up` / `ctrl-shift-down` move between prompts
 - **Terminal profiles** — named launch profiles can override the shell, environment, and working directory, and run a startup command (for example `tmux` or a project virtualenv); pick one from a group's context menu or set `default_profile`
+- **SSH hosts** — a picker built from `~/.ssh/config` and `terminal.ssh_hosts`; connections are reused for 60s (`ControlMaster`), so a second terminal on the same host opens instantly. “Connect with tmux” starts an attach-or-create tmux session on the remote host
+- **tmux sessions** — attach to (or create) a local tmux session from the picker; the remote equivalent goes through `ssh … tmux new -A -s <name>`. (Native tmux *control mode* — rendering remote panes as Terry panes — is not implemented yet)
+- **Terminal color schemes** — a bundled library (Dracula, Nord, Solarized, Gruvbox, One Dark, Tokyo Night, Catppuccin, Rosé Pine, …) that changes only terminal colors; pick one per terminal, per profile, or with `terminal.color_scheme`. Import Alacritty `.toml`, iTerm2 `.itermcolors`, or Terry JSON files from the Terminal menu
+- **Session restore** — groups, split layouts, working directories, titles, per-profile color schemes, per-terminal font zoom, and profile/SSH/tmux launches are restored on restart
 - **Link jump** — `Ctrl+Shift+E` lists all currently visible links (URL / path / OSC 8); pick one with the keyboard to open it
 - **AI Agent** — Chat with LLMs in a side panel; run commands and tools with configurable profiles
 - **MCP** — Connect Model Context Protocol servers to extend agent capabilities
@@ -61,7 +65,7 @@ terry send-text "cargo test"       # paste text into the active terminal
 
 `send-text` pastes without executing — it never appends a newline.
 
-Starting `terry` while an instance is already running focuses that instance instead of launching a second process.
+Starting `terry` while an instance is already running focuses that instance instead of launching a second process, and prints the pid of the instance it handed the launch to. Use `terry --new-instance` to start a second process anyway (handy when running a freshly built binary next to an older one).
 
 ### Automation API
 
