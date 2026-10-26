@@ -4,7 +4,7 @@ use gpui::Keystroke;
 use gpui::{
     Action, Animation, AnimationExt, AnyElement, App, Axis, Context, Entity, EntityId,
     EventEmitter, FocusHandle, Focusable, PromptLevel, Render, SharedString,
-    StatefulInteractiveElement, Subscription, Task, TaskExt, WeakEntity, Window, div,
+    StatefulInteractiveElement, Subscription, Task, TaskExt, WeakEntity, Window, actions, div,
     pulsating_between, px,
 };
 use project::Project;
@@ -29,6 +29,14 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+actions!(
+    terminal_list_panel,
+    [
+        /// Focuses the next terminal whose agent is waiting for input.
+        FocusNextWaitingAgent,
+    ]
+);
 
 /// Which window currently owns the shared restore file for a workspace key.
 /// A second window for the same workspace starts fresh instead of respawning
@@ -437,6 +445,9 @@ const AGENT_WORKING_WINDOW: Duration = Duration::from_secs(5);
 struct AgentBadge {
     name: SharedString,
     working: bool,
+    /// Whether the agent produced output and then went quiet, which usually
+    /// means it is waiting for the user to answer or approve something.
+    waiting: bool,
     /// Accent used for the agent's icon and name while it is working.
     color: Color,
     /// Small icon that identifies the agent CLI.
@@ -486,6 +497,7 @@ fn agent_style(agent: &AgentCli) -> (Color, IconName) {
 fn agent_badge_for(
     view: &Entity<TerminalView>,
     terminal_activity: &HashMap<EntityId, std::time::Instant>,
+    agent_waiting: &HashSet<EntityId>,
     cx: &App,
 ) -> Option<AgentBadge> {
     // Only trust the foreground process here: title/breadcrumb matching is fine
@@ -503,21 +515,66 @@ fn agent_badge_for(
     Some(AgentBadge {
         name: agent_display_name(agent),
         working,
+        waiting: agent_waiting.contains(&view_id),
         color,
         icon,
     })
 }
 
+/// Tells the user that one or more agents are waiting for input: a system
+/// notification plus a dock/window attention request.
+fn notify_agents_waiting(views: &[Entity<TerminalView>], cx: &mut App) {
+    let Some(first) = views.first() else {
+        return;
+    };
+    let (agent_name, terminal_title) = {
+        let view = first.read(cx);
+        let terminal = view.terminal().read(cx);
+        let agent_name = terminal
+            .foreground_process_command_name()
+            .map(|command| command_basename(&command))
+            .and_then(|base| agent_for_basename(&base))
+            .map(agent_display_name)
+            .unwrap_or_else(|| SharedString::from(i18n::t("agent")));
+        (agent_name, terminal.title(false))
+    };
+
+    let state = i18n::t("agent_waiting_for_input");
+    let title = if views.len() > 1 {
+        format!("{state} · {}", views.len())
+    } else {
+        format!("{agent_name} · {state}")
+    };
+    cx.show_system_notification(gpui::SystemNotification {
+        tag: "terry-agent-waiting".into(),
+        title: title.into(),
+        body: terminal_title.trim().to_string().into(),
+        actions: Vec::new(),
+    });
+
+    // Bounce the dock / flash the taskbar entry so the reminder is visible
+    // even when notifications are muted.
+    for handle in cx.windows() {
+        handle
+            .update(cx, |_, window, _| window.request_attention())
+            .ok();
+    }
+}
+
 /// Renders `[icon] Name ●` for an agent terminal. The dot breathes while the
 /// agent is producing output and is muted when it is waiting for input.
 fn agent_badge_view(id: SharedString, badge: &AgentBadge) -> AnyElement {
-    let state = if badge.working {
+    let state = if badge.waiting {
+        i18n::t("agent_waiting_for_input")
+    } else if badge.working {
         i18n::t("agent_working")
     } else {
         i18n::t("agent_idle")
     };
     let tooltip = format!("{} · {}", badge.name, state);
 
+    // The dot breathes while the agent is working, turns solid when it is
+    // waiting for input, and is muted when idle.
     let dot: AnyElement = if badge.working {
         Label::new("●")
             .size(LabelSize::XSmall)
@@ -529,6 +586,11 @@ fn agent_badge_view(id: SharedString, badge: &AgentBadge) -> AnyElement {
                     .with_easing(pulsating_between(0.35, 1.0)),
                 |label, delta| label.alpha(delta),
             )
+            .into_any_element()
+    } else if badge.waiting {
+        Label::new("●")
+            .size(LabelSize::XSmall)
+            .color(badge.color)
             .into_any_element()
     } else {
         Label::new("●")
@@ -894,6 +956,16 @@ pub fn init(cx: &mut App) {
                 }
             },
         );
+        workspace.register_action(|workspace, _: &FocusNextWaitingAgent, window, cx| {
+            let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
+                return;
+            };
+            window.defer(cx, move |window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.focus_next_waiting_agent(window, cx);
+                });
+            });
+        });
         workspace.register_action(|workspace, _: &SelectTerminalColorScheme, window, cx| {
             let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
                 return;
@@ -1041,6 +1113,9 @@ pub struct TerminalListPanel {
     /// Timestamp of the most recent output per terminal, used to decide whether
     /// the sidebar's agent badge should show as working or idle.
     terminal_activity: HashMap<EntityId, std::time::Instant>,
+    /// Terminals whose agent went quiet after producing output, i.e. are most
+    /// likely waiting for user input.
+    agent_waiting: HashSet<EntityId>,
     /// Pending refresh that lets the agent badge fall back to idle once output
     /// stops, so the panel does not re-render continuously.
     agent_idle_refresh: Option<Task<()>>,
@@ -1156,6 +1231,7 @@ impl TerminalListPanel {
             terminal_launches: HashMap::default(),
             _terminal_subscriptions: HashMap::default(),
             terminal_activity: HashMap::default(),
+            agent_waiting: HashSet::default(),
             agent_idle_refresh: None,
             cwd_persist_task: Task::ready(()),
             command_history_persist: Task::ready(()),
@@ -1255,6 +1331,37 @@ impl TerminalListPanel {
             })
             .ok();
         });
+    }
+
+    /// Terminal view by id, including detached sessions.
+    fn view_by_id_any(&self, id: EntityId) -> Option<Entity<TerminalView>> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.terminals.iter())
+            .chain(self.detached_sessions.iter().map(|session| &session.view))
+            .find(|view| view.entity_id() == id)
+            .cloned()
+    }
+
+    /// Focuses the next terminal whose agent is waiting for input, wrapping
+    /// around and switching groups when needed.
+    pub fn focus_next_waiting_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ordered: Vec<EntityId> = self
+            .groups
+            .iter()
+            .flat_map(|group| group.terminals.iter())
+            .map(|view| view.entity_id())
+            .filter(|id| self.agent_waiting.contains(id))
+            .collect();
+        let Some(first) = ordered.first().copied() else {
+            return;
+        };
+        let current = self.focused_terminal_id(cx);
+        let target = current
+            .and_then(|current| ordered.iter().position(|id| *id == current))
+            .map(|index| ordered[(index + 1) % ordered.len()])
+            .unwrap_or(first);
+        self.focus_terminal_by_id(target, window, cx);
     }
 
     fn schedule_command_history_persist(&mut self, cx: &mut Context<Self>) {
@@ -3490,7 +3597,9 @@ impl TerminalListPanel {
                     .get(&view_id)
                     .is_some_and(|last| now.duration_since(*last) < AGENT_WORKING_WINDOW);
                 this.terminal_activity.insert(view_id, now);
-                if !was_working {
+                // New output means the agent is no longer waiting for input.
+                let was_waiting = this.agent_waiting.remove(&view_id);
+                if !was_working || was_waiting {
                     cx.notify();
                 }
                 if this.agent_idle_refresh.is_none() {
@@ -3499,9 +3608,46 @@ impl TerminalListPanel {
                         this.update(cx, |this, cx| {
                             this.agent_idle_refresh = None;
                             let now = std::time::Instant::now();
-                            this.terminal_activity
-                                .retain(|_, last| now.duration_since(*last) < AGENT_WORKING_WINDOW);
-                            cx.notify();
+                            let expired: Vec<EntityId> = this
+                                .terminal_activity
+                                .iter()
+                                .filter(|(_, last)| {
+                                    now.duration_since(**last) >= AGENT_WORKING_WINDOW
+                                })
+                                .map(|(id, _)| *id)
+                                .collect();
+                            for id in &expired {
+                                this.terminal_activity.remove(id);
+                            }
+                            if expired.is_empty() {
+                                return;
+                            }
+                            // An agent that stops producing output is most
+                            // likely waiting for input; record it and notify.
+                            let mut newly_waiting = Vec::new();
+                            for id in expired {
+                                if this.agent_waiting.contains(&id) {
+                                    continue;
+                                }
+                                let Some(view) = this.view_by_id_any(id) else {
+                                    continue;
+                                };
+                                if agent_badge_for(
+                                    &view,
+                                    &this.terminal_activity,
+                                    &this.agent_waiting,
+                                    cx,
+                                )
+                                .is_some()
+                                {
+                                    this.agent_waiting.insert(id);
+                                    newly_waiting.push(view);
+                                }
+                            }
+                            if !newly_waiting.is_empty() {
+                                cx.notify();
+                                notify_agents_waiting(&newly_waiting, cx);
+                            }
                         })
                         .ok();
                     }));
@@ -4352,6 +4498,9 @@ impl TerminalListPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.agent_waiting.remove(&terminal_view.entity_id()) {
+            cx.notify();
+        }
         if group_id != self.active_group_id {
             // switch_group restores the destination layout asynchronously;
             // focus_terminal would no-op now because the target is not in the
@@ -5304,7 +5453,12 @@ impl Render for TerminalListPanel {
                 (
                     index,
                     session.title.clone(),
-                    agent_badge_for(&session.view, &self.terminal_activity, cx),
+                    agent_badge_for(
+                        &session.view,
+                        &self.terminal_activity,
+                        &self.agent_waiting,
+                        cx,
+                    ),
                     session.view.read(cx).notification_progress(),
                 )
             })
@@ -5338,7 +5492,8 @@ impl Render for TerminalListPanel {
             let mut terminals = Vec::new();
             if !collapsed {
                 for tv in &group.terminals {
-                    let badge = agent_badge_for(tv, &self.terminal_activity, cx);
+                    let badge =
+                        agent_badge_for(tv, &self.terminal_activity, &self.agent_waiting, cx);
                     let progress = tv.read(cx).notification_progress();
                     terminals.push((tv.clone(), sidebar_terminal_name(tv, cx), badge, progress));
                 }
