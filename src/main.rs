@@ -15,6 +15,7 @@ mod status_bar_items;
 mod terminal_list_panel;
 mod terminal_picker;
 mod terry_keymap;
+mod tmux_control;
 use std::sync::Arc;
 
 use assets::Assets;
