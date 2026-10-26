@@ -73,10 +73,14 @@ impl OutputTap {
         *self.0.lock() = sink;
     }
 
-    fn emit(&self, bytes: &[u8]) {
+    pub(super) fn emit(&self, bytes: &[u8]) -> bool {
         let sink = self.0.lock().clone();
-        if let Some(sink) = sink {
-            sink(bytes);
+        match sink {
+            Some(sink) => {
+                sink(bytes);
+                true
+            }
+            None => false,
         }
     }
 }

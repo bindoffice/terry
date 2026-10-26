@@ -1054,6 +1054,7 @@ impl TerminalBuilder {
             completion_tx: None,
             term,
             output_tap,
+            input_tap: OutputTap::default(),
             term_config: config,
             output_processor: Processor::<StdSyncHandler>::new(),
             title_override: None,
@@ -1376,6 +1377,7 @@ impl TerminalBuilder {
                 task,
                 terminal_type,
                 output_tap,
+                input_tap: OutputTap::default(),
                 subprocess,
                 completion_tx,
                 term,
@@ -1564,6 +1566,10 @@ pub struct Terminal {
     term_config: AlacrittyTermConfig,
     /// Tap for raw PTY output, used by session recording.
     output_tap: OutputTap,
+    /// Optional sink for keyboard input. When set, input is delivered here
+    /// instead of the PTY, which lets a terminal mirror a remote session (for
+    /// example tmux in control mode).
+    input_tap: OutputTap,
     output_processor: Processor<StdSyncHandler>,
     events: VecDeque<InternalEvent>,
     /// This is only used for mouse mode cell change detection
@@ -2442,6 +2448,9 @@ impl Terminal {
         #[cfg(any(test, feature = "test-support"))]
         self.input_log.push(input.to_vec());
 
+        if self.input_tap.emit(&input) {
+            return;
+        }
         self.write_to_pty(input);
     }
 
@@ -2707,6 +2716,12 @@ impl Terminal {
     /// record a session; pass `None` to stop.
     pub fn set_output_sink(&mut self, sink: Option<OutputSink>) {
         self.output_tap.set(sink);
+    }
+
+    /// Routes keyboard input here instead of the PTY. Used when the terminal
+    /// mirrors a remote session.
+    pub fn set_input_sink(&mut self, sink: Option<OutputSink>) {
+        self.input_tap.set(sink);
     }
 
     pub fn last_n_non_empty_lines(&self, n: usize) -> Vec<String> {
