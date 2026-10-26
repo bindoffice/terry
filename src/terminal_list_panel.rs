@@ -521,6 +521,19 @@ fn agent_badge_for(
     })
 }
 
+/// Snapshot of an agent terminal for the agent switcher.
+#[derive(Clone)]
+pub struct AgentTerminalEntry {
+    pub id: EntityId,
+    pub title: SharedString,
+    pub agent: SharedString,
+    pub group: SharedString,
+    pub working: bool,
+    pub waiting: bool,
+    pub icon: IconName,
+    pub color: Color,
+}
+
 /// Tells the user that one or more agents are waiting for input: a system
 /// notification plus a dock/window attention request.
 fn notify_agents_waiting(views: &[Entity<TerminalView>], cx: &mut App) {
@@ -966,6 +979,14 @@ pub fn init(cx: &mut App) {
                 });
             });
         });
+        workspace.register_action(
+            |workspace, _: &crate::agent_switcher::OpenAgentSwitcher, _window, cx| {
+                let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
+                    return;
+                };
+                crate::agent_switcher::open(panel.downgrade(), cx);
+            },
+        );
         workspace.register_action(|workspace, _: &SelectTerminalColorScheme, window, cx| {
             let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
                 return;
@@ -1341,6 +1362,33 @@ impl TerminalListPanel {
             .chain(self.detached_sessions.iter().map(|session| &session.view))
             .find(|view| view.entity_id() == id)
             .cloned()
+    }
+
+    /// Agent terminals across all groups, for the agent switcher.
+    pub fn agent_terminals(&self, cx: &App) -> Vec<AgentTerminalEntry> {
+        let mut entries = Vec::new();
+        for group in &self.groups {
+            for view in &group.terminals {
+                let Some(badge) =
+                    agent_badge_for(view, &self.terminal_activity, &self.agent_waiting, cx)
+                else {
+                    continue;
+                };
+                entries.push(AgentTerminalEntry {
+                    id: view.entity_id(),
+                    title: sidebar_terminal_name(view, cx),
+                    agent: badge.name,
+                    group: group.name.clone(),
+                    working: badge.working,
+                    waiting: badge.waiting,
+                    icon: badge.icon,
+                    color: badge.color,
+                });
+            }
+        }
+        // Waiting agents first, then working ones, then the rest.
+        entries.sort_by_key(|entry| (!entry.waiting, !entry.working));
+        entries
     }
 
     /// Focuses the next terminal whose agent is waiting for input, wrapping

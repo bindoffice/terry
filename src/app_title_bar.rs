@@ -27,6 +27,17 @@ impl Render for AppTitleBar {
                 .pr_2()
                 .gap_1()
                 .child(
+                    IconButton::new("open-agent-switcher", IconName::Sparkle)
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text(i18n::t("agent_switcher")))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(
+                                Box::new(crate::agent_switcher::OpenAgentSwitcher),
+                                cx,
+                            );
+                        }),
+                )
+                .child(
                     IconButton::new("open-command-history", IconName::Clock)
                         .icon_size(IconSize::Small)
                         .tooltip(Tooltip::text(i18n::t("command_history")))

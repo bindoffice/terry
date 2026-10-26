@@ -1,3 +1,4 @@
+mod agent_switcher;
 mod app_icon;
 mod app_menus;
 mod app_title_bar;

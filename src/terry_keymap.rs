@@ -8,6 +8,7 @@ use gpui::{App, KeyBinding};
 /// Must stay sorted for binary search.
 const TERRY_ACTION_NAMESPACES: &[&str] = &[
     "agent",
+    "agent_switcher",
     "app_title_bar",
     "buffer_search",
     "command_palette",
