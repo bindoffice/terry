@@ -40,6 +40,15 @@ actions!(
     ]
 );
 
+/// Max consecutive automatic reconnects for a remote terminal.
+const MAX_REMOTE_RECONNECT_ATTEMPTS: u32 = 5;
+
+/// Programs that should be reconnected automatically when they exit because
+/// the remote side went away (as opposed to the user closing the tab).
+fn is_remote_program(program: &str) -> bool {
+    matches!(command_basename(program).as_str(), "ssh" | "mosh")
+}
+
 /// Which window currently owns the shared restore file for a workspace key.
 /// A second window for the same workspace starts fresh instead of respawning
 /// the same PTYs.
@@ -1244,6 +1253,8 @@ pub struct TerminalListPanel {
     /// Terminals whose agent went quiet after producing output, i.e. are most
     /// likely waiting for user input.
     agent_waiting: HashSet<EntityId>,
+    /// Attempt counter for automatic remote reconnects, keyed by launch.
+    remote_reconnects: HashMap<String, (u32, std::time::Instant)>,
     /// Repository subscriptions, so git changes refresh the sidebar.
     git_subscriptions: Vec<Subscription>,
     git_subscribed: HashSet<EntityId>,
@@ -1403,6 +1414,7 @@ impl TerminalListPanel {
             _terminal_subscriptions: HashMap::default(),
             terminal_activity: HashMap::default(),
             agent_waiting: HashSet::default(),
+            remote_reconnects: HashMap::default(),
             git_subscriptions,
             git_subscribed,
             _git_store_subscription,
@@ -5815,6 +5827,7 @@ impl TerminalListPanel {
         let mut removed_from_active_auto = false;
         let mut parked: Option<ParkedAgentSession> = None;
         let mut remembered: Option<(&'static str, &'static str, Option<PathBuf>)> = None;
+        let mut reconnect: Option<(GroupId, Option<PathBuf>, PersistedLaunch)> = None;
         for group in &mut self.groups {
             if let Some(removed_ix) = group
                 .terminals
@@ -5823,9 +5836,19 @@ impl TerminalListPanel {
             {
                 let removed = group.terminals.remove(removed_ix);
                 let remembered_cwd = self.terminal_spawn_cwds.remove(&item_id).flatten();
-                self.terminal_launches.remove(&item_id);
+                let launch = self.terminal_launches.remove(&item_id);
+                let exited = removed.read(cx).terminal().read(cx).has_exited();
                 let cwd = remembered_cwd
                     .or_else(|| removed.read(cx).terminal().read(cx).working_directory());
+                if exited {
+                    if let Some(launch_value) = launch {
+                        if let PersistedLaunch::Command { program, .. } = &launch_value {
+                            if is_remote_program(program) {
+                                reconnect = Some((group.id, cwd.clone(), launch_value));
+                            }
+                        }
+                    }
+                }
                 if let Some((agent, bin)) = coding_agent_from_view(&removed, cx) {
                     remembered = Some((agent.id, bin, cwd.clone()));
                 }
@@ -5893,6 +5916,73 @@ impl TerminalListPanel {
 
         self.save_session(cx);
         cx.notify();
+
+        if let Some((group_id, cwd, launch)) = reconnect {
+            self.schedule_remote_reconnect(group_id, cwd, launch, window, cx);
+        }
+    }
+
+    /// Re-spawns a remote terminal after its connection dropped, backing off
+    /// exponentially and giving up after a few attempts so a dead host cannot
+    /// loop forever.
+    fn schedule_remote_reconnect(
+        &mut self,
+        group_id: GroupId,
+        cwd: Option<PathBuf>,
+        launch: PersistedLaunch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let PersistedLaunch::Command { program, args, .. } = &launch else {
+            return;
+        };
+        let key = format!("{program}:{}", args.join(" "));
+        let now = std::time::Instant::now();
+        let attempts = {
+            let entry = self
+                .remote_reconnects
+                .entry(key.clone())
+                .or_insert((0, now));
+            // Forget old failures so a long-lived session starts fresh.
+            if now.duration_since(entry.1) > Duration::from_secs(300) {
+                *entry = (0, now);
+            }
+            entry.0 += 1;
+            entry.1 = now;
+            entry.0
+        };
+        if attempts > MAX_REMOTE_RECONNECT_ATTEMPTS {
+            log::warn!("remote reconnect: giving up on {key} after {attempts} attempts");
+            return;
+        }
+        let delay = Duration::from_secs(1u64 << (attempts - 1).min(4));
+        log::info!("remote reconnect: retrying {key} in {delay:?} (attempt {attempts})");
+
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update_in(cx, |this, window, cx| {
+                if !this.groups.iter().any(|group| group.id == group_id) {
+                    return;
+                }
+                this.spawn_terminal(
+                    group_id,
+                    cwd,
+                    None,
+                    None,
+                    SpawnRestore {
+                        launch: Some(launch),
+                        ..SpawnRestore::default()
+                    },
+                    None,
+                    None,
+                    window,
+                    cx,
+                );
+                this.save_session(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn remap_layout_after_remove(node: &mut GroupLayoutNode, removed: usize) {
