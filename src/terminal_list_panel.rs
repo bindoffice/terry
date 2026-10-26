@@ -1329,6 +1329,9 @@ pub struct TerminalListPanel {
     remote_reconnects: HashMap<String, (u32, std::time::Instant)>,
     /// Mapping from tmux window ids to the group mirroring that window.
     tmux_window_groups: HashMap<u32, GroupId>,
+    /// Terminal views created by the tmux control-mode bridge, so they can be
+    /// dropped before reconnecting.
+    tmux_mirrored: HashSet<EntityId>,
     /// Repository subscriptions, so git changes refresh the sidebar.
     git_subscriptions: Vec<Subscription>,
     git_subscribed: HashSet<EntityId>,
@@ -1490,6 +1493,7 @@ impl TerminalListPanel {
             agent_waiting: HashSet::default(),
             remote_reconnects: HashMap::default(),
             tmux_window_groups: HashMap::default(),
+            tmux_mirrored: HashSet::default(),
             git_subscriptions,
             git_subscribed,
             _git_store_subscription,
@@ -4852,6 +4856,45 @@ impl TerminalListPanel {
         }
     }
 
+    /// Drops every group and terminal created by the tmux bridge, so a
+    /// reconnecting client can rebuild them from scratch.
+    pub(crate) fn reset_tmux_mirror(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let group_ids: Vec<GroupId> = self.tmux_window_groups.drain().map(|(_, id)| id).collect();
+        let mirrored: Vec<EntityId> = self.tmux_mirrored.drain().collect();
+
+        for view_id in &mirrored {
+            self._terminal_subscriptions.remove(view_id);
+            self.terminal_activity.remove(view_id);
+            self.terminal_launches.remove(view_id);
+            self.terminal_spawn_cwds.remove(view_id);
+            self.agent_waiting.remove(view_id);
+        }
+        if let Some(pane) = self.display_pane_entity(cx) {
+            for view_id in &mirrored {
+                let view_id = *view_id;
+                pane.update(cx, |pane, cx| {
+                    pane.remove_item(view_id, false, false, window, cx);
+                });
+            }
+        }
+        for group_id in group_ids {
+            if let Some(index) = self.groups.iter().position(|group| group.id == group_id) {
+                self.groups.remove(index);
+            }
+        }
+        if !self
+            .groups
+            .iter()
+            .any(|group| group.id == self.active_group_id)
+        {
+            if let Some(first) = self.groups.first() {
+                self.active_group_id = first.id;
+            }
+        }
+        self.save_session(cx);
+        cx.notify();
+    }
+
     /// Returns the group mirroring `window_id`, creating it on first use.
     fn ensure_tmux_group(&mut self, window_id: u32, cx: &mut Context<Self>) -> GroupId {
         if let Some(&group_id) = self.tmux_window_groups.get(&window_id) {
@@ -4889,7 +4932,7 @@ impl TerminalListPanel {
         pane_id: u32,
         cwd: Option<PathBuf>,
         buffered_output: Vec<u8>,
-        client: std::sync::Arc<std::sync::Mutex<crate::tmux_control::ControlClient>>,
+        client: crate::tmux_native::SharedTmuxClient,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Entity<terminal::Terminal>> {
@@ -4915,7 +4958,12 @@ impl TerminalListPanel {
                 if text.is_empty() {
                     return;
                 }
-                let Ok(mut client) = input_client.lock() else {
+                // Resolve the client on every keystroke so input keeps working
+                // across reconnects.
+                let Some(client) = input_client.lock().ok().and_then(|slot| slot.clone()) else {
+                    return;
+                };
+                let Ok(mut client) = client.lock() else {
                     return;
                 };
                 let command = if text == "\r" {
@@ -4946,12 +4994,14 @@ impl TerminalListPanel {
         });
 
         let group_id = self.ensure_tmux_group(window_id, cx);
+        let view_id = view.entity_id();
         let first_pane = self
             .groups
             .iter()
             .find(|group| group.id == group_id)
             .is_none_or(|group| group.terminals.is_empty());
         self.add_terminal_to_group(group_id, view, None, cwd, cx);
+        self.tmux_mirrored.insert(view_id);
         if first_pane && group_id == self.active_group_id {
             self.set_group_layout(group_id, GroupLayoutMode::Grid, window, cx);
         }
