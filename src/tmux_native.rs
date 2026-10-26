@@ -57,7 +57,8 @@ pub fn attach(target: String, window: &mut Window, cx: &mut Context<TerminalList
     cx.spawn_in(window, async move |panel, cx| {
         let mut panes: HashMap<u32, Entity<Terminal>> = HashMap::new();
         let mut pending: HashMap<u32, Vec<u8>> = HashMap::new();
-        let mut pane_order: Vec<u32> = Vec::new();
+        // Pane ids per tmux window, in the order they were mirrored.
+        let mut pane_order: HashMap<u32, Vec<u32>> = HashMap::new();
         let mut requested = false;
 
         while let Some(event) = rx.next().await {
@@ -79,7 +80,7 @@ pub fn attach(target: String, window: &mut Window, cx: &mut Context<TerminalList
                     }
                 }
                 ControlEvent::Response(line) => {
-                    let Some((pane_id, cwd)) = parse_pane_line(&line) else {
+                    let Some((window_id, pane_id, cwd)) = parse_pane_line(&line) else {
                         continue;
                     };
                     if panes.contains_key(&pane_id) {
@@ -88,11 +89,19 @@ pub fn attach(target: String, window: &mut Window, cx: &mut Context<TerminalList
                     let buffered = pending.remove(&pane_id).unwrap_or_default();
                     let pane_client = client.clone();
                     let created = panel.update_in(cx, |panel, window, cx| {
-                        panel.add_mirrored_pane(pane_id, cwd, buffered, pane_client, window, cx)
+                        panel.add_mirrored_pane(
+                            window_id,
+                            pane_id,
+                            cwd,
+                            buffered,
+                            pane_client,
+                            window,
+                            cx,
+                        )
                     });
                     match created {
                         Ok(Some(terminal)) => {
-                            pane_order.push(pane_id);
+                            pane_order.entry(window_id).or_default().push(pane_id);
                             // Best-effort: tell tmux the client viewport size so
                             // its panes match the mirrored terminals.
                             let (columns, rows) =
@@ -110,13 +119,24 @@ pub fn attach(target: String, window: &mut Window, cx: &mut Context<TerminalList
                         Err(_) => break,
                     }
                 }
-                ControlEvent::LayoutChange { layout, .. } => {
-                    let pane_order = pane_order.clone();
-                    let layout = layout.clone();
+                ControlEvent::LayoutChange { window, layout } => {
+                    let window_id = window.0;
+                    let order = pane_order.get(&window_id).cloned().unwrap_or_default();
                     let applied = panel.update_in(cx, |panel, window, cx| {
-                        panel.apply_tmux_layout(&pane_order, &layout, window, cx);
+                        panel.apply_tmux_layout(window_id, &order, &layout, window, cx);
                     });
                     if applied.is_err() {
+                        break;
+                    }
+                }
+                ControlEvent::WindowRenamed { window, name } => {
+                    let window_id = window.0;
+                    if panel
+                        .update_in(cx, |panel, _window, cx| {
+                            panel.rename_tmux_group(window_id, name, cx)
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -128,13 +148,15 @@ pub fn attach(target: String, window: &mut Window, cx: &mut Context<TerminalList
     .detach();
 }
 
-/// Parses `pane_id|||cwd` lines returned by [`LIST_PANES_SIMPLE`].
-fn parse_pane_line(line: &str) -> Option<(u32, Option<std::path::PathBuf>)> {
-    let (pane, cwd) = line.split_once("|||")?;
-    let pane_id = pane.trim().strip_prefix('%')?.parse().ok()?;
-    let cwd = cwd.trim();
+/// Parses `window_id|||pane_id|||cwd` lines returned by
+/// [`LIST_PANES_SIMPLE`].
+fn parse_pane_line(line: &str) -> Option<(u32, u32, Option<std::path::PathBuf>)> {
+    let mut parts = line.split("|||");
+    let window = parts.next()?.trim().strip_prefix('@')?.parse().ok()?;
+    let pane = parts.next()?.trim().strip_prefix('%')?.parse().ok()?;
+    let cwd = parts.next().unwrap_or("").trim();
     let cwd = (!cwd.is_empty()).then(|| std::path::PathBuf::from(cwd));
-    Some((pane_id, cwd))
+    Some((window, pane, cwd))
 }
 
 /// Forwards a chunk of input to a pane, mapping CR to the Enter key.

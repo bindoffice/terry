@@ -401,8 +401,10 @@ pub fn refresh_client_size(columns: u16, rows: u16) -> String {
 /// Command listing panes with the fields the UI needs.
 pub const LIST_PANES: &str = "list-panes -a -F '#{session_id} #{window_id} #{pane_id} #{pane_width}x#{pane_height} #{pane_current_path} #{pane_title}'\n";
 
-/// Compact pane listing used by the native-pane bridge: `pane_id|||cwd`.
-pub const LIST_PANES_SIMPLE: &str = "list-panes -a -F '#{pane_id}|||#{pane_current_path}'\n";
+/// Compact pane listing used by the native-pane bridge:
+/// `window_id|||pane_id|||cwd`.
+pub const LIST_PANES_SIMPLE: &str =
+    "list-panes -a -F '#{window_id}|||#{pane_id}|||#{pane_current_path}'\n";
 
 /// A running `tmux -CC` client.
 pub struct ControlClient {

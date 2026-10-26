@@ -1327,6 +1327,8 @@ pub struct TerminalListPanel {
     agent_waiting: HashSet<EntityId>,
     /// Attempt counter for automatic remote reconnects, keyed by launch.
     remote_reconnects: HashMap<String, (u32, std::time::Instant)>,
+    /// Mapping from tmux window ids to the group mirroring that window.
+    tmux_window_groups: HashMap<u32, GroupId>,
     /// Repository subscriptions, so git changes refresh the sidebar.
     git_subscriptions: Vec<Subscription>,
     git_subscribed: HashSet<EntityId>,
@@ -1487,6 +1489,7 @@ impl TerminalListPanel {
             terminal_activity: HashMap::default(),
             agent_waiting: HashSet::default(),
             remote_reconnects: HashMap::default(),
+            tmux_window_groups: HashMap::default(),
             git_subscriptions,
             git_subscribed,
             _git_store_subscription,
@@ -4802,28 +4805,79 @@ impl TerminalListPanel {
         cx.notify();
     }
 
-    /// Applies a tmux layout tree to the active group. `pane_order` maps the
-    /// order panes were added to their tmux pane ids, so layout leaves land on
-    /// the right terminal.
+    /// Applies a tmux layout tree to the group mirroring `window_id`.
+    /// `pane_order` maps the order panes were added to their tmux pane ids, so
+    /// layout leaves land on the right terminal.
     pub(crate) fn apply_tmux_layout(
         &mut self,
+        window_id: u32,
         pane_order: &[u32],
         layout: &crate::tmux_control::Layout,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(&group_id) = self.tmux_window_groups.get(&window_id) else {
+            return;
+        };
         let mut fallback = 0usize;
         let Some(node) = tmux_layout_to_node(layout, pane_order, &mut fallback) else {
             return;
         };
-        let group_id = self.active_group_id;
         if let Some(group) = self.groups.iter_mut().find(|group| group.id == group_id) {
             group.saved_layout = Some(node);
             group.layout_mode = GroupLayoutMode::Manual;
         }
-        self.restore_active_group_layout(window, cx);
+        if group_id == self.active_group_id {
+            self.restore_active_group_layout(window, cx);
+        }
         self.save_session(cx);
         cx.notify();
+    }
+
+    /// Renames the group mirroring a tmux window, keeping the active group in
+    /// sync when needed.
+    pub(crate) fn rename_tmux_group(
+        &mut self,
+        window_id: u32,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(&group_id) = self.tmux_window_groups.get(&window_id) else {
+            return;
+        };
+        if let Some(group) = self.groups.iter_mut().find(|group| group.id == group_id) {
+            group.name = name.into();
+            self.save_session(cx);
+            cx.notify();
+        }
+    }
+
+    /// Returns the group mirroring `window_id`, creating it on first use.
+    fn ensure_tmux_group(&mut self, window_id: u32, cx: &mut Context<Self>) -> GroupId {
+        if let Some(&group_id) = self.tmux_window_groups.get(&window_id) {
+            return group_id;
+        }
+        let group_id = self.new_group_id();
+        let became_first = self.groups.is_empty();
+        self.groups.push(TerminalGroup {
+            id: group_id,
+            name: SharedString::from(format!("tmux @{window_id}")),
+            terminals: Vec::new(),
+            collapsed: false,
+            has_unread: false,
+            saved_layout: None,
+            layout_mode: GroupLayoutMode::Grid,
+            broadcast_input: false,
+            session_terminal_count: None,
+            restore_slots: Vec::new(),
+        });
+        self.tmux_window_groups.insert(window_id, group_id);
+        if became_first {
+            self.active_group_id = group_id;
+        }
+        self.save_session(cx);
+        cx.notify();
+        group_id
     }
 
     /// Creates a mirrored pane terminal (for example a tmux pane in control
@@ -4831,6 +4885,7 @@ impl TerminalListPanel {
     /// `send-keys`, output is written with `write_output`.
     pub(crate) fn add_mirrored_pane(
         &mut self,
+        window_id: u32,
         pane_id: u32,
         cwd: Option<PathBuf>,
         buffered_output: Vec<u8>,
@@ -4890,16 +4945,14 @@ impl TerminalListPanel {
             )
         });
 
-        let group_id = self.active_group_id;
+        let group_id = self.ensure_tmux_group(window_id, cx);
         let first_pane = self
             .groups
             .iter()
             .find(|group| group.id == group_id)
             .is_none_or(|group| group.terminals.is_empty());
         self.add_terminal_to_group(group_id, view, None, cwd, cx);
-        if first_pane {
-            // Mirroring a remote session tiles its panes rather than stacking
-            // them as tabs.
+        if first_pane && group_id == self.active_group_id {
             self.set_group_layout(group_id, GroupLayoutMode::Grid, window, cx);
         }
         self.save_session(cx);
