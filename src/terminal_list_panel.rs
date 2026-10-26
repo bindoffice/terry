@@ -1095,6 +1095,18 @@ pub fn init(cx: &mut App) {
             git_ui::project_diff::ProjectDiff::deploy_at(workspace, None, window, cx);
         });
         workspace.register_action(
+            |workspace, _: &crate::tmux_native::AttachTmuxControlMode, window, cx| {
+                let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
+                    return;
+                };
+                window.defer(cx, move |window, cx| {
+                    panel.update(cx, |_, cx| {
+                        crate::tmux_native::attach("terry".to_string(), window, cx);
+                    });
+                });
+            },
+        );
+        workspace.register_action(
             |workspace, _: &crate::process_inspector::OpenProcessInspector, window, cx| {
                 if let Some(view) = crate::scrollback_export::active_terminal(workspace, cx) {
                     window.defer(cx, move |_window, cx| {
@@ -4724,6 +4736,87 @@ impl TerminalListPanel {
         self.restore_active_group_layout(window, cx);
         self.save_session(cx);
         cx.notify();
+    }
+
+    /// Creates a mirrored pane terminal (for example a tmux pane in control
+    /// mode) and adds it to the active group. Input is routed to `client` via
+    /// `send-keys`, output is written with `write_output`.
+    pub(crate) fn add_mirrored_pane(
+        &mut self,
+        pane_id: u32,
+        cwd: Option<PathBuf>,
+        buffered_output: Vec<u8>,
+        client: std::sync::Arc<std::sync::Mutex<crate::tmux_control::ControlClient>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<terminal::Terminal>> {
+        let path_style = self.project.upgrade()?.read(cx).path_style(cx);
+        let settings = TerminalSettings::get_global(cx).clone();
+        let terminal = cx.new(|cx| {
+            let builder = terminal::TerminalBuilder::new_display_only(
+                settings.cursor_shape,
+                settings.alternate_scroll,
+                settings.max_scroll_history_lines,
+                0,
+                cx.background_executor(),
+                path_style,
+            );
+            builder.subscribe(cx)
+        });
+
+        let pane = crate::tmux_control::PaneId(pane_id);
+        let input_client = client.clone();
+        terminal.update(cx, |terminal, _cx| {
+            terminal.set_input_sink(Some(std::sync::Arc::new(move |bytes: &[u8]| {
+                let text = String::from_utf8_lossy(bytes).to_string();
+                if text.is_empty() {
+                    return;
+                }
+                let Ok(mut client) = input_client.lock() else {
+                    return;
+                };
+                let command = if text == "\r" {
+                    crate::tmux_control::send_key(pane, "Enter")
+                } else {
+                    crate::tmux_control::send_keys_literal(pane, &text)
+                };
+                let _ = client.send(&command);
+            })));
+        });
+
+        if !buffered_output.is_empty() {
+            terminal.update(cx, |terminal, cx| {
+                terminal.write_output(&buffered_output, cx);
+            });
+        }
+
+        let project = self.project.clone();
+        let view = cx.new(|cx| {
+            TerminalView::new(
+                terminal.clone(),
+                WeakEntity::new_invalid(),
+                None,
+                project,
+                window,
+                cx,
+            )
+        });
+
+        let group_id = self.active_group_id;
+        let first_pane = self
+            .groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .is_none_or(|group| group.terminals.is_empty());
+        self.add_terminal_to_group(group_id, view, None, cwd, cx);
+        if first_pane {
+            // Mirroring a remote session tiles its panes rather than stacking
+            // them as tabs.
+            self.set_group_layout(group_id, GroupLayoutMode::Grid, window, cx);
+        }
+        self.save_session(cx);
+        cx.notify();
+        Some(terminal)
     }
 
     fn restore_active_group_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {

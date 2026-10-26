@@ -401,6 +401,9 @@ pub fn refresh_client_size(columns: u16, rows: u16) -> String {
 /// Command listing panes with the fields the UI needs.
 pub const LIST_PANES: &str = "list-panes -a -F '#{session_id} #{window_id} #{pane_id} #{pane_width}x#{pane_height} #{pane_current_path} #{pane_title}'\n";
 
+/// Compact pane listing used by the native-pane bridge: `pane_id|||cwd`.
+pub const LIST_PANES_SIMPLE: &str = "list-panes -a -F '#{pane_id}|||#{pane_current_path}'\n";
+
 /// A running `tmux -CC` client.
 pub struct ControlClient {
     child: Child,
@@ -410,11 +413,17 @@ pub struct ControlClient {
 impl ControlClient {
     /// Attaches to an existing session in control mode, creating it if needed.
     pub fn attach(target: &str) -> io::Result<Self> {
+        Self::spawn(&["-CC", "attach-session", "-t", target])
+    }
+
+    /// Creates the session when missing, then attaches in control mode.
+    pub fn attach_or_create(name: &str) -> io::Result<Self> {
+        Self::spawn(&["-CC", "new-session", "-A", "-s", name])
+    }
+
+    fn spawn(args: &[&str]) -> io::Result<Self> {
         let mut child = Command::new("tmux")
-            .arg("-CC")
-            .arg("attach-session")
-            .arg("-t")
-            .arg(target)
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

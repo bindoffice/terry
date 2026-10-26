@@ -20,6 +20,7 @@ mod terminal_list_panel;
 mod terminal_picker;
 mod terry_keymap;
 mod tmux_control;
+mod tmux_native;
 use std::sync::Arc;
 
 use assets::Assets;
