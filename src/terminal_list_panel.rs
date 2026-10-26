@@ -992,6 +992,15 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &ReviewAgentChanges, window, cx| {
             git_ui::project_diff::ProjectDiff::deploy_at(workspace, None, window, cx);
         });
+        workspace.register_action(
+            |workspace, _: &crate::process_inspector::OpenProcessInspector, window, cx| {
+                if let Some(view) = crate::scrollback_export::active_terminal(workspace, cx) {
+                    window.defer(cx, move |_window, cx| {
+                        crate::process_inspector::open(view.downgrade(), cx);
+                    });
+                }
+            },
+        );
         workspace.register_action(|workspace, _: &SelectTerminalColorScheme, window, cx| {
             let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
                 return;
@@ -2602,6 +2611,13 @@ impl TerminalListPanel {
                         detach_panel.update(cx, |this, cx| {
                             this.detach_terminal(terminal_id, window, cx);
                         });
+                    });
+
+            let inspect_view = terminal_view.clone();
+            let menu =
+                menu.separator()
+                    .entry(i18n::t("inspect_processes"), None, move |_window, cx| {
+                        crate::process_inspector::open(inspect_view.downgrade(), cx);
                     });
 
             let export_view = terminal_view.clone();

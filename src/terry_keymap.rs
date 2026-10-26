@@ -33,6 +33,7 @@ const TERRY_ACTION_NAMESPACES: &[&str] = &[
     "outline",
     "pane",
     "picker",
+    "process_inspector",
     "project_search",
     "projects",
     "recent_projects",

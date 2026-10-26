@@ -8,6 +8,7 @@ mod file_list_panel;
 mod ipc;
 mod keymap_settings;
 mod llm_provider_settings;
+mod process_inspector;
 mod quake_terminal;
 mod remote_hosts;
 mod scrollback_export;
