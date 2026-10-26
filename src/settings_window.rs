@@ -6,7 +6,7 @@ use gpui::{
 };
 use settings::{Settings, SettingsStore, UiLanguage, update_settings_file};
 use strum::VariantArray;
-use terminal::terminal_settings::TerminalSettings;
+use terminal::terminal_settings::{CursorShape as TerminalCursorShape, TerminalSettings};
 use theme::ActiveTheme;
 use ui::{
     Button, ButtonSize, ButtonStyle, Color, ContextMenu, DropdownMenu, IconPosition, Label,
@@ -184,29 +184,107 @@ impl SettingsWindow {
         .into_any_element()
     }
 
-    fn render_general_tab(&self, cx: &App) -> AnyElement {
+    fn render_general_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let language_label = Self::current_language_label(cx);
-        settings_section(
-            i18n::t("ui_language"),
-            i18n::t("ui_language_description"),
-            DropdownMenu::new("ui-language", language_label, self.language_menu.clone())
-                .style(ui::DropdownStyle::Outlined)
-                .trigger_size(ButtonSize::Medium)
-                .into_any_element(),
-        )
+        let (auto_update_enabled, reduce_motion, hide_mouse) = {
+            let content = cx.global::<SettingsStore>().merged_settings();
+            (
+                content.auto_update.unwrap_or(true),
+                matches!(content.reduce_motion, Some(settings::ReduceMotionMode::On)),
+                content.hide_mouse.unwrap_or_default(),
+            )
+        };
+
+        let hide_mouse_menu = build_option_menu(
+            window,
+            cx,
+            vec![
+                setting_option(i18n::t("hide_mouse_never"), |content| {
+                    content.hide_mouse = Some(settings::HideMouseMode::Never);
+                }),
+                setting_option(i18n::t("hide_mouse_on_typing"), |content| {
+                    content.hide_mouse = Some(settings::HideMouseMode::OnTyping);
+                }),
+                setting_option(i18n::t("hide_mouse_on_typing_and_action"), |content| {
+                    content.hide_mouse = Some(settings::HideMouseMode::OnTypingAndAction);
+                }),
+            ],
+        );
+
+        v_flex()
+            .gap_4()
+            .child(settings_section(
+                i18n::t("ui_language"),
+                i18n::t("ui_language_description"),
+                DropdownMenu::new("ui-language", language_label, self.language_menu.clone())
+                    .style(ui::DropdownStyle::Outlined)
+                    .trigger_size(ButtonSize::Medium)
+                    .into_any_element(),
+            ))
+            .child(settings_switch(
+                "auto-update",
+                i18n::t("auto_update"),
+                i18n::t("auto_update_description"),
+                auto_update_enabled,
+                |enabled, cx| {
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content.auto_update = Some(enabled);
+                    });
+                },
+            ))
+            .child(settings_switch(
+                "reduce-motion",
+                i18n::t("reduce_motion"),
+                i18n::t("reduce_motion_description"),
+                reduce_motion,
+                |enabled, cx| {
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content.reduce_motion = Some(if enabled {
+                            settings::ReduceMotionMode::On
+                        } else {
+                            settings::ReduceMotionMode::Off
+                        });
+                    });
+                },
+            ))
+            .child(settings_dropdown(
+                "hide-mouse",
+                i18n::t("hide_mouse"),
+                i18n::t("hide_mouse_description"),
+                hide_mouse_label(hide_mouse),
+                hide_mouse_menu,
+            ))
+            .into_any_element()
     }
 
-    fn render_appearance_tab(&self, cx: &App) -> AnyElement {
+    fn render_appearance_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let current_font_size = theme_settings::ThemeSettings::get_global(cx).buffer_font_size(cx);
         let current_font_family_raw = theme_settings::ThemeSettings::get_global(cx)
             .buffer_font
             .family
             .clone();
+        let current_line_height = theme_settings::ThemeSettings::get_global(cx).buffer_line_height;
         let current_font_family = if current_font_family_raw.as_ref() == ".SystemUIFont" {
             SharedString::from(i18n::t("font_system"))
         } else {
             current_font_family_raw
         };
+
+        let line_height_menu = build_option_menu(
+            window,
+            cx,
+            vec![
+                setting_option(i18n::t("line_height_comfortable"), |content| {
+                    content.theme.buffer_line_height =
+                        Some(settings::BufferLineHeight::Comfortable);
+                }),
+                setting_option(i18n::t("line_height_standard"), |content| {
+                    content.theme.buffer_line_height = Some(settings::BufferLineHeight::Standard);
+                }),
+            ],
+        );
 
         v_flex()
             .gap_4()
@@ -268,43 +346,331 @@ impl SettingsWindow {
                     )
                     .into_any_element(),
             ))
+            .child(settings_section(
+                i18n::t("line_height"),
+                i18n::t("line_height_description"),
+                DropdownMenu::new(
+                    "ui-line-height",
+                    line_height_label(current_line_height),
+                    line_height_menu,
+                )
+                .style(ui::DropdownStyle::Outlined)
+                .trigger_size(ButtonSize::Medium)
+                .into_any_element(),
+            ))
             .into_any_element()
     }
 
-    fn render_editor_tab(&self, cx: &App) -> AnyElement {
+    fn render_editor_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let editor_settings = editor::EditorSettings::get_global(cx);
+        let cursor_blink = editor_settings.cursor_blink;
+        let cursor_shape = editor_settings.cursor_shape;
+        let relative_line_numbers = editor_settings.relative_line_numbers;
+        let autosave = workspace::WorkspaceSettings::get_global(cx).autosave;
         let vim_enabled = VimModeSetting::is_enabled(cx);
-        let toggle_state = if vim_enabled {
+        let helix_enabled = vim_mode_setting::HelixModeSetting::is_enabled(cx);
+        let all_languages = language::language_settings::AllLanguageSettings::get_global(cx);
+        let format_on_save = all_languages.defaults.format_on_save;
+        let soft_wrap = all_languages.defaults.soft_wrap.clone();
+        let show_whitespaces = all_languages.defaults.show_whitespaces;
+
+        let cursor_shape_menu = build_option_menu(
+            window,
+            cx,
+            vec![
+                setting_option(i18n::t("cursor_shape_bar"), |content| {
+                    content.editor.cursor_shape = Some(settings::CursorShape::Bar);
+                }),
+                setting_option(i18n::t("cursor_shape_block"), |content| {
+                    content.editor.cursor_shape = Some(settings::CursorShape::Block);
+                }),
+                setting_option(i18n::t("cursor_shape_underline"), |content| {
+                    content.editor.cursor_shape = Some(settings::CursorShape::Underline);
+                }),
+                setting_option(i18n::t("cursor_shape_hollow"), |content| {
+                    content.editor.cursor_shape = Some(settings::CursorShape::Hollow);
+                }),
+            ],
+        );
+
+        let relative_line_numbers_menu = build_option_menu(
+            window,
+            cx,
+            vec![
+                setting_option(i18n::t("relative_line_numbers_off"), |content| {
+                    content.editor.relative_line_numbers =
+                        Some(settings::RelativeLineNumbers::Disabled);
+                }),
+                setting_option(i18n::t("relative_line_numbers_on"), |content| {
+                    content.editor.relative_line_numbers =
+                        Some(settings::RelativeLineNumbers::Enabled);
+                }),
+                setting_option(i18n::t("relative_line_numbers_wrapped"), |content| {
+                    content.editor.relative_line_numbers =
+                        Some(settings::RelativeLineNumbers::Wrapped);
+                }),
+            ],
+        );
+
+        let autosave_menu = build_option_menu(
+            window,
+            cx,
+            vec![
+                setting_option(i18n::t("autosave_off"), |content| {
+                    content.workspace.autosave = Some(settings::AutosaveSetting::Off);
+                }),
+                setting_option(i18n::t("autosave_on_focus_change"), |content| {
+                    content.workspace.autosave = Some(settings::AutosaveSetting::OnFocusChange);
+                }),
+                setting_option(i18n::t("autosave_on_window_change"), |content| {
+                    content.workspace.autosave = Some(settings::AutosaveSetting::OnWindowChange);
+                }),
+            ],
+        );
+
+        let format_on_save_menu = build_option_menu(
+            window,
+            cx,
+            vec![
+                setting_option(i18n::t("format_on_save_off"), |content| {
+                    content.project.all_languages.defaults.format_on_save =
+                        Some(settings::FormatOnSave::Off);
+                }),
+                setting_option(i18n::t("format_on_save_on"), |content| {
+                    content.project.all_languages.defaults.format_on_save =
+                        Some(settings::FormatOnSave::On);
+                }),
+                setting_option(i18n::t("format_on_save_modifications"), |content| {
+                    content.project.all_languages.defaults.format_on_save =
+                        Some(settings::FormatOnSave::Modifications);
+                }),
+            ],
+        );
+
+        let soft_wrap_menu = build_option_menu(
+            window,
+            cx,
+            vec![
+                setting_option(i18n::t("soft_wrap_off"), |content| {
+                    content.project.all_languages.defaults.soft_wrap =
+                        Some(settings::SoftWrap::None);
+                }),
+                setting_option(i18n::t("soft_wrap_editor_width"), |content| {
+                    content.project.all_languages.defaults.soft_wrap =
+                        Some(settings::SoftWrap::EditorWidth);
+                }),
+                setting_option(i18n::t("soft_wrap_bounded"), |content| {
+                    content.project.all_languages.defaults.soft_wrap =
+                        Some(settings::SoftWrap::Bounded);
+                }),
+            ],
+        );
+
+        let show_whitespaces_menu = build_option_menu(
+            window,
+            cx,
+            vec![
+                setting_option(i18n::t("show_whitespaces_none"), |content| {
+                    content.project.all_languages.defaults.show_whitespaces =
+                        Some(settings::ShowWhitespaceSetting::None);
+                }),
+                setting_option(i18n::t("show_whitespaces_selection"), |content| {
+                    content.project.all_languages.defaults.show_whitespaces =
+                        Some(settings::ShowWhitespaceSetting::Selection);
+                }),
+                setting_option(i18n::t("show_whitespaces_boundary"), |content| {
+                    content.project.all_languages.defaults.show_whitespaces =
+                        Some(settings::ShowWhitespaceSetting::Boundary);
+                }),
+                setting_option(i18n::t("show_whitespaces_trailing"), |content| {
+                    content.project.all_languages.defaults.show_whitespaces =
+                        Some(settings::ShowWhitespaceSetting::Trailing);
+                }),
+                setting_option(i18n::t("show_whitespaces_all"), |content| {
+                    content.project.all_languages.defaults.show_whitespaces =
+                        Some(settings::ShowWhitespaceSetting::All);
+                }),
+            ],
+        );
+
+        let vim_state = if vim_enabled {
             ToggleState::Selected
         } else {
             ToggleState::Unselected
         };
-        settings_section(
-            i18n::t("vim_mode"),
-            i18n::t("vim_mode_description"),
-            Switch::new("vim-mode", toggle_state)
-                .label(i18n::t("vim_mode"))
-                .on_click(|state, _window, cx| {
-                    let enabled = *state == ToggleState::Selected;
+
+        v_flex()
+            .gap_4()
+            .child(settings_section(
+                i18n::t("vim_mode"),
+                i18n::t("vim_mode_description"),
+                Switch::new("vim-mode", vim_state)
+                    .label(i18n::t("vim_mode"))
+                    .on_click(|state, _window, cx| {
+                        let enabled = *state == ToggleState::Selected;
+                        let fs = <dyn Fs>::global(cx);
+                        update_settings_file(fs, cx, move |content, _| {
+                            content.vim_mode = Some(enabled);
+                            if enabled {
+                                content.helix_mode = Some(false);
+                            }
+                        });
+                    })
+                    .into_any_element(),
+            ))
+            .child(settings_switch(
+                "helix-mode",
+                i18n::t("helix_mode"),
+                i18n::t("helix_mode_description"),
+                helix_enabled,
+                |enabled, cx| {
                     let fs = <dyn Fs>::global(cx);
                     update_settings_file(fs, cx, move |content, _| {
-                        content.vim_mode = Some(enabled);
+                        content.helix_mode = Some(enabled);
                         if enabled {
-                            content.helix_mode = Some(false);
+                            content.vim_mode = Some(false);
                         }
                     });
-                })
-                .into_any_element(),
-        )
+                },
+            ))
+            .child(settings_switch(
+                "editor-cursor-blink",
+                i18n::t("cursor_blink"),
+                i18n::t("cursor_blink_description"),
+                cursor_blink,
+                |enabled, cx| {
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content.editor.cursor_blink = Some(enabled);
+                    });
+                },
+            ))
+            .child(settings_dropdown(
+                "editor-cursor-shape",
+                i18n::t("cursor_shape"),
+                i18n::t("cursor_shape_description"),
+                editor_cursor_shape_label(cursor_shape),
+                cursor_shape_menu,
+            ))
+            .child(settings_dropdown(
+                "editor-relative-line-numbers",
+                i18n::t("relative_line_numbers"),
+                i18n::t("relative_line_numbers_description"),
+                relative_line_numbers_label(relative_line_numbers),
+                relative_line_numbers_menu,
+            ))
+            .child(settings_dropdown(
+                "editor-autosave",
+                i18n::t("autosave"),
+                i18n::t("autosave_description"),
+                autosave_label(autosave),
+                autosave_menu,
+            ))
+            .child(settings_dropdown(
+                "editor-format-on-save",
+                i18n::t("format_on_save"),
+                i18n::t("format_on_save_description"),
+                format_on_save_label(format_on_save),
+                format_on_save_menu,
+            ))
+            .child(settings_dropdown(
+                "editor-soft-wrap",
+                i18n::t("soft_wrap"),
+                i18n::t("soft_wrap_description"),
+                soft_wrap_label(soft_wrap),
+                soft_wrap_menu,
+            ))
+            .child(settings_dropdown(
+                "editor-show-whitespaces",
+                i18n::t("show_whitespaces"),
+                i18n::t("show_whitespaces_description"),
+                show_whitespaces_label(show_whitespaces),
+                show_whitespaces_menu,
+            ))
+            .into_any_element()
     }
 
-    fn render_terminal_tab(&self, cx: &App) -> AnyElement {
+    fn render_terminal_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let terminal = TerminalSettings::get_global(cx);
         let shell_integration = terminal.shell_integration;
         let clipboard_read = terminal.clipboard_read;
         let notify_on_command_finish = terminal.notify_on_command_finish;
         let confirm_multiline_paste = terminal.confirm_multiline_paste;
+        let copy_on_select = terminal.copy_on_select;
+        let cursor_shape = terminal.cursor_shape;
+        let blinking = terminal.blinking;
+        let ligatures = terminal.ligatures;
+        let background_opacity = terminal.background_opacity;
+        let background_blur = terminal.background_blur;
+        let image_display = terminal.image_display;
+        let bell = terminal.bell;
+        let unlimited_scroll_history = terminal.unlimited_scroll_history();
         let profiles = terminal.profiles.clone();
         let default_profile = terminal.default_profile.clone();
+
+        let cursor_shape_menu = build_option_menu(
+            window,
+            cx,
+            vec![
+                setting_option(i18n::t("cursor_shape_block"), |content| {
+                    content.terminal.get_or_insert_default().cursor_shape =
+                        Some(settings::CursorShapeContent::Block);
+                }),
+                setting_option(i18n::t("cursor_shape_underline"), |content| {
+                    content.terminal.get_or_insert_default().cursor_shape =
+                        Some(settings::CursorShapeContent::Underline);
+                }),
+                setting_option(i18n::t("cursor_shape_bar"), |content| {
+                    content.terminal.get_or_insert_default().cursor_shape =
+                        Some(settings::CursorShapeContent::Bar);
+                }),
+                setting_option(i18n::t("cursor_shape_hollow"), |content| {
+                    content.terminal.get_or_insert_default().cursor_shape =
+                        Some(settings::CursorShapeContent::Hollow);
+                }),
+            ],
+        );
+
+        let blinking_menu = build_option_menu(
+            window,
+            cx,
+            vec![
+                setting_option(i18n::t("terminal_blink_off"), |content| {
+                    content.terminal.get_or_insert_default().blinking =
+                        Some(settings::TerminalBlink::Off);
+                }),
+                setting_option(i18n::t("terminal_blink_follow"), |content| {
+                    content.terminal.get_or_insert_default().blinking =
+                        Some(settings::TerminalBlink::TerminalControlled);
+                }),
+                setting_option(i18n::t("terminal_blink_on"), |content| {
+                    content.terminal.get_or_insert_default().blinking =
+                        Some(settings::TerminalBlink::On);
+                }),
+            ],
+        );
+
+        let opacity_menu = build_option_menu(
+            window,
+            cx,
+            vec![
+                setting_option("100%", |content| {
+                    content.terminal.get_or_insert_default().background_opacity = Some(1.0);
+                }),
+                setting_option("95%", |content| {
+                    content.terminal.get_or_insert_default().background_opacity = Some(0.95);
+                }),
+                setting_option("90%", |content| {
+                    content.terminal.get_or_insert_default().background_opacity = Some(0.9);
+                }),
+                setting_option("85%", |content| {
+                    content.terminal.get_or_insert_default().background_opacity = Some(0.85);
+                }),
+                setting_option("80%", |content| {
+                    content.terminal.get_or_insert_default().background_opacity = Some(0.8);
+                }),
+            ],
+        );
 
         v_flex()
             .gap_4()
@@ -397,6 +763,106 @@ impl SettingsWindow {
                     });
                 })
                 .into_any_element(),
+            ))
+            .child(settings_switch(
+                "terminal-copy-on-select",
+                i18n::t("terminal_copy_on_select"),
+                i18n::t("terminal_copy_on_select_description"),
+                copy_on_select,
+                |enabled, cx| {
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content.terminal.get_or_insert_default().copy_on_select = Some(enabled);
+                    });
+                },
+            ))
+            .child(settings_dropdown(
+                "terminal-cursor-shape",
+                i18n::t("cursor_shape"),
+                i18n::t("terminal_cursor_shape_description"),
+                terminal_cursor_shape_label(cursor_shape),
+                cursor_shape_menu,
+            ))
+            .child(settings_dropdown(
+                "terminal-blinking",
+                i18n::t("terminal_blinking"),
+                i18n::t("terminal_blinking_description"),
+                terminal_blink_label(blinking),
+                blinking_menu,
+            ))
+            .child(settings_switch(
+                "terminal-ligatures",
+                i18n::t("terminal_ligatures"),
+                i18n::t("terminal_ligatures_description"),
+                ligatures,
+                |enabled, cx| {
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content.terminal.get_or_insert_default().ligatures = Some(enabled);
+                    });
+                },
+            ))
+            .child(settings_dropdown(
+                "terminal-background-opacity",
+                i18n::t("terminal_background_opacity"),
+                i18n::t("terminal_background_opacity_description"),
+                format!("{}%", (background_opacity * 100.0).round() as i32),
+                opacity_menu,
+            ))
+            .child(settings_switch(
+                "terminal-background-blur",
+                i18n::t("terminal_background_blur"),
+                i18n::t("terminal_background_blur_description"),
+                background_blur,
+                |enabled, cx| {
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content.terminal.get_or_insert_default().background_blur = Some(enabled);
+                    });
+                },
+            ))
+            .child(settings_switch(
+                "terminal-image-display",
+                i18n::t("terminal_image_display"),
+                i18n::t("terminal_image_display_description"),
+                image_display,
+                |enabled, cx| {
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content.terminal.get_or_insert_default().image_display = Some(enabled);
+                    });
+                },
+            ))
+            .child(settings_switch(
+                "terminal-bell",
+                i18n::t("terminal_bell"),
+                i18n::t("terminal_bell_description"),
+                matches!(bell, settings::TerminalBell::System),
+                |enabled, cx| {
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content.terminal.get_or_insert_default().bell = Some(if enabled {
+                            settings::TerminalBell::System
+                        } else {
+                            settings::TerminalBell::Off
+                        });
+                    });
+                },
+            ))
+            .child(settings_switch(
+                "terminal-unlimited-scroll-history",
+                i18n::t("terminal_unlimited_scroll_history"),
+                i18n::t("terminal_unlimited_scroll_history_description"),
+                unlimited_scroll_history,
+                |enabled, cx| {
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content
+                            .terminal
+                            .get_or_insert_default()
+                            .unlimited_scroll_history = Some(enabled);
+                    });
+                },
             ))
             .child(settings_section(
                 i18n::t("terminal_profiles"),
@@ -513,12 +979,12 @@ impl SettingsWindow {
         )
     }
 
-    fn render_active_tab(&self, cx: &App) -> AnyElement {
+    fn render_active_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.active_tab {
-            SettingsTab::General => self.render_general_tab(cx),
-            SettingsTab::Appearance => self.render_appearance_tab(cx),
-            SettingsTab::Editor => self.render_editor_tab(cx),
-            SettingsTab::Terminal => self.render_terminal_tab(cx),
+            SettingsTab::General => self.render_general_tab(window, cx),
+            SettingsTab::Appearance => self.render_appearance_tab(window, cx),
+            SettingsTab::Editor => self.render_editor_tab(window, cx),
+            SettingsTab::Terminal => self.render_terminal_tab(window, cx),
             SettingsTab::Keyboard => self.render_keyboard_tab(cx),
             SettingsTab::Agent => self.render_agent_tab(cx),
         }
@@ -540,6 +1006,189 @@ fn settings_section(
         )
         .child(control)
         .into_any_element()
+}
+
+type MenuHandler = Box<dyn Fn(&mut Window, &mut App) + 'static>;
+
+/// Builds a dropdown menu from a list of `(label, handler)` options.
+fn build_option_menu(
+    window: &mut Window,
+    cx: &mut App,
+    options: Vec<(SharedString, MenuHandler)>,
+) -> Entity<ContextMenu> {
+    ContextMenu::build(window, cx, move |mut menu, _, _| {
+        for (label, handler) in options {
+            menu = menu.entry(label, None, handler);
+        }
+        menu
+    })
+}
+
+/// A menu option that applies a change to the user settings file.
+fn setting_option(
+    label: impl Into<SharedString>,
+    update: fn(&mut settings::SettingsContent),
+) -> (SharedString, MenuHandler) {
+    (
+        label.into(),
+        Box::new(move |_window, cx| {
+            let fs = <dyn Fs>::global(cx);
+            update_settings_file(fs, cx, move |content, _| update(content));
+        }),
+    )
+}
+
+/// A labelled on/off setting row.
+fn settings_switch(
+    id: &'static str,
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    enabled: bool,
+    on_toggle: impl Fn(bool, &mut App) + 'static,
+) -> AnyElement {
+    let title = title.into();
+    let state = if enabled {
+        ToggleState::Selected
+    } else {
+        ToggleState::Unselected
+    };
+    settings_section(
+        title.clone(),
+        description,
+        Switch::new(id, state)
+            .label(title)
+            .on_click(move |state, _window, cx| {
+                on_toggle(*state == ToggleState::Selected, cx);
+            })
+            .into_any_element(),
+    )
+}
+
+/// A labelled dropdown setting row.
+fn settings_dropdown(
+    id: &'static str,
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    current: impl Into<SharedString>,
+    menu: Entity<ContextMenu>,
+) -> AnyElement {
+    settings_section(
+        title,
+        description,
+        DropdownMenu::new(id, current, menu)
+            .style(ui::DropdownStyle::Outlined)
+            .trigger_size(ButtonSize::Medium)
+            .into_any_element(),
+    )
+}
+
+fn editor_cursor_shape_label(shape: Option<language::CursorShape>) -> SharedString {
+    match shape {
+        Some(language::CursorShape::Block) => i18n::t("cursor_shape_block").into(),
+        Some(language::CursorShape::Underline) => i18n::t("cursor_shape_underline").into(),
+        Some(language::CursorShape::Hollow) => i18n::t("cursor_shape_hollow").into(),
+        Some(language::CursorShape::Bar) | None => i18n::t("cursor_shape_bar").into(),
+    }
+}
+
+fn terminal_cursor_shape_label(shape: TerminalCursorShape) -> SharedString {
+    match shape {
+        TerminalCursorShape::Block => i18n::t("cursor_shape_block").into(),
+        TerminalCursorShape::Underline => i18n::t("cursor_shape_underline").into(),
+        TerminalCursorShape::Bar => i18n::t("cursor_shape_bar").into(),
+        TerminalCursorShape::Hollow => i18n::t("cursor_shape_hollow").into(),
+    }
+}
+
+fn relative_line_numbers_label(value: settings::RelativeLineNumbers) -> SharedString {
+    match value {
+        settings::RelativeLineNumbers::Disabled => i18n::t("relative_line_numbers_off").into(),
+        settings::RelativeLineNumbers::Enabled => i18n::t("relative_line_numbers_on").into(),
+        settings::RelativeLineNumbers::Wrapped => i18n::t("relative_line_numbers_wrapped").into(),
+    }
+}
+
+fn autosave_label(value: settings::AutosaveSetting) -> SharedString {
+    match value {
+        settings::AutosaveSetting::Off => i18n::t("autosave_off").into(),
+        settings::AutosaveSetting::AfterDelay { .. } => i18n::t("autosave_after_delay").into(),
+        settings::AutosaveSetting::OnFocusChange => i18n::t("autosave_on_focus_change").into(),
+        settings::AutosaveSetting::OnWindowChange => i18n::t("autosave_on_window_change").into(),
+    }
+}
+
+fn terminal_blink_label(value: settings::TerminalBlink) -> SharedString {
+    match value {
+        settings::TerminalBlink::Off => i18n::t("terminal_blink_off").into(),
+        settings::TerminalBlink::TerminalControlled => i18n::t("terminal_blink_follow").into(),
+        settings::TerminalBlink::On => i18n::t("terminal_blink_on").into(),
+    }
+}
+
+fn line_height_label(value: theme_settings::BufferLineHeight) -> SharedString {
+    match value {
+        theme_settings::BufferLineHeight::Comfortable => i18n::t("line_height_comfortable").into(),
+        theme_settings::BufferLineHeight::Standard => i18n::t("line_height_standard").into(),
+        theme_settings::BufferLineHeight::Custom(_) => i18n::t("line_height_custom").into(),
+    }
+}
+
+fn hide_mouse_label(value: settings::HideMouseMode) -> SharedString {
+    match value {
+        settings::HideMouseMode::Never => i18n::t("hide_mouse_never").into(),
+        settings::HideMouseMode::OnTyping => i18n::t("hide_mouse_on_typing").into(),
+        settings::HideMouseMode::OnTypingAndAction => {
+            i18n::t("hide_mouse_on_typing_and_action").into()
+        }
+    }
+}
+
+fn format_on_save_label(value: settings::FormatOnSave) -> SharedString {
+    match value {
+        settings::FormatOnSave::On => i18n::t("format_on_save_on").into(),
+        settings::FormatOnSave::Off => i18n::t("format_on_save_off").into(),
+        settings::FormatOnSave::Modifications
+        | settings::FormatOnSave::ModificationsIfAvailable => {
+            i18n::t("format_on_save_modifications").into()
+        }
+    }
+}
+
+fn soft_wrap_label(value: settings::SoftWrap) -> SharedString {
+    match value {
+        settings::SoftWrap::None | settings::SoftWrap::PreferLine => {
+            i18n::t("soft_wrap_off").into()
+        }
+        settings::SoftWrap::EditorWidth => i18n::t("soft_wrap_editor_width").into(),
+        settings::SoftWrap::Bounded => i18n::t("soft_wrap_bounded").into(),
+    }
+}
+
+fn show_whitespaces_label(value: settings::ShowWhitespaceSetting) -> SharedString {
+    match value {
+        settings::ShowWhitespaceSetting::None => i18n::t("show_whitespaces_none").into(),
+        settings::ShowWhitespaceSetting::Selection => i18n::t("show_whitespaces_selection").into(),
+        settings::ShowWhitespaceSetting::Boundary => i18n::t("show_whitespaces_boundary").into(),
+        settings::ShowWhitespaceSetting::Trailing => i18n::t("show_whitespaces_trailing").into(),
+        settings::ShowWhitespaceSetting::All => i18n::t("show_whitespaces_all").into(),
+    }
+}
+
+/// Applies globally-scoped UI preferences that are read directly by GPUI.
+fn apply_ui_preferences(cx: &mut App) {
+    let (reduce_motion, hide_mouse) = {
+        let content = cx.global::<SettingsStore>().merged_settings();
+        (
+            matches!(content.reduce_motion, Some(settings::ReduceMotionMode::On)),
+            content.hide_mouse.unwrap_or_default(),
+        )
+    };
+    cx.set_reduce_motion(reduce_motion);
+    cx.set_cursor_hide_mode(match hide_mouse {
+        settings::HideMouseMode::Never => gpui::CursorHideMode::Never,
+        settings::HideMouseMode::OnTyping => gpui::CursorHideMode::OnTyping,
+        settings::HideMouseMode::OnTypingAndAction => gpui::CursorHideMode::OnTypingAndAction,
+    });
 }
 
 impl Focusable for SettingsWindow {
@@ -584,7 +1233,7 @@ impl Render for SettingsWindow {
                     .min_h_0()
                     .overflow_y_scroll()
                     .p_4()
-                    .child(self.render_active_tab(cx)),
+                    .child(self.render_active_tab(window, cx)),
             )
     }
 }
@@ -691,6 +1340,10 @@ pub fn init(cx: &mut App) {
         });
     })
     .detach();
+
+    apply_ui_preferences(cx);
+    cx.observe_global::<SettingsStore>(|cx| apply_ui_preferences(cx))
+        .detach();
 }
 
 fn open_settings_window(cx: &mut App) {

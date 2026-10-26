@@ -338,6 +338,11 @@ impl settings::Settings for TerminalSettings {
 }
 
 impl TerminalSettings {
+    /// Whether the scrollback history is configured to be unlimited.
+    pub fn unlimited_scroll_history(&self) -> bool {
+        self.max_scroll_history_lines == Some(UNLIMITED_SCROLL_HISTORY_LINES)
+    }
+
     /// Looks up a profile by its exact name.
     pub fn profile(&self, name: &str) -> Option<&TerminalProfile> {
         self.profiles.iter().find(|profile| profile.name == name)

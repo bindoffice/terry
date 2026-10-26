@@ -152,6 +152,135 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("clipboard_delete", "Delete");
             m.insert("clipboard_just_now", "just now");
             m.insert("clipboard_chars", "{count} chars");
+            m.insert("autosave", "Autosave");
+            m.insert(
+                "autosave_description",
+                "Automatically save files as you edit.",
+            );
+            m.insert("autosave_off", "Off");
+            m.insert("autosave_after_delay", "After a delay");
+            m.insert("autosave_on_focus_change", "When focus changes");
+            m.insert("autosave_on_window_change", "When the active window changes");
+            m.insert("helix_mode", "Helix mode");
+            m.insert(
+                "helix_mode_description",
+                "Use Helix-style keybindings and selections.",
+            );
+            m.insert("cursor_blink", "Blinking cursor");
+            m.insert("cursor_blink_description", "Let the text cursor blink.");
+            m.insert("cursor_shape", "Cursor shape");
+            m.insert("cursor_shape_description", "How the editor cursor is drawn.");
+            m.insert("cursor_shape_bar", "Bar");
+            m.insert("cursor_shape_block", "Block");
+            m.insert("cursor_shape_underline", "Underline");
+            m.insert("cursor_shape_hollow", "Hollow");
+            m.insert("relative_line_numbers", "Relative line numbers");
+            m.insert(
+                "relative_line_numbers_description",
+                "Show line numbers relative to the cursor line.",
+            );
+            m.insert("relative_line_numbers_off", "Off");
+            m.insert("relative_line_numbers_on", "On");
+            m.insert("relative_line_numbers_wrapped", "Wrapped");
+            m.insert("line_height", "Line height");
+            m.insert(
+                "line_height_description",
+                "Spacing between lines in the editor.",
+            );
+            m.insert("line_height_comfortable", "Comfortable");
+            m.insert("line_height_standard", "Standard");
+            m.insert("line_height_custom", "Custom");
+            m.insert("terminal_copy_on_select", "Copy on select");
+            m.insert(
+                "terminal_copy_on_select_description",
+                "Copy selected text to the clipboard immediately.",
+            );
+            m.insert(
+                "terminal_cursor_shape_description",
+                "How the terminal cursor is drawn.",
+            );
+            m.insert("terminal_blinking", "Cursor blinking");
+            m.insert(
+                "terminal_blinking_description",
+                "Control whether the terminal cursor blinks.",
+            );
+            m.insert("terminal_blink_off", "Never");
+            m.insert("terminal_blink_follow", "Follow terminal");
+            m.insert("terminal_blink_on", "Always");
+            m.insert("terminal_ligatures", "Ligatures");
+            m.insert(
+                "terminal_ligatures_description",
+                "Render programming ligatures such as -> and =>.",
+            );
+            m.insert("auto_update", "Automatically check for updates");
+            m.insert(
+                "auto_update_description",
+                "Check for new versions in the background.",
+            );
+            m.insert("reduce_motion", "Reduce motion");
+            m.insert(
+                "reduce_motion_description",
+                "Render loading animations in a static state.",
+            );
+            m.insert("hide_mouse", "Hide mouse cursor");
+            m.insert(
+                "hide_mouse_description",
+                "When to hide the mouse cursor while typing.",
+            );
+            m.insert("hide_mouse_never", "Never");
+            m.insert("hide_mouse_on_typing", "While typing");
+            m.insert(
+                "hide_mouse_on_typing_and_action",
+                "While typing and on actions",
+            );
+            m.insert("format_on_save", "Format on save");
+            m.insert(
+                "format_on_save_description",
+                "Format files automatically when saving.",
+            );
+            m.insert("format_on_save_off", "Off");
+            m.insert("format_on_save_on", "On");
+            m.insert("format_on_save_modifications", "Modified lines only");
+            m.insert("soft_wrap", "Soft wrap");
+            m.insert("soft_wrap_description", "Wrap long lines in the editor.");
+            m.insert("soft_wrap_off", "Off");
+            m.insert("soft_wrap_editor_width", "At editor width");
+            m.insert("soft_wrap_bounded", "At preferred line length");
+            m.insert("show_whitespaces", "Show whitespace");
+            m.insert(
+                "show_whitespaces_description",
+                "Display tabs and spaces in the editor.",
+            );
+            m.insert("show_whitespaces_none", "Never");
+            m.insert("show_whitespaces_selection", "In selection");
+            m.insert("show_whitespaces_boundary", "At boundaries");
+            m.insert("show_whitespaces_trailing", "Trailing only");
+            m.insert("show_whitespaces_all", "Always");
+            m.insert("terminal_background_opacity", "Background opacity");
+            m.insert(
+                "terminal_background_opacity_description",
+                "Make the terminal background translucent.",
+            );
+            m.insert("terminal_background_blur", "Background blur");
+            m.insert(
+                "terminal_background_blur_description",
+                "Blur the desktop behind a translucent terminal.",
+            );
+            m.insert("terminal_image_display", "Inline images");
+            m.insert(
+                "terminal_image_display_description",
+                "Render images from escape sequences in the terminal.",
+            );
+            m.insert("terminal_bell", "Bell sound");
+            m.insert(
+                "terminal_bell_description",
+                "Play a sound when the terminal bell fires.",
+            );
+            m.insert("terminal_unlimited_scroll_history", "Unlimited scrollback");
+            m.insert(
+                "terminal_unlimited_scroll_history_description",
+                "Keep the entire scrollback history.",
+            );
             m.insert("recent_terminals", "Recent Terminals");
             m.insert("recent_folders", "Recent Folders");
             m.insert("open_recent_project", "Open Recent Project");
@@ -420,6 +549,102 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("clipboard_delete", "删除");
             m.insert("clipboard_just_now", "刚刚");
             m.insert("clipboard_chars", "{count} 字符");
+            m.insert("autosave", "自动保存");
+            m.insert("autosave_description", "编辑文件时自动保存。");
+            m.insert("autosave_off", "关闭");
+            m.insert("autosave_after_delay", "延迟后");
+            m.insert("autosave_on_focus_change", "失去焦点时");
+            m.insert("autosave_on_window_change", "切换活动窗口时");
+            m.insert("helix_mode", "Helix 模式");
+            m.insert(
+                "helix_mode_description",
+                "使用 Helix 风格的快捷键与选择方式。",
+            );
+            m.insert("cursor_blink", "光标闪烁");
+            m.insert("cursor_blink_description", "让文本光标闪烁。");
+            m.insert("cursor_shape", "光标形状");
+            m.insert("cursor_shape_description", "编辑器中光标的绘制方式。");
+            m.insert("cursor_shape_bar", "竖线");
+            m.insert("cursor_shape_block", "方块");
+            m.insert("cursor_shape_underline", "下划线");
+            m.insert("cursor_shape_hollow", "空心框");
+            m.insert("relative_line_numbers", "相对行号");
+            m.insert(
+                "relative_line_numbers_description",
+                "显示相对于光标所在行的行号。",
+            );
+            m.insert("relative_line_numbers_off", "关闭");
+            m.insert("relative_line_numbers_on", "开启");
+            m.insert("relative_line_numbers_wrapped", "按换行");
+            m.insert("line_height", "行高");
+            m.insert("line_height_description", "编辑器中行与行之间的间距。");
+            m.insert("line_height_comfortable", "舒适");
+            m.insert("line_height_standard", "标准");
+            m.insert("line_height_custom", "自定义");
+            m.insert("terminal_copy_on_select", "选中即复制");
+            m.insert(
+                "terminal_copy_on_select_description",
+                "选中文本后立即复制到剪贴板。",
+            );
+            m.insert("terminal_cursor_shape_description", "终端光标的绘制方式。");
+            m.insert("terminal_blinking", "光标闪烁");
+            m.insert("terminal_blinking_description", "控制终端光标是否闪烁。");
+            m.insert("terminal_blink_off", "从不");
+            m.insert("terminal_blink_follow", "跟随终端");
+            m.insert("terminal_blink_on", "始终");
+            m.insert("terminal_ligatures", "连字");
+            m.insert("terminal_ligatures_description", "渲染 ->、=> 等编程连字。");
+            m.insert("auto_update", "自动检查更新");
+            m.insert("auto_update_description", "在后台检查新版本。");
+            m.insert("reduce_motion", "减少动画");
+            m.insert("reduce_motion_description", "以静态方式呈现加载动画。");
+            m.insert("hide_mouse", "隐藏鼠标指针");
+            m.insert("hide_mouse_description", "输入时隐藏鼠标指针的时机。");
+            m.insert("hide_mouse_never", "从不");
+            m.insert("hide_mouse_on_typing", "输入时");
+            m.insert("hide_mouse_on_typing_and_action", "输入及执行操作时");
+            m.insert("format_on_save", "保存时格式化");
+            m.insert("format_on_save_description", "保存时自动格式化文件。");
+            m.insert("format_on_save_off", "关闭");
+            m.insert("format_on_save_on", "开启");
+            m.insert("format_on_save_modifications", "仅修改的行");
+            m.insert("soft_wrap", "自动换行");
+            m.insert("soft_wrap_description", "编辑器中长行的换行方式。");
+            m.insert("soft_wrap_off", "关闭");
+            m.insert("soft_wrap_editor_width", "按编辑器宽度");
+            m.insert("soft_wrap_bounded", "按首选行宽");
+            m.insert("show_whitespaces", "显示空白字符");
+            m.insert(
+                "show_whitespaces_description",
+                "在编辑器中显示制表符和空格。",
+            );
+            m.insert("show_whitespaces_none", "从不");
+            m.insert("show_whitespaces_selection", "选区中");
+            m.insert("show_whitespaces_boundary", "边界处");
+            m.insert("show_whitespaces_trailing", "仅行尾");
+            m.insert("show_whitespaces_all", "始终");
+            m.insert("terminal_background_opacity", "背景不透明度");
+            m.insert(
+                "terminal_background_opacity_description",
+                "让终端背景半透明。",
+            );
+            m.insert("terminal_background_blur", "背景模糊");
+            m.insert(
+                "terminal_background_blur_description",
+                "模糊半透明终端后的桌面。",
+            );
+            m.insert("terminal_image_display", "内联图片");
+            m.insert(
+                "terminal_image_display_description",
+                "在终端中渲染转义序列产生的图片。",
+            );
+            m.insert("terminal_bell", "响铃");
+            m.insert("terminal_bell_description", "终端触发响铃时播放声音。");
+            m.insert("terminal_unlimited_scroll_history", "无限滚动历史");
+            m.insert(
+                "terminal_unlimited_scroll_history_description",
+                "保留完整的滚动历史。",
+            );
             m.insert("recent_terminals", "最近终端");
             m.insert("recent_folders", "最近文件夹");
             m.insert("open_recent_project", "打开最近项目");
@@ -688,6 +913,102 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("clipboard_delete", "刪除");
             m.insert("clipboard_just_now", "剛剛");
             m.insert("clipboard_chars", "{count} 字元");
+            m.insert("autosave", "自動儲存");
+            m.insert("autosave_description", "編輯檔案時自動儲存。");
+            m.insert("autosave_off", "關閉");
+            m.insert("autosave_after_delay", "延遲後");
+            m.insert("autosave_on_focus_change", "失去焦點時");
+            m.insert("autosave_on_window_change", "切換作用中視窗時");
+            m.insert("helix_mode", "Helix 模式");
+            m.insert(
+                "helix_mode_description",
+                "使用 Helix 風格的快速鍵與選取方式。",
+            );
+            m.insert("cursor_blink", "游標閃爍");
+            m.insert("cursor_blink_description", "讓文字游標閃爍。");
+            m.insert("cursor_shape", "游標形狀");
+            m.insert("cursor_shape_description", "編輯器中游標的繪製方式。");
+            m.insert("cursor_shape_bar", "直線");
+            m.insert("cursor_shape_block", "方塊");
+            m.insert("cursor_shape_underline", "底線");
+            m.insert("cursor_shape_hollow", "空心框");
+            m.insert("relative_line_numbers", "相對行號");
+            m.insert(
+                "relative_line_numbers_description",
+                "顯示相對於游標所在行的行號。",
+            );
+            m.insert("relative_line_numbers_off", "關閉");
+            m.insert("relative_line_numbers_on", "開啟");
+            m.insert("relative_line_numbers_wrapped", "依換行");
+            m.insert("line_height", "行高");
+            m.insert("line_height_description", "編輯器中行與行之間的間距。");
+            m.insert("line_height_comfortable", "舒適");
+            m.insert("line_height_standard", "標準");
+            m.insert("line_height_custom", "自訂");
+            m.insert("terminal_copy_on_select", "選取即複製");
+            m.insert(
+                "terminal_copy_on_select_description",
+                "選取文字後立即複製到剪貼簿。",
+            );
+            m.insert("terminal_cursor_shape_description", "終端游標的繪製方式。");
+            m.insert("terminal_blinking", "游標閃爍");
+            m.insert("terminal_blinking_description", "控制終端游標是否閃爍。");
+            m.insert("terminal_blink_off", "從不");
+            m.insert("terminal_blink_follow", "跟隨終端");
+            m.insert("terminal_blink_on", "始終");
+            m.insert("terminal_ligatures", "連字");
+            m.insert("terminal_ligatures_description", "呈現 ->、=> 等程式連字。");
+            m.insert("auto_update", "自動檢查更新");
+            m.insert("auto_update_description", "在背景檢查新版本。");
+            m.insert("reduce_motion", "減少動畫");
+            m.insert("reduce_motion_description", "以靜態方式呈現載入動畫。");
+            m.insert("hide_mouse", "隱藏滑鼠游標");
+            m.insert("hide_mouse_description", "輸入時隱藏滑鼠游標的時機。");
+            m.insert("hide_mouse_never", "從不");
+            m.insert("hide_mouse_on_typing", "輸入時");
+            m.insert("hide_mouse_on_typing_and_action", "輸入及執行操作時");
+            m.insert("format_on_save", "儲存時格式化");
+            m.insert("format_on_save_description", "儲存時自動格式化檔案。");
+            m.insert("format_on_save_off", "關閉");
+            m.insert("format_on_save_on", "開啟");
+            m.insert("format_on_save_modifications", "僅修改的行");
+            m.insert("soft_wrap", "自動換行");
+            m.insert("soft_wrap_description", "編輯器中長行的換行方式。");
+            m.insert("soft_wrap_off", "關閉");
+            m.insert("soft_wrap_editor_width", "依編輯器寬度");
+            m.insert("soft_wrap_bounded", "依偏好的行寬");
+            m.insert("show_whitespaces", "顯示空白字元");
+            m.insert(
+                "show_whitespaces_description",
+                "在編輯器中顯示定位字元和空格。",
+            );
+            m.insert("show_whitespaces_none", "從不");
+            m.insert("show_whitespaces_selection", "選取範圍中");
+            m.insert("show_whitespaces_boundary", "邊界處");
+            m.insert("show_whitespaces_trailing", "僅行尾");
+            m.insert("show_whitespaces_all", "始終");
+            m.insert("terminal_background_opacity", "背景不透明度");
+            m.insert(
+                "terminal_background_opacity_description",
+                "讓終端背景半透明。",
+            );
+            m.insert("terminal_background_blur", "背景模糊");
+            m.insert(
+                "terminal_background_blur_description",
+                "模糊半透明終端後的桌面。",
+            );
+            m.insert("terminal_image_display", "內嵌圖片");
+            m.insert(
+                "terminal_image_display_description",
+                "在終端中呈現跳脫序列產生的圖片。",
+            );
+            m.insert("terminal_bell", "鈴聲");
+            m.insert("terminal_bell_description", "終端觸發鈴聲時播放音效。");
+            m.insert("terminal_unlimited_scroll_history", "無限捲動歷史");
+            m.insert(
+                "terminal_unlimited_scroll_history_description",
+                "保留完整的捲動歷史。",
+            );
             m.insert("open_recent_project", "開啟最近專案");
             m.insert("agent", "Agent");
             m.insert("split_pane", "分割窗格");
