@@ -27,6 +27,17 @@ impl Render for AppTitleBar {
                 .pr_2()
                 .gap_1()
                 .child(
+                    IconButton::new("open-command-history", IconName::Clock)
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::text(i18n::t("command_history")))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(
+                                Box::new(crate::command_history::OpenCommandHistory),
+                                cx,
+                            );
+                        }),
+                )
+                .child(
                     IconButton::new("open-clipboard-history", IconName::Copy)
                         .icon_size(IconSize::Small)
                         .tooltip(Tooltip::text(i18n::t("clipboard")))

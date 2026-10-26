@@ -2,6 +2,7 @@ mod app_icon;
 mod app_menus;
 mod app_title_bar;
 mod clipboard_history;
+mod command_history;
 mod file_list_panel;
 mod ipc;
 mod keymap_settings;
@@ -339,6 +340,7 @@ fn main() {
         file_list_panel::init(cx);
         app_title_bar::init(cx);
         clipboard_history::init(cx);
+        command_history::init(cx);
         search::init(cx);
         cx.set_global(workspace::PaneSearchBarCallbacks {
             setup_search_bar: |languages, toolbar, window, cx| {

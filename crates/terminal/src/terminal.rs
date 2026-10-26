@@ -2688,6 +2688,19 @@ impl Terminal {
         last_non_empty_lines(&terminal, n)
     }
 
+    /// Text of the command that most recently finished (`OSC 133`), if the
+    /// shell reported shell integration markers.
+    pub fn last_command_text(&self) -> Option<String> {
+        let terminal = self.term.lock_unfair();
+        last_command_input_text(&terminal)
+    }
+
+    /// Captured output of the command that most recently finished (`OSC 133`).
+    pub fn last_command_output(&self) -> Option<String> {
+        let terminal = self.term.lock_unfair();
+        last_command_output_text(&terminal)
+    }
+
     pub fn focus_in(&self) {
         if self.last_content.mode.contains(Modes::FOCUS_IN_OUT) {
             self.write_to_pty("\x1b[I".as_bytes());

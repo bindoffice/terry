@@ -152,6 +152,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("clipboard_delete", "Delete");
             m.insert("clipboard_just_now", "just now");
             m.insert("clipboard_chars", "{count} chars");
+            m.insert("command_history", "Command History");
+            m.insert("command_history_search", "Search command history…");
+            m.insert("command_history_empty", "No commands recorded yet");
+            m.insert("command_history_no_matches", "No matching commands");
+            m.insert("command_history_exit", "exit {code}");
             m.insert("autosave", "Autosave");
             m.insert(
                 "autosave_description",
@@ -551,6 +556,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("clipboard_delete", "删除");
             m.insert("clipboard_just_now", "刚刚");
             m.insert("clipboard_chars", "{count} 字符");
+            m.insert("command_history", "命令历史");
+            m.insert("command_history_search", "搜索命令历史…");
+            m.insert("command_history_empty", "还没有命令记录");
+            m.insert("command_history_no_matches", "没有匹配的命令");
+            m.insert("command_history_exit", "退出码 {code}");
             m.insert("autosave", "自动保存");
             m.insert("autosave_description", "编辑文件时自动保存。");
             m.insert("autosave_off", "关闭");
@@ -917,6 +927,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("clipboard_delete", "刪除");
             m.insert("clipboard_just_now", "剛剛");
             m.insert("clipboard_chars", "{count} 字元");
+            m.insert("command_history", "指令歷史");
+            m.insert("command_history_search", "搜尋指令歷史…");
+            m.insert("command_history_empty", "尚無指令記錄");
+            m.insert("command_history_no_matches", "沒有符合的指令");
+            m.insert("command_history_exit", "結束碼 {code}");
             m.insert("autosave", "自動儲存");
             m.insert("autosave_description", "編輯檔案時自動儲存。");
             m.insert("autosave_off", "關閉");

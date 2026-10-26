@@ -850,6 +850,14 @@ pub fn init(cx: &mut App) {
                 panel.update(cx, |panel, cx| panel.open_tmux_picker(window, cx));
             });
         });
+        workspace.register_action(
+            |workspace, _: &crate::command_history::OpenCommandHistory, _window, cx| {
+                let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
+                    return;
+                };
+                crate::command_history::open(Some(panel.downgrade()), cx);
+            },
+        );
         workspace.register_action(|workspace, _: &SelectTerminalColorScheme, window, cx| {
             let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
                 return;
@@ -1002,6 +1010,8 @@ pub struct TerminalListPanel {
     agent_idle_refresh: Option<Task<()>>,
     /// Debounced disk write after a terminal cwd change.
     cwd_persist_task: Task<()>,
+    /// Debounced disk write after the command history changes.
+    command_history_persist: Task<()>,
     /// After session restore, ignore process-info reports of `$HOME` that would
     /// clobber a more specific restored path while shell rc finishes.
     restore_cwd_guard_until: Option<std::time::Instant>,
@@ -1112,6 +1122,7 @@ impl TerminalListPanel {
             terminal_activity: HashMap::default(),
             agent_idle_refresh: None,
             cwd_persist_task: Task::ready(()),
+            command_history_persist: Task::ready(()),
             restore_cwd_guard_until: None,
             parked_agent_sessions: Vec::new(),
             detached_sessions: Vec::new(),
@@ -1207,6 +1218,31 @@ impl TerminalListPanel {
                 this.write_session_file(cx, false);
             })
             .ok();
+        });
+    }
+
+    fn schedule_command_history_persist(&mut self, cx: &mut Context<Self>) {
+        self.command_history_persist = cx.spawn(async move |_this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(800))
+                .await;
+            cx.update(|cx| crate::command_history::CommandHistory::persist(cx));
+        });
+    }
+
+    /// Writes `command` to the active terminal and submits it. Used by the
+    /// command history window.
+    pub fn run_command_in_active_terminal(&mut self, command: &str, cx: &mut Context<Self>) {
+        let Some(view) = self.active_terminal_view(cx) else {
+            return;
+        };
+        let mut input = command.as_bytes().to_vec();
+        input.push(b'\r');
+        view.update(cx, |view, cx| {
+            view.terminal().update(cx, |terminal, cx| {
+                terminal.input(input);
+                cx.notify();
+            });
         });
     }
 
@@ -3258,7 +3294,7 @@ impl TerminalListPanel {
         let terminal = terminal_view.read(cx).terminal().clone();
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe(&terminal, move |this, term, event, cx| {
-            if matches!(event, terminal::Event::LastCommandFinished(_)) {
+            if let terminal::Event::LastCommandFinished(code) = event {
                 // Ignore the synthetic "command finished" emitted for the
                 // initial prompt while a session is still restoring.
                 if this.session_restoring
@@ -3267,6 +3303,22 @@ impl TerminalListPanel {
                         .is_some_and(|until| std::time::Instant::now() < until)
                 {
                     return;
+                }
+                // Record the finished command in the cross-session history.
+                let captured = {
+                    let term = term.read(cx);
+                    term.last_command_text().map(|command| {
+                        (
+                            command,
+                            term.last_command_output(),
+                            term.working_directory()
+                                .map(|path| path.display().to_string()),
+                        )
+                    })
+                };
+                if let Some((command, output, cwd)) = captured {
+                    crate::command_history::CommandHistory::record(command, output, cwd, *code, cx);
+                    this.schedule_command_history_persist(cx);
                 }
                 // A command finished in a terminal the user is not looking
                 // at: mark its group so the sidebar shows activity.
