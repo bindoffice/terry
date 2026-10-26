@@ -68,11 +68,42 @@ fn main() {
 
     zlog::init();
     zlog::init_output_stderr();
+    // Keep a log file as well: when the app is launched from Finder there is no
+    // stderr to read, so a startup failure would otherwise leave no trace.
+    if let Some(parent) = paths::log_file().parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    if let Err(error) = zlog::init_output_file(paths::log_file(), Some(paths::old_log_file())) {
+        log::error!(
+            "Failed to open log file {}: {error}",
+            paths::log_file().display()
+        );
+    }
+    // First line of every launch. If a "it does not start" report has no line
+    // here, the process died before it reached this point — typically an
+    // unsigned arm64 binary killed by the kernel.
+    log::info!(
+        "terry {} starting (pid {}, {})",
+        env!("TERRY_VERSION"),
+        std::process::id(),
+        std::env::consts::ARCH
+    );
 
     // If another Terry instance is already running, focus it and exit. This
     // also keeps two processes from writing the same session files.
-    if !ipc::acquire_single_instance() {
-        return;
+    //
+    // The handoff is reported on stderr: exiting silently looks exactly like a
+    // binary that refuses to start, which is especially confusing when the
+    // instance holding the lock is an older (or x86) build. `--new-instance`
+    // skips the check so a freshly built binary can run next to an old one.
+    if !std::env::args().any(|arg| arg == "--new-instance") {
+        if let Some(running) = ipc::acquire_single_instance() {
+            eprintln!("{}", running.describe());
+            // Flush before exiting: log records are written by a background
+            // thread, and this process is about to return from `main`.
+            zlog::flush();
+            return;
+        }
     }
 
     // Restore last login-shell PATH/etc. immediately so session terminals do
@@ -93,7 +124,13 @@ fn main() {
     let (ipc_port, ipc_token) = session::ipc_server::start_ipc_server(ipc_requests_tx).unwrap();
     let ipc_info = serde_json::json!({
         "port": ipc_port,
-        "token": ipc_token
+        "token": ipc_token,
+        // Diagnostics for the "another instance is already running" message.
+        "pid": std::process::id(),
+        "exe": std::env::current_exe()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        "arch": std::env::consts::ARCH,
     });
 
     let ipc_path = paths::data_dir().join("ipc.json");

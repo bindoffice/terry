@@ -97,12 +97,22 @@ fn print_cli_usage() {
     println!("  send-text TEXT        向当前活动的终端粘贴文本（换行会作为回车发送）");
     println!("  send-text -- TEXT     以 -- 分隔，原样发送后续文本");
     println!("  help                  显示本帮助");
+    println!();
+    println!("选项:");
+    println!("  --new-instance        即使已有实例在运行，也启动一个新实例");
 }
 
 #[derive(serde::Deserialize)]
 struct IpcInfo {
     port: u16,
     token: String,
+    /// Diagnostics written by newer builds; older `ipc.json` files omit them.
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    exe: Option<PathBuf>,
+    #[serde(default)]
+    arch: Option<String>,
 }
 
 fn ipc_info_path() -> PathBuf {
@@ -136,21 +146,88 @@ fn try_create_instance_lock(path: &Path) -> bool {
     }
 }
 
-/// Ensure only one GUI process owns the session files. If another instance is
-/// already running, ask it to focus and return `false` so the caller exits.
+fn read_lock_pid() -> Option<u32> {
+    let contents = std::fs::read_to_string(instance_lock_path()).ok()?;
+    contents.trim().parse().ok()
+}
+
+/// Details about the instance that accepted a forwarded launch.
 ///
-/// Returns `true` when this process may start the GUI. A crashed process can
+/// Exiting after a handoff used to be completely silent, which is
+/// indistinguishable from a binary that refuses to run — especially when the
+/// instance holding the lock is an older build, or an x86 build under Rosetta.
+pub struct RunningInstance {
+    pid: Option<u32>,
+    port: Option<u16>,
+    executable: Option<PathBuf>,
+    arch: Option<String>,
+}
+
+impl RunningInstance {
+    fn load() -> Self {
+        let info = read_ipc_info();
+        let pid = info
+            .as_ref()
+            .and_then(|info| info.pid)
+            .or_else(read_lock_pid);
+        let port = info.as_ref().map(|info| info.port);
+        let (executable, arch) = match info {
+            Some(info) => (info.exe, info.arch),
+            None => (None, None),
+        };
+        Self {
+            pid,
+            port,
+            executable,
+            arch,
+        }
+    }
+
+    /// Explanation printed to stderr by the process that is about to exit.
+    pub fn describe(&self) -> String {
+        let mut details = Vec::new();
+        if let Some(pid) = self.pid {
+            details.push(format!("pid {pid}"));
+        }
+        if let Some(executable) = &self.executable {
+            details.push(executable.display().to_string());
+        }
+        if let Some(arch) = &self.arch {
+            details.push(arch.clone());
+        }
+
+        let mut message = if details.is_empty() {
+            "terry: 已有 Terry 实例在运行，本次启动已转交给它，因此没有打开新窗口。\n".to_string()
+        } else {
+            format!(
+                "terry: 已有 Terry 实例在运行（{}），本次启动已转交给它，因此没有打开新窗口。\n",
+                details.join(", ")
+            )
+        };
+        if let Some(port) = self.port {
+            message.push_str(&format!("terry: 该实例的 IPC 端口为 {port}。\n"));
+        }
+        message.push_str("terry: 请先退出该实例，或使用 terry --new-instance 强制启动新实例。\n");
+        message
+    }
+}
+
+/// Ensure only one GUI process owns the session files. If another instance is
+/// already running, ask it to focus and return details about it so the caller
+/// can explain why it is exiting.
+///
+/// Returns `None` when this process may start the GUI. A crashed process can
 /// leave a stale lock; in that case the lock is reclaimed after the focus
 /// attempts fail. If the lock cannot be created at all (permissions), startup
 /// proceeds anyway rather than blocking the user.
-pub fn acquire_single_instance() -> bool {
+pub fn acquire_single_instance() -> Option<RunningInstance> {
     let path = instance_lock_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
 
     if try_create_instance_lock(&path) {
-        return true;
+        return None;
     }
 
     // Give an instance that is still booting time to publish ipc.json, then
@@ -158,7 +235,7 @@ pub fn acquire_single_instance() -> bool {
     let mut ipc_attempts = 0;
     for _ in 0..20 {
         if focus_existing_instance() {
-            return false;
+            return Some(RunningInstance::load());
         }
         if read_ipc_info().is_some() {
             ipc_attempts += 1;
@@ -171,10 +248,13 @@ pub fn acquire_single_instance() -> bool {
 
     let _ = std::fs::remove_file(&path);
     if try_create_instance_lock(&path) {
-        return true;
+        return None;
     }
     // Another process won the race after the stale lock was removed.
-    !focus_existing_instance()
+    if focus_existing_instance() {
+        return Some(RunningInstance::load());
+    }
+    None
 }
 
 /// Remove the lock file on a clean quit, but only if this process still owns
@@ -317,9 +397,7 @@ pub fn init(mut request_rx: futures::channel::mpsc::UnboundedReceiver<IpcRequest
                 }
                 IpcRequestKind::ReadScreen { terminal_id } => read_screen(cx, terminal_id).await,
                 IpcRequestKind::GetContext { terminal_id } => get_context(cx, terminal_id).await,
-                IpcRequestKind::Notify { title, message } => {
-                    notify(cx, title, &message).await
-                }
+                IpcRequestKind::Notify { title, message } => notify(cx, title, &message).await,
             };
             reply.send(outcome).ok();
         }
@@ -581,11 +659,9 @@ async fn send_keys(
                 let option_as_meta = TerminalSettings::get_global(cx).option_as_meta;
                 view.update(cx, move |view, cx| {
                     view.terminal().update(cx, |terminal, _cx| {
-                        let handled = Keystroke::parse(&keys)
-                            .ok()
-                            .is_some_and(|keystroke| {
-                                terminal.try_keystroke(&keystroke, option_as_meta)
-                            });
+                        let handled = Keystroke::parse(&keys).ok().is_some_and(|keystroke| {
+                            terminal.try_keystroke(&keystroke, option_as_meta)
+                        });
                         if !handled {
                             terminal.input(keys.into_bytes());
                         }
@@ -684,4 +760,47 @@ async fn open_workspace_window(cx: &mut AsyncApp) -> Result<WindowHandle<MultiWo
             .and_then(|handle| handle.downcast::<MultiWorkspace>())
             .ok_or_else(|| "new workspace window did not appear".to_string())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunningInstance;
+    use std::path::PathBuf;
+
+    #[test]
+    fn describe_reports_the_instance_that_received_the_launch() {
+        let instance = RunningInstance {
+            pid: Some(42),
+            port: Some(1234),
+            executable: Some(PathBuf::from(
+                "/Applications/Terry.app/Contents/MacOS/terry",
+            )),
+            arch: Some("aarch64".to_string()),
+        };
+
+        let message = instance.describe();
+        assert!(message.contains("pid 42"), "{message}");
+        assert!(
+            message.contains("/Applications/Terry.app/Contents/MacOS/terry"),
+            "{message}"
+        );
+        assert!(message.contains("aarch64"), "{message}");
+        assert!(message.contains("1234"), "{message}");
+        assert!(message.contains("--new-instance"), "{message}");
+    }
+
+    #[test]
+    fn describe_still_explains_the_exit_without_details() {
+        let instance = RunningInstance {
+            pid: None,
+            port: None,
+            executable: None,
+            arch: None,
+        };
+
+        let message = instance.describe();
+        assert!(message.contains("已有 Terry 实例在运行"), "{message}");
+        assert!(message.contains("--new-instance"), "{message}");
+        assert!(!message.contains("IPC"), "{message}");
+    }
 }
