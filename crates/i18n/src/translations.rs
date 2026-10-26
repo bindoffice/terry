@@ -301,6 +301,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("agent_switcher_search", "Switch to agent session…");
             m.insert("agent_switcher_empty", "No agent sessions");
             m.insert("agent_switcher_no_matches", "No matching agent sessions");
+            m.insert("review_agent_changes", "Review agent changes");
             m.insert("recent_terminals", "Recent Terminals");
             m.insert("recent_folders", "Recent Folders");
             m.insert("open_recent_project", "Open Recent Project");
@@ -688,6 +689,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("agent_switcher_search", "切换到 Agent 会话…");
             m.insert("agent_switcher_empty", "没有 Agent 会话");
             m.insert("agent_switcher_no_matches", "没有匹配的 Agent 会话");
+            m.insert("review_agent_changes", "审查 Agent 的改动");
             m.insert("recent_terminals", "最近终端");
             m.insert("recent_folders", "最近文件夹");
             m.insert("open_recent_project", "打开最近项目");
@@ -1075,6 +1077,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("agent_switcher_search", "切換到 Agent 工作階段…");
             m.insert("agent_switcher_empty", "沒有 Agent 工作階段");
             m.insert("agent_switcher_no_matches", "沒有符合的 Agent 工作階段");
+            m.insert("review_agent_changes", "審查 Agent 的變更");
             m.insert("open_recent_project", "開啟最近專案");
             m.insert("agent", "Agent");
             m.insert("split_pane", "分割窗格");

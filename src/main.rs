@@ -257,6 +257,7 @@ fn main() {
 
         GitHostingProviderRegistry::set_global(git_hosting_provider_registry, cx);
         git_hosting_providers::init(cx);
+        git_ui::init(cx);
 
         let client = Client::production(cx);
         cx.set_http_client(client.http_client());

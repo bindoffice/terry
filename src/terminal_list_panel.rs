@@ -35,6 +35,8 @@ actions!(
     [
         /// Focuses the next terminal whose agent is waiting for input.
         FocusNextWaitingAgent,
+        /// Opens the project diff so the changes an agent made can be reviewed.
+        ReviewAgentChanges,
     ]
 );
 
@@ -987,6 +989,9 @@ pub fn init(cx: &mut App) {
                 crate::agent_switcher::open(panel.downgrade(), cx);
             },
         );
+        workspace.register_action(|workspace, _: &ReviewAgentChanges, window, cx| {
+            git_ui::project_diff::ProjectDiff::deploy_at(workspace, None, window, cx);
+        });
         workspace.register_action(|workspace, _: &SelectTerminalColorScheme, window, cx| {
             let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
                 return;
@@ -5971,6 +5976,19 @@ impl Render for TerminalListPanel {
                                     .on_click(|_, window, cx| {
                                         window.dispatch_action(
                                             Box::new(zed_actions::assistant::ToggleFocus),
+                                            cx,
+                                        );
+                                    }),
+                            )
+                            .child(
+                                IconButton::new("review-agent-changes", IconName::Diff)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text(i18n::t("review_agent_changes")))
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(
+                                                crate::terminal_list_panel::ReviewAgentChanges,
+                                            ),
                                             cx,
                                         );
                                     }),
