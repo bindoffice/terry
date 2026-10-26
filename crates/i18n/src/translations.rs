@@ -310,6 +310,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("open_in_browser", "Open");
             m.insert("kill_process", "Kill process");
             m.insert("refresh", "Refresh");
+            m.insert("switch_worktree", "Switch worktree…");
             m.insert("recent_terminals", "Recent Terminals");
             m.insert("recent_folders", "Recent Folders");
             m.insert("open_recent_project", "Open Recent Project");
@@ -706,6 +707,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("open_in_browser", "打开");
             m.insert("kill_process", "结束进程");
             m.insert("refresh", "刷新");
+            m.insert("switch_worktree", "切换 worktree…");
             m.insert("recent_terminals", "最近终端");
             m.insert("recent_folders", "最近文件夹");
             m.insert("open_recent_project", "打开最近项目");
@@ -1102,6 +1104,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("open_in_browser", "開啟");
             m.insert("kill_process", "結束程序");
             m.insert("refresh", "重新整理");
+            m.insert("switch_worktree", "切換 worktree…");
             m.insert("open_recent_project", "開啟最近專案");
             m.insert("agent", "Agent");
             m.insert("split_pane", "分割窗格");

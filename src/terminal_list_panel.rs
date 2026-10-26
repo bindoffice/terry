@@ -523,6 +523,13 @@ fn agent_badge_for(
     })
 }
 
+/// Branch and dirty marker for a terminal's working directory.
+#[derive(Clone)]
+struct GitBadge {
+    branch: SharedString,
+    dirty: usize,
+}
+
 /// Snapshot of an agent terminal for the agent switcher.
 #[derive(Clone)]
 pub struct AgentTerminalEntry {
@@ -1151,6 +1158,10 @@ pub struct TerminalListPanel {
     /// Terminals whose agent went quiet after producing output, i.e. are most
     /// likely waiting for user input.
     agent_waiting: HashSet<EntityId>,
+    /// Repository subscriptions, so git changes refresh the sidebar.
+    git_subscriptions: Vec<Subscription>,
+    git_subscribed: HashSet<EntityId>,
+    _git_store_subscription: Subscription,
     /// Pending refresh that lets the agent badge fall back to idle once output
     /// stops, so the panel does not re-render continuously.
     agent_idle_refresh: Option<Task<()>>,
@@ -1237,6 +1248,41 @@ impl TerminalListPanel {
             }
         });
 
+        // Refresh the sidebar when git status or the checked-out branch changes.
+        let _git_store_subscription = {
+            let git_store = project.read(cx).git_store().clone();
+            cx.subscribe(
+                &git_store,
+                |this, _, _: &project::git_store::GitStoreEvent, cx| {
+                    this.sync_git_subscriptions(cx);
+                    cx.notify();
+                },
+            )
+        };
+        let mut git_subscriptions: Vec<Subscription> = Vec::new();
+        let mut git_subscribed: HashSet<EntityId> = HashSet::default();
+        let repositories: Vec<_> = project
+            .read(cx)
+            .repositories(cx)
+            .values()
+            .cloned()
+            .collect();
+        for repository in repositories {
+            git_subscribed.insert(repository.entity_id());
+            git_subscriptions.push(cx.subscribe(
+                &repository,
+                |_, _, event: &project::git_store::RepositoryEvent, cx| {
+                    if matches!(
+                        event,
+                        project::git_store::RepositoryEvent::StatusesChanged
+                            | project::git_store::RepositoryEvent::HeadChanged
+                    ) {
+                        cx.notify();
+                    }
+                },
+            ));
+        }
+
         Self {
             workspace: workspace.downgrade(),
             project: project.downgrade(),
@@ -1267,6 +1313,9 @@ impl TerminalListPanel {
             _terminal_subscriptions: HashMap::default(),
             terminal_activity: HashMap::default(),
             agent_waiting: HashSet::default(),
+            git_subscriptions,
+            git_subscribed,
+            _git_store_subscription,
             agent_idle_refresh: None,
             cwd_persist_task: Task::ready(()),
             command_history_persist: Task::ready(()),
@@ -1376,6 +1425,77 @@ impl TerminalListPanel {
             .chain(self.detached_sessions.iter().map(|session| &session.view))
             .find(|view| view.entity_id() == id)
             .cloned()
+    }
+
+    /// Subscribes to repositories that appeared after the panel was created.
+    fn sync_git_subscriptions(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.project.upgrade() else {
+            return;
+        };
+        let repositories: Vec<_> = project
+            .read(cx)
+            .repositories(cx)
+            .values()
+            .cloned()
+            .collect();
+        for repository in repositories {
+            if !self.git_subscribed.insert(repository.entity_id()) {
+                continue;
+            }
+            self.git_subscriptions.push(cx.subscribe(
+                &repository,
+                |_, _, event: &project::git_store::RepositoryEvent, cx| {
+                    if matches!(
+                        event,
+                        project::git_store::RepositoryEvent::StatusesChanged
+                            | project::git_store::RepositoryEvent::HeadChanged
+                    ) {
+                        cx.notify();
+                    }
+                },
+            ));
+        }
+    }
+
+    /// Branch and dirty-file count for the repository containing `cwd`.
+    fn git_badge_for(&self, cwd: Option<&std::path::Path>, cx: &App) -> Option<GitBadge> {
+        let cwd = cwd?;
+        let project = self.project.upgrade()?;
+        let project = project.read(cx);
+        let mut best: Option<(usize, GitBadge)> = None;
+        for repository in project.repositories(cx).values() {
+            let snapshot = repository.read(cx).snapshot();
+            let root = snapshot.work_directory_abs_path.as_ref();
+            if !cwd.starts_with(root) {
+                continue;
+            }
+            let depth = root.components().count();
+            if best
+                .as_ref()
+                .is_some_and(|(best_depth, _)| *best_depth >= depth)
+            {
+                continue;
+            }
+            let branch = snapshot
+                .branch
+                .as_ref()
+                .map(|branch| branch.name().to_string())
+                .or_else(|| {
+                    snapshot
+                        .head_commit
+                        .as_ref()
+                        .map(|commit| commit.short_sha().to_string())
+                })
+                .unwrap_or_default();
+            best = Some((
+                depth,
+                GitBadge {
+                    branch: branch.into(),
+                    dirty: snapshot.status_summary().count,
+                },
+            ));
+        }
+        best.map(|(_, badge)| badge)
     }
 
     /// Shell process ids of every terminal in this panel, including detached
@@ -2631,11 +2751,14 @@ impl TerminalListPanel {
                     });
 
             let inspect_view = terminal_view.clone();
-            let menu =
-                menu.separator()
-                    .entry(i18n::t("inspect_processes"), None, move |_window, cx| {
-                        crate::process_inspector::open(inspect_view.downgrade(), cx);
-                    });
+            let menu = menu
+                .separator()
+                .entry(i18n::t("inspect_processes"), None, move |_window, cx| {
+                    crate::process_inspector::open(inspect_view.downgrade(), cx);
+                })
+                .entry(i18n::t("switch_worktree"), None, move |window, cx| {
+                    window.dispatch_action(zed_actions::git::Worktree.boxed_clone(), cx);
+                });
 
             let export_view = terminal_view.clone();
             let menu = menu.submenu(i18n::t("export_scrollback"), move |menu, _window, _cx| {
@@ -5569,6 +5692,7 @@ impl Render for TerminalListPanel {
                 SharedString,
                 Option<AgentBadge>,
                 Option<i64>,
+                Option<GitBadge>,
             )>,
         )> = Vec::new();
         for group in &self.groups {
@@ -5581,7 +5705,15 @@ impl Render for TerminalListPanel {
                     let badge =
                         agent_badge_for(tv, &self.terminal_activity, &self.agent_waiting, cx);
                     let progress = tv.read(cx).notification_progress();
-                    terminals.push((tv.clone(), sidebar_terminal_name(tv, cx), badge, progress));
+                    let cwd = tv.read(cx).terminal().read(cx).working_directory();
+                    let git = self.git_badge_for(cwd.as_deref(), cx);
+                    terminals.push((
+                        tv.clone(),
+                        sidebar_terminal_name(tv, cx),
+                        badge,
+                        progress,
+                        git,
+                    ));
                 }
             }
             groups_snapshot.push((
@@ -5760,7 +5892,7 @@ impl Render for TerminalListPanel {
             );
 
             if is_expanded {
-                for (ix, (terminal_view, title, agent_badge, progress)) in
+                for (ix, (terminal_view, title, agent_badge, progress, git_badge)) in
                     terminals.into_iter().enumerate()
                 {
                     let is_terminal_active = Some(terminal_view.entity_id()) == active_terminal_id;
@@ -5815,6 +5947,34 @@ impl Render for TerminalListPanel {
                                                         .truncate(),
                                                 ),
                                             )
+                                            .map({
+                                                let git_badge = git_badge.clone();
+                                                move |this| match git_badge {
+                                                    Some(badge) => this.child(
+                                                        h_flex()
+                                                            .gap_1()
+                                                            .items_center()
+                                                            .child(
+                                                                Icon::new(IconName::GitBranch)
+                                                                    .size(IconSize::Indicator)
+                                                                    .color(Color::Muted),
+                                                            )
+                                                            .child(
+                                                                Label::new(badge.branch)
+                                                                    .size(LabelSize::XSmall)
+                                                                    .color(Color::Muted),
+                                                            )
+                                                            .when(badge.dirty > 0, |this| {
+                                                                this.child(
+                                                                    Label::new("\u{25cf}")
+                                                                        .size(LabelSize::XSmall)
+                                                                        .color(Color::Warning),
+                                                                )
+                                                            }),
+                                                    ),
+                                                    None => this,
+                                                }
+                                            })
                                             .map({
                                                 move |this| match progress {
                                                     Some(progress) if progress >= 0 => this.child(
