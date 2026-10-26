@@ -11,6 +11,7 @@ mod llm_provider_settings;
 mod process_inspector;
 mod quake_terminal;
 mod remote_hosts;
+mod resource_usage;
 mod scrollback_export;
 mod settings_window;
 mod status_bar_items;
@@ -759,6 +760,8 @@ fn init_workspace(
     let active_terminal_context =
         cx.new(|_| status_bar_items::ActiveTerminalContext::new(&terminal_panel));
     let active_terminal_cwd = cx.new(|_| status_bar_items::ActiveTerminalCwd::new());
+    let terminal_resource_usage =
+        cx.new(|cx| status_bar_items::TerminalResourceUsage::new(&terminal_panel, cx));
     let active_file_name = cx.new(|_| workspace::active_file_name::ActiveFileName::new());
     let active_buffer_encoding =
         cx.new(|_| encoding_selector::ActiveBufferEncoding::new(workspace));
@@ -780,6 +783,7 @@ fn init_workspace(
         // with group name immediately to its left.
         status_bar.prepend_right_item(active_terminal_context, window, cx);
         status_bar.prepend_right_item(active_terminal_cwd, window, cx);
+        status_bar.add_right_item(terminal_resource_usage, window, cx);
     });
 }
 

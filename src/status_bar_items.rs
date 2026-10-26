@@ -273,6 +273,154 @@ impl StatusItemView for ActiveTerminalCwd {
     }
 }
 
+/// Status-bar item: aggregated CPU and memory of every terminal session.
+pub struct TerminalResourceUsage {
+    panel: WeakEntity<TerminalListPanel>,
+    display: Option<SharedString>,
+    tooltip: Option<SharedString>,
+    task: Option<gpui::Task<()>>,
+}
+
+impl TerminalResourceUsage {
+    pub fn new(panel: &Entity<TerminalListPanel>, cx: &mut Context<Self>) -> Self {
+        let mut this = Self {
+            panel: panel.downgrade(),
+            display: None,
+            tooltip: None,
+            task: None,
+        };
+        this.start(cx);
+        this
+    }
+
+    fn start(&mut self, cx: &mut Context<Self>) {
+        self.task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(2500))
+                    .await;
+
+                let pids = this.update(cx, |this, cx| {
+                    this.panel
+                        .upgrade()
+                        .map(|panel| panel.read(cx).session_pids(cx))
+                        .unwrap_or_default()
+                });
+                let Ok(pids) = pids else {
+                    break;
+                };
+                if pids.is_empty() {
+                    let alive = this
+                        .update(cx, |this, cx| {
+                            this.clear();
+                            cx.notify();
+                        })
+                        .is_ok();
+                    if !alive {
+                        break;
+                    }
+                    continue;
+                }
+
+                let usage = cx
+                    .background_executor()
+                    .spawn(async move { crate::resource_usage::measure(&pids) })
+                    .await;
+                let alive = this
+                    .update(cx, |this, cx| {
+                        this.set_usage(&usage);
+                        cx.notify();
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn clear(&mut self) {
+        self.display = None;
+        self.tooltip = None;
+    }
+
+    fn set_usage(&mut self, usage: &crate::resource_usage::Usage) {
+        if usage.total_processes == 0 {
+            self.clear();
+            return;
+        }
+        self.display = Some(
+            format!(
+                "{} · {:.0}%",
+                format_bytes(usage.total_memory),
+                usage.total_cpu
+            )
+            .into(),
+        );
+
+        let mut tooltip = String::new();
+        for (index, session) in usage.sessions.iter().enumerate() {
+            if index > 0 {
+                tooltip.push('\n');
+            }
+            tooltip.push_str(&format!(
+                "#{}  {:.0}%  {}  ({} procs)",
+                session.pid,
+                session.cpu,
+                format_bytes(session.memory),
+                session.processes
+            ));
+        }
+        self.tooltip = Some(tooltip.into());
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if bytes >= GB {
+        format!("{:.1}G", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{}M", bytes / MB)
+    } else {
+        format!("{}K", bytes.max(KB) / KB)
+    }
+}
+
+impl Render for TerminalResourceUsage {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(display) = self.display.clone() else {
+            return Empty.into_any_element();
+        };
+        let tooltip = self.tooltip.clone().unwrap_or_else(|| display.clone());
+
+        div()
+            .child(
+                Button::new("terminal-resource-usage", display)
+                    .label_size(LabelSize::Small)
+                    .tooltip(Tooltip::text(tooltip)),
+            )
+            .into_any_element()
+    }
+}
+
+impl EventEmitter<workspace::ToolbarItemEvent> for TerminalResourceUsage {}
+
+impl StatusItemView for TerminalResourceUsage {
+    fn set_active_pane_item(
+        &mut self,
+        _active_pane_item: Option<&dyn ItemHandle>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+    }
+
+    fn hide_setting(&self, _: &App) -> Option<HideStatusItem> {
+        None
+    }
+}
+
 fn format_cwd(path: &Path) -> (SharedString, SharedString) {
     let full: SharedString = path.display().to_string().into();
     let compact = path.compact();

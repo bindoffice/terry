@@ -1378,6 +1378,23 @@ impl TerminalListPanel {
             .cloned()
     }
 
+    /// Shell process ids of every terminal in this panel, including detached
+    /// sessions. Used by the resource monitor.
+    pub fn session_pids(&self, cx: &App) -> Vec<u32> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.terminals.iter())
+            .chain(self.detached_sessions.iter().map(|session| &session.view))
+            .filter_map(|view| {
+                view.read(cx)
+                    .terminal()
+                    .read(cx)
+                    .pid_getter()
+                    .map(|getter| getter.fallback_pid().as_u32())
+            })
+            .collect()
+    }
+
     /// Agent terminals across all groups, for the agent switcher.
     pub fn agent_terminals(&self, cx: &App) -> Vec<AgentTerminalEntry> {
         let mut entries = Vec::new();
