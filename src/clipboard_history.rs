@@ -129,6 +129,15 @@ impl ClipboardHistory {
     }
 }
 
+/// Adds `text` to the clipboard history from outside the clipboard window.
+pub fn add_text(text: &str, cx: &mut App) {
+    if text.trim().is_empty() {
+        return;
+    }
+    cx.global_mut::<ClipboardHistory>().touch(text);
+    ClipboardHistory::persist(cx);
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

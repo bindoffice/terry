@@ -157,6 +157,14 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("command_history_empty", "No commands recorded yet");
             m.insert("command_history_no_matches", "No matching commands");
             m.insert("command_history_exit", "exit {code}");
+            m.insert("export_scrollback", "Export scrollback");
+            m.insert("export_scrollback_clipboard", "Copy last {count} lines");
+            m.insert("export_scrollback_markdown", "Copy last {count} lines as Markdown");
+            m.insert(
+                "export_scrollback_history",
+                "Add last {count} lines to clipboard history",
+            );
+            m.insert("export_scrollback_file", "Save last {count} lines to file…");
             m.insert("autosave", "Autosave");
             m.insert(
                 "autosave_description",
@@ -561,6 +569,17 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("command_history_empty", "还没有命令记录");
             m.insert("command_history_no_matches", "没有匹配的命令");
             m.insert("command_history_exit", "退出码 {code}");
+            m.insert("export_scrollback", "导出滚动缓冲");
+            m.insert("export_scrollback_clipboard", "复制最近 {count} 行");
+            m.insert(
+                "export_scrollback_markdown",
+                "以 Markdown 复制最近 {count} 行",
+            );
+            m.insert(
+                "export_scrollback_history",
+                "把最近 {count} 行加入剪贴板历史",
+            );
+            m.insert("export_scrollback_file", "保存最近 {count} 行到文件…");
             m.insert("autosave", "自动保存");
             m.insert("autosave_description", "编辑文件时自动保存。");
             m.insert("autosave_off", "关闭");
@@ -932,6 +951,17 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("command_history_empty", "尚無指令記錄");
             m.insert("command_history_no_matches", "沒有符合的指令");
             m.insert("command_history_exit", "結束碼 {code}");
+            m.insert("export_scrollback", "匯出捲動緩衝");
+            m.insert("export_scrollback_clipboard", "複製最近 {count} 行");
+            m.insert(
+                "export_scrollback_markdown",
+                "以 Markdown 複製最近 {count} 行",
+            );
+            m.insert(
+                "export_scrollback_history",
+                "把最近 {count} 行加入剪貼簿歷史",
+            );
+            m.insert("export_scrollback_file", "儲存最近 {count} 行到檔案…");
             m.insert("autosave", "自動儲存");
             m.insert("autosave_description", "編輯檔案時自動儲存。");
             m.insert("autosave_off", "關閉");

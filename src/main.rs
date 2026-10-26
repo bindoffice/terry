@@ -9,6 +9,7 @@ mod keymap_settings;
 mod llm_provider_settings;
 mod quake_terminal;
 mod remote_hosts;
+mod scrollback_export;
 mod settings_window;
 mod status_bar_items;
 mod terminal_list_panel;

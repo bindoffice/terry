@@ -858,6 +858,42 @@ pub fn init(cx: &mut App) {
                 crate::command_history::open(Some(panel.downgrade()), cx);
             },
         );
+        workspace.register_action(
+            |workspace, _: &crate::scrollback_export::CopyScrollback, window, cx| {
+                if let Some(view) = crate::scrollback_export::active_terminal(workspace, cx) {
+                    window.defer(cx, move |_window, cx| {
+                        crate::scrollback_export::copy(&view, cx);
+                    });
+                }
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &crate::scrollback_export::CopyScrollbackAsMarkdown, window, cx| {
+                if let Some(view) = crate::scrollback_export::active_terminal(workspace, cx) {
+                    window.defer(cx, move |_window, cx| {
+                        crate::scrollback_export::copy_markdown(&view, cx);
+                    });
+                }
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &crate::scrollback_export::ScrollbackToClipboardHistory, window, cx| {
+                if let Some(view) = crate::scrollback_export::active_terminal(workspace, cx) {
+                    window.defer(cx, move |_window, cx| {
+                        crate::scrollback_export::add_to_history(&view, cx);
+                    });
+                }
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &crate::scrollback_export::SaveScrollbackToFile, window, cx| {
+                if let Some(view) = crate::scrollback_export::active_terminal(workspace, cx) {
+                    window.defer(cx, move |_window, cx| {
+                        crate::scrollback_export::save_to_file(&view, cx);
+                    });
+                }
+            },
+        );
         workspace.register_action(|workspace, _: &SelectTerminalColorScheme, window, cx| {
             let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
                 return;
@@ -2407,6 +2443,42 @@ impl TerminalListPanel {
                             this.detach_terminal(terminal_id, window, cx);
                         });
                     });
+
+            let export_view = terminal_view.clone();
+            let menu = menu.submenu(i18n::t("export_scrollback"), move |menu, _window, _cx| {
+                let copy_view = export_view.clone();
+                let markdown_view = export_view.clone();
+                let history_view = export_view.clone();
+                let file_view = export_view.clone();
+                menu.entry(
+                    crate::scrollback_export::label("export_scrollback_clipboard"),
+                    None,
+                    move |_window, cx| {
+                        crate::scrollback_export::copy(&copy_view, cx);
+                    },
+                )
+                .entry(
+                    crate::scrollback_export::label("export_scrollback_markdown"),
+                    None,
+                    move |_window, cx| {
+                        crate::scrollback_export::copy_markdown(&markdown_view, cx);
+                    },
+                )
+                .entry(
+                    crate::scrollback_export::label("export_scrollback_history"),
+                    None,
+                    move |_window, cx| {
+                        crate::scrollback_export::add_to_history(&history_view, cx);
+                    },
+                )
+                .entry(
+                    crate::scrollback_export::label("export_scrollback_file"),
+                    None,
+                    move |_window, cx| {
+                        crate::scrollback_export::save_to_file(&file_view, cx);
+                    },
+                )
+            });
 
             menu.entry(i18n::t("close"), None, move |window, cx| {
                 close_panel.update(cx, |this, cx| {
