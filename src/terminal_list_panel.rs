@@ -495,6 +495,39 @@ fn agent_style(agent: &AgentCli) -> (Color, IconName) {
     }
 }
 
+/// Whether an agent still looks busy even though it has been quiet for a
+/// while. Two cheap signals are used: `OSC 9` progress reported by the
+/// application, and spinner/busy markers in the terminal title.
+fn agent_is_busy(view: &Entity<TerminalView>, cx: &App) -> bool {
+    let view = view.read(cx);
+    if view.notification_progress().is_some() {
+        return true;
+    }
+    let terminal = view.terminal().read(cx);
+    title_looks_busy(&terminal.title(false)) || title_looks_busy(&terminal.breadcrumb_text)
+}
+
+/// Heuristic busy markers used by coding-agent TUIs. Braille spinners are
+/// matched by codepoint so any spinner frame counts.
+fn title_looks_busy(text: &str) -> bool {
+    if text
+        .chars()
+        .any(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch))
+    {
+        return true;
+    }
+    let lower = text.to_lowercase();
+    const MARKERS: &[&str] = &[
+        "esc to interrupt",
+        "esc to cancel",
+        "thinking",
+        "working",
+        "generating",
+        "processing",
+    ];
+    MARKERS.iter().any(|marker| lower.contains(marker))
+}
+
 /// Builds the sidebar agent badge for a terminal, if a coding agent is running.
 fn agent_badge_for(
     view: &Entity<TerminalView>,
@@ -506,13 +539,15 @@ fn agent_badge_for(
     // for a one-off "park this session" decision, but would light up the badge
     // for ordinary terminals whose title happens to mention an agent.
     let view_id = view.entity_id();
+    let busy = agent_is_busy(view, cx);
     let view = view.read(cx);
     let terminal = view.terminal().read(cx);
     let command = terminal.foreground_process_command_name()?;
     let agent = agent_for_basename(&command_basename(&command))?;
     let working = terminal_activity
         .get(&view_id)
-        .is_some_and(|last| last.elapsed() < AGENT_WORKING_WINDOW);
+        .is_some_and(|last| last.elapsed() < AGENT_WORKING_WINDOW)
+        || busy;
     let (color, icon) = agent_style(agent);
     Some(AgentBadge {
         name: agent_display_name(agent),
@@ -1429,6 +1464,67 @@ impl TerminalListPanel {
             })
             .ok();
         });
+    }
+
+    /// Schedules the check that turns quiet agent terminals into "waiting for
+    /// input". No-op when a check is already pending.
+    fn ensure_agent_idle_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.agent_idle_refresh.is_some() {
+            return;
+        }
+        self.agent_idle_refresh = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AGENT_WORKING_WINDOW).await;
+            this.update(cx, |this, cx| {
+                this.agent_idle_refresh = None;
+                let now = std::time::Instant::now();
+                let expired: Vec<EntityId> = this
+                    .terminal_activity
+                    .iter()
+                    .filter(|(_, last)| now.duration_since(**last) >= AGENT_WORKING_WINDOW)
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in &expired {
+                    this.terminal_activity.remove(id);
+                }
+                if expired.is_empty() {
+                    return;
+                }
+                // An agent that stops producing output is usually waiting for
+                // input, but it may also be thinking. Skip terminals that still
+                // report progress or advertise a busy state in their title.
+                let mut newly_waiting = Vec::new();
+                let mut skipped_busy = false;
+                for id in expired {
+                    if this.agent_waiting.contains(&id) {
+                        continue;
+                    }
+                    let Some(view) = this.view_by_id_any(id) else {
+                        continue;
+                    };
+                    if agent_badge_for(&view, &this.terminal_activity, &this.agent_waiting, cx)
+                        .is_none()
+                    {
+                        continue;
+                    }
+                    if agent_is_busy(&view, cx) {
+                        skipped_busy = true;
+                        continue;
+                    }
+                    this.agent_waiting.insert(id);
+                    newly_waiting.push(view);
+                }
+                if !newly_waiting.is_empty() {
+                    cx.notify();
+                    notify_agents_waiting(&newly_waiting, cx);
+                }
+                if skipped_busy {
+                    // Re-check later; the agent may finish thinking and become
+                    // idle without producing any further output.
+                    this.ensure_agent_idle_refresh(cx);
+                }
+            })
+            .ok();
+        }));
     }
 
     /// Terminal view by id, including detached sessions.
@@ -3843,54 +3939,7 @@ impl TerminalListPanel {
                     cx.notify();
                 }
                 if this.agent_idle_refresh.is_none() {
-                    this.agent_idle_refresh = Some(cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(AGENT_WORKING_WINDOW).await;
-                        this.update(cx, |this, cx| {
-                            this.agent_idle_refresh = None;
-                            let now = std::time::Instant::now();
-                            let expired: Vec<EntityId> = this
-                                .terminal_activity
-                                .iter()
-                                .filter(|(_, last)| {
-                                    now.duration_since(**last) >= AGENT_WORKING_WINDOW
-                                })
-                                .map(|(id, _)| *id)
-                                .collect();
-                            for id in &expired {
-                                this.terminal_activity.remove(id);
-                            }
-                            if expired.is_empty() {
-                                return;
-                            }
-                            // An agent that stops producing output is most
-                            // likely waiting for input; record it and notify.
-                            let mut newly_waiting = Vec::new();
-                            for id in expired {
-                                if this.agent_waiting.contains(&id) {
-                                    continue;
-                                }
-                                let Some(view) = this.view_by_id_any(id) else {
-                                    continue;
-                                };
-                                if agent_badge_for(
-                                    &view,
-                                    &this.terminal_activity,
-                                    &this.agent_waiting,
-                                    cx,
-                                )
-                                .is_some()
-                                {
-                                    this.agent_waiting.insert(id);
-                                    newly_waiting.push(view);
-                                }
-                            }
-                            if !newly_waiting.is_empty() {
-                                cx.notify();
-                                notify_agents_waiting(&newly_waiting, cx);
-                            }
-                        })
-                        .ok();
-                    }));
+                    this.ensure_agent_idle_refresh(cx);
                 }
             },
         ));
