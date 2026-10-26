@@ -315,6 +315,8 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("stop_recording", "Stop recording session");
             m.insert("open_recordings", "Open recordings folder");
             m.insert("recording", "Recording");
+            m.insert("save_group_as_template", "Save group as template");
+            m.insert("new_group_from_template", "New group from template");
             m.insert("recent_terminals", "Recent Terminals");
             m.insert("recent_folders", "Recent Folders");
             m.insert("open_recent_project", "Open Recent Project");
@@ -716,6 +718,8 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("stop_recording", "停止录制会话");
             m.insert("open_recordings", "打开录制文件夹");
             m.insert("recording", "录制中");
+            m.insert("save_group_as_template", "保存分组为模板");
+            m.insert("new_group_from_template", "从模板新建分组");
             m.insert("recent_terminals", "最近终端");
             m.insert("recent_folders", "最近文件夹");
             m.insert("open_recent_project", "打开最近项目");
@@ -1117,6 +1121,8 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("stop_recording", "停止錄製工作階段");
             m.insert("open_recordings", "開啟錄製資料夾");
             m.insert("recording", "錄製中");
+            m.insert("save_group_as_template", "儲存群組為範本");
+            m.insert("new_group_from_template", "從範本新增群組");
             m.insert("open_recent_project", "開啟最近專案");
             m.insert("agent", "Agent");
             m.insert("split_pane", "分割窗格");

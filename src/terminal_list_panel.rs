@@ -886,6 +886,48 @@ impl GroupLayoutMode {
     }
 }
 
+/// A saved workspace layout that can be re-created as a new group.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WorkspaceTemplate {
+    name: String,
+    terminals: Vec<PersistedTerminal>,
+    #[serde(default)]
+    layout: Option<GroupLayoutNode>,
+    #[serde(default)]
+    layout_mode: Option<GroupLayoutMode>,
+    #[serde(default)]
+    broadcast_input: bool,
+}
+
+fn templates_path() -> std::path::PathBuf {
+    paths::data_dir().join("workspace_templates.json")
+}
+
+fn load_templates() -> Vec<WorkspaceTemplate> {
+    let Ok(text) = std::fs::read_to_string(templates_path()) else {
+        return Vec::new();
+    };
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+fn write_templates(templates: &[WorkspaceTemplate]) {
+    let path = templates_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string_pretty(templates) {
+        Ok(text) => {
+            if let Err(error) = std::fs::write(&path, text) {
+                log::error!(
+                    "workspace templates: failed to write {}: {error}",
+                    path.display()
+                );
+            }
+        }
+        Err(error) => log::error!("workspace templates: failed to serialize: {error}"),
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct PersistedGroup {
     name: String,
@@ -2637,12 +2679,22 @@ impl TerminalListPanel {
             .groups
             .iter()
             .any(|g| g.id == group_id && g.broadcast_input);
+        let group_name = panel
+            .read(cx)
+            .groups
+            .iter()
+            .find(|g| g.id == group_id)
+            .map(|g| g.name.to_string())
+            .unwrap_or_default();
+        let templates = load_templates();
         ContextMenu::build(window, cx, move |menu, _, _| {
             let view1 = panel.clone();
             let view2 = panel.clone();
             let view3 = panel.clone();
             let view4 = panel.clone();
             let view5 = panel.clone();
+            let view6 = panel.clone();
+            let view7 = panel.clone();
             let menu = menu
                 .entry(i18n::t("rename"), None, move |window, cx| {
                     view1.update(cx, |this, cx| {
@@ -2764,6 +2816,40 @@ impl TerminalListPanel {
                     });
                 },
             );
+            let template_panel = view6;
+            let template_name = group_name.clone();
+            let menu = menu.separator().entry(
+                i18n::t("save_group_as_template"),
+                None,
+                move |window, cx| {
+                    template_panel.update(cx, |this, cx| {
+                        this.save_active_group_as_template(template_name.clone(), cx);
+                    });
+                    let _ = window;
+                },
+            );
+            let menu = if templates.is_empty() {
+                menu
+            } else {
+                let submenu_panel = view7;
+                let templates = templates.clone();
+                menu.submenu(
+                    i18n::t("new_group_from_template"),
+                    move |mut menu, _window, _cx| {
+                        for template in &templates {
+                            let panel = submenu_panel.clone();
+                            let template = template.clone();
+                            let label = template.name.clone();
+                            menu = menu.entry(label, None, move |window, cx| {
+                                panel.update(cx, |this, cx| {
+                                    this.add_group_from_template(template.clone(), window, cx);
+                                });
+                            });
+                        }
+                        menu
+                    },
+                )
+            };
             if can_delete {
                 menu.separator()
                     .entry(i18n::t("delete_group"), None, move |window, cx| {
@@ -4514,6 +4600,118 @@ impl TerminalListPanel {
                 (Member::Axis(axis), focus_pane, focus_terminal)
             }
         }
+    }
+
+    /// Captures the active group (terminals, launch origins, cwd and layout)
+    /// as a reusable template. Re-saving under the same name overwrites it.
+    fn save_active_group_as_template(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(group) = self
+            .groups
+            .iter()
+            .find(|group| group.id == self.active_group_id)
+        else {
+            return;
+        };
+        let group_name = group.name.clone();
+        let layout_mode = Some(group.layout_mode);
+        let broadcast_input = group.broadcast_input;
+        let layout = group
+            .saved_layout
+            .clone()
+            .or_else(|| self.capture_active_group_layout(cx));
+
+        let mut terminals = Vec::new();
+        for view in &group.terminals {
+            let id = view.entity_id();
+            let view_ref = view.read(cx);
+            let cwd = view_ref.terminal().read(cx).working_directory();
+            let title = view_ref.custom_title().map(|title| title.to_string());
+            let launch = self.terminal_launches.get(&id).cloned();
+            terminals.push(PersistedTerminal {
+                cwd,
+                title,
+                color_scheme: None,
+                font_size: None,
+                launch,
+            });
+        }
+
+        let template = WorkspaceTemplate {
+            name,
+            terminals,
+            layout,
+            layout_mode,
+            broadcast_input,
+        };
+        let mut templates = load_templates();
+        templates.retain(|existing| existing.name != template.name);
+        templates.push(template);
+        write_templates(&templates);
+        log::info!("workspace templates: saved template from group {group_name}");
+        cx.notify();
+    }
+
+    /// Creates a new group from `template` and spawns its terminals.
+    fn add_group_from_template(
+        &mut self,
+        template: WorkspaceTemplate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let group_id = self.new_group_id();
+        self.groups.push(TerminalGroup {
+            id: group_id,
+            name: template.name.clone().into(),
+            terminals: Vec::new(),
+            collapsed: false,
+            has_unread: false,
+            saved_layout: template.layout.clone(),
+            layout_mode: template.layout_mode.unwrap_or(GroupLayoutMode::Manual),
+            broadcast_input: template.broadcast_input,
+            session_terminal_count: None,
+            restore_slots: Vec::new(),
+        });
+        self.active_group_id = group_id;
+
+        let mut spawned = 0;
+        for terminal in template.terminals {
+            self.spawn_terminal(
+                group_id,
+                terminal.cwd.clone(),
+                None,
+                None,
+                SpawnRestore {
+                    index: None,
+                    title: terminal.title.clone(),
+                    color_scheme: terminal.color_scheme.clone(),
+                    font_size: terminal.font_size,
+                    launch: terminal.launch.clone(),
+                },
+                None,
+                None,
+                window,
+                cx,
+            );
+            spawned += 1;
+        }
+        // An empty template still yields a usable shell.
+        if spawned == 0 {
+            self.spawn_terminal(
+                group_id,
+                None,
+                None,
+                None,
+                SpawnRestore::default(),
+                None,
+                None,
+                window,
+                cx,
+            );
+        }
+
+        self.restore_active_group_layout(window, cx);
+        self.save_session(cx);
+        cx.notify();
     }
 
     fn restore_active_group_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
