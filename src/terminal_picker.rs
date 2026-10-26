@@ -27,6 +27,9 @@ pub enum TerminalPickerMode {
     },
     TmuxSessions {
         sessions: Vec<TmuxSession>,
+        /// Mirror the session's panes as native terminals via control mode
+        /// instead of attaching a raw PTY.
+        native: bool,
     },
     ColorSchemes {
         terminal_id: EntityId,
@@ -37,7 +40,7 @@ pub enum TerminalPickerMode {
 #[derive(Clone, Copy)]
 enum Kind {
     Ssh { remote_tmux: bool },
-    Tmux,
+    Tmux { native: bool },
     ColorScheme,
 }
 
@@ -49,6 +52,7 @@ enum EntryAction {
     },
     Tmux {
         session: String,
+        native: bool,
     },
     ColorScheme {
         name: Option<String>,
@@ -119,7 +123,7 @@ impl TerminalPicker {
                     entries,
                 )
             }
-            TerminalPickerMode::TmuxSessions { sessions } => {
+            TerminalPickerMode::TmuxSessions { sessions, native } => {
                 let entries = sessions
                     .into_iter()
                     .map(|session| Entry {
@@ -127,11 +131,12 @@ impl TerminalPicker {
                         detail: Some(session.detail()),
                         action: EntryAction::Tmux {
                             session: session.name,
+                            native,
                         },
                     })
                     .collect();
                 (
-                    Kind::Tmux,
+                    Kind::Tmux { native },
                     "Attach tmux session…".into(),
                     Some("Type a session name and press enter".into()),
                     entries,
@@ -269,12 +274,12 @@ impl TerminalPickerDelegate {
                         },
                     });
                 }
-                Kind::Tmux => {
+                Kind::Tmux { native } => {
                     let session = remote_hosts::tmux_session_name(&query);
                     self.entries.push(Entry {
                         label: format!("Create session “{session}”"),
                         detail: Some("new tmux session".to_string()),
-                        action: EntryAction::Tmux { session },
+                        action: EntryAction::Tmux { session, native },
                     });
                 }
                 Kind::ColorScheme => {}
@@ -362,8 +367,12 @@ impl PickerDelegate for TerminalPickerDelegate {
                     } => {
                         panel.connect_ssh(target, remote_tmux, window, cx);
                     }
-                    EntryAction::Tmux { session } => {
-                        panel.attach_tmux_session(session, window, cx);
+                    EntryAction::Tmux { session, native } => {
+                        if native {
+                            panel.attach_tmux_control_session(session, window, cx);
+                        } else {
+                            panel.attach_tmux_session(session, window, cx);
+                        }
                     }
                     EntryAction::ColorScheme { name } => {
                         if let Some(terminal_id) = color_scheme_target {

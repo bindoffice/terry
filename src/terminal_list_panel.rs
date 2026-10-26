@@ -2770,6 +2770,7 @@ impl TerminalListPanel {
             let panel_a = panel.clone();
             let panel_b = panel.clone();
             let panel_c = panel.clone();
+            let panel_d = panel.clone();
             let menu = menu
                 .separator()
                 .entry(i18n::t("connect_ssh_host"), None, move |window, cx| {
@@ -2780,6 +2781,9 @@ impl TerminalListPanel {
                 })
                 .entry(i18n::t("attach_tmux_session"), None, move |window, cx| {
                     panel_c.update(cx, |this, cx| this.open_tmux_picker(window, cx));
+                })
+                .entry(i18n::t("attach_tmux_native"), None, move |window, cx| {
+                    panel_d.update(cx, |this, cx| this.open_tmux_picker_mode(true, window, cx));
                 });
             let menu = if let Some(actions) = agent_actions {
                 let mut menu = menu.separator();
@@ -5631,6 +5635,16 @@ impl TerminalListPanel {
 
     /// Lists local tmux sessions off the UI thread, then opens the picker.
     pub fn open_tmux_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_tmux_picker_mode(false, window, cx);
+    }
+
+    /// Like [`Self::open_tmux_picker`], optionally mirroring panes natively.
+    pub fn open_tmux_picker_mode(
+        &mut self,
+        native: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn_in(window, async move |this, cx| {
             let sessions = cx
                 .background_executor()
@@ -5641,7 +5655,8 @@ impl TerminalListPanel {
                     return;
                 };
                 let panel = cx.entity();
-                let mode = crate::terminal_picker::TerminalPickerMode::TmuxSessions { sessions };
+                let mode =
+                    crate::terminal_picker::TerminalPickerMode::TmuxSessions { sessions, native };
                 workspace.update(cx, |workspace, cx| {
                     crate::terminal_picker::TerminalPicker::open(
                         workspace, panel, mode, window, cx,
@@ -5652,6 +5667,17 @@ impl TerminalListPanel {
             anyhow::Ok(())
         })
         .detach_and_log_err(cx);
+    }
+
+    /// Attaches a tmux session using control mode so its panes become native
+    /// terminals.
+    pub fn attach_tmux_control_session(
+        &mut self,
+        session: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::tmux_native::attach(session, window, cx);
     }
 
     /// Opens the color-scheme picker for the focused terminal.
