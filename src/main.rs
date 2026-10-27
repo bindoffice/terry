@@ -7,6 +7,7 @@ mod command_history;
 mod file_list_panel;
 mod ipc;
 mod keymap_settings;
+mod kittens;
 mod llm_provider_settings;
 mod process_inspector;
 mod quake_terminal;

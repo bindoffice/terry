@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use gpui::{
-    AnyWindowHandle, App, AsyncApp, EntityId, Keystroke, SystemNotification, WindowHandle, WindowId,
+    AnyWindowHandle, App, AsyncApp, EntityId, Keystroke, SystemNotification, WindowHandle,
+    WindowId, px,
 };
 use serde_json::{Value, json};
 use session::ipc_server::{IpcRequest, IpcRequestKind};
@@ -37,13 +38,22 @@ pub fn run_cli_subcommand(args: &[String]) -> Option<i32> {
                 2
             }
         }),
-        Some("send-text") => Some(match parse_send_text_args(&args[1..]) {
+        Some("send-text") => Some(match parse_text_args(&args[1..], "send-text") {
             Ok(text) => post_command("/api/send_text", &json!({ "text": text }).to_string()),
             Err(error) => {
                 eprintln!("{error}");
                 2
             }
         }),
+        Some("run") => Some(match parse_text_args(&args[1..], "run") {
+            Ok(text) => post_command("/api/run", &json!({ "text": text }).to_string()),
+            Err(error) => {
+                eprintln!("{error}");
+                2
+            }
+        }),
+        Some("session") => Some(run_session_cli(&args[1..])),
+        Some("kitten" | "plugin") => Some(crate::kittens::run_cli_subcommand(&args[1..])),
         Some("help" | "--help" | "-h") => {
             print_cli_usage();
             Some(0)
@@ -76,15 +86,50 @@ fn parse_new_tab_args(args: &[String]) -> Result<Option<PathBuf>, String> {
     Ok(cwd)
 }
 
-fn parse_send_text_args(args: &[String]) -> Result<String, String> {
+fn parse_text_args(args: &[String], command: &str) -> Result<String, String> {
     let args = match args.first().map(String::as_str) {
         Some("--") => &args[1..],
         _ => args,
     };
     if args.is_empty() {
-        return Err("send-text 需要文本参数，例如 terry send-text \"ls -la\"".to_string());
+        return Err(format!(
+            "{command} 需要文本参数，例如 terry {command} \"ls -la\""
+        ));
     }
     Ok(args.join(" "))
+}
+
+fn run_session_cli(args: &[String]) -> i32 {
+    let Some(command) = args.first().map(String::as_str) else {
+        eprintln!("用法: terry session list | save NAME | load NAME | delete NAME");
+        return 2;
+    };
+
+    let path = match command {
+        "list" => "/api/list_session_templates",
+        "save" => "/api/save_session_template",
+        "load" => "/api/load_session_template",
+        "delete" => "/api/delete_session_template",
+        "help" | "--help" | "-h" => {
+            print_cli_usage();
+            return 0;
+        }
+        other => {
+            eprintln!("未知 session 子命令: {other}");
+            return 2;
+        }
+    };
+
+    if command == "list" {
+        return post_command(path, "{}");
+    }
+
+    let name = args[1..].join(" ");
+    if name.trim().is_empty() {
+        eprintln!("terry session {command} 需要一个名称");
+        return 2;
+    }
+    post_command(path, &json!({ "name": name }).to_string())
 }
 
 fn print_cli_usage() {
@@ -94,8 +139,16 @@ fn print_cli_usage() {
     println!();
     println!("子命令:");
     println!("  new-tab [--cwd PATH]  在已运行的 Terry 实例中打开一个新的终端标签页");
-    println!("  send-text TEXT        向当前活动的终端粘贴文本（换行会作为回车发送）");
+    println!("  send-text TEXT        向当前活动的终端粘贴文本（不执行）");
+    println!("  run TEXT              向当前活动的终端粘贴文本并回车执行");
     println!("  send-text -- TEXT     以 -- 分隔，原样发送后续文本");
+    println!("  session list          列出已保存的 session 模板");
+    println!("  session save NAME     把当前分组保存为 session 模板");
+    println!("  session load NAME     从模板创建一个新的分组");
+    println!("  session delete NAME   删除 session 模板");
+    println!("  kitten list           列出可用的 kitten 插件");
+    println!("  kitten run NAME       运行 kitten 插件（也可直接 kitten NAME）");
+    println!("  kitten path           显示 kitten 搜索目录");
     println!("  help                  显示本帮助");
     println!();
     println!("选项:");
@@ -398,6 +451,58 @@ pub fn init(mut request_rx: futures::channel::mpsc::UnboundedReceiver<IpcRequest
                 IpcRequestKind::ReadScreen { terminal_id } => read_screen(cx, terminal_id).await,
                 IpcRequestKind::GetContext { terminal_id } => get_context(cx, terminal_id).await,
                 IpcRequestKind::Notify { title, message } => notify(cx, title, &message).await,
+                IpcRequestKind::CloseSession { terminal_id } => {
+                    close_session(cx, terminal_id).await
+                }
+                IpcRequestKind::DetachSession { terminal_id } => {
+                    detach_session(cx, terminal_id).await
+                }
+                IpcRequestKind::ReattachSession { terminal_id } => {
+                    reattach_session(cx, terminal_id).await
+                }
+                IpcRequestKind::ListDetached => list_detached(cx).await,
+                IpcRequestKind::RenameSession { terminal_id, title } => {
+                    rename_session(cx, terminal_id, title).await
+                }
+                IpcRequestKind::FocusGroup { group_id } => focus_group(cx, group_id).await,
+                IpcRequestKind::NewGroup { name, cwd } => new_group(cx, name, cwd).await,
+                IpcRequestKind::DeleteGroup { group_id } => delete_group(cx, group_id).await,
+                IpcRequestKind::RenameGroup { group_id, name } => {
+                    rename_group(cx, group_id, name).await
+                }
+                IpcRequestKind::MoveSession {
+                    terminal_id,
+                    group_id,
+                } => move_session(cx, terminal_id, group_id).await,
+                IpcRequestKind::SetGroupLayout { group_id, layout } => {
+                    set_group_layout(cx, group_id, layout).await
+                }
+                IpcRequestKind::SetBroadcast { group_id, enabled } => {
+                    set_broadcast(cx, group_id, enabled).await
+                }
+                IpcRequestKind::Scroll { terminal_id, to } => scroll(cx, terminal_id, to).await,
+                IpcRequestKind::SetFontSize { terminal_id, size } => {
+                    set_font_size(cx, terminal_id, size).await
+                }
+                IpcRequestKind::SetColorScheme { terminal_id, name } => {
+                    set_color_scheme(cx, terminal_id, name).await
+                }
+                IpcRequestKind::Run {
+                    terminal_id,
+                    text,
+                    enter,
+                } => run_command(cx, terminal_id, text, enter).await,
+                IpcRequestKind::NewWindow => new_window(cx).await,
+                IpcRequestKind::ListSessionTemplates => list_session_templates(cx).await,
+                IpcRequestKind::SaveSessionTemplate { name } => {
+                    save_session_template(cx, name).await
+                }
+                IpcRequestKind::LoadSessionTemplate { name } => {
+                    load_session_template(cx, name).await
+                }
+                IpcRequestKind::DeleteSessionTemplate { name } => {
+                    delete_session_template(cx, name).await
+                }
             };
             reply.send(outcome).ok();
         }
@@ -558,6 +663,618 @@ async fn send_text(cx: &mut AsyncApp, text: &str) -> Result<Value, String> {
 /// Brings the running workspace window to the front, opening one if Terry is
 /// alive but currently has no workspace window (macOS keeps the app running
 /// after the last window closes).
+async fn close_session(cx: &mut AsyncApp, terminal_id: Option<u64>) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let id = match terminal_id {
+                    Some(id) => EntityId::from(id),
+                    None => resolve_terminal(&panel, None, cx)?.entity_id(),
+                };
+                let closed =
+                    panel.update(cx, |panel, cx| panel.close_session_by_id(id, window, cx));
+                if !closed {
+                    return Err(format!("no terminal with id {}", id.as_u64()));
+                }
+                Ok(json!({
+                    "status": "ok",
+                    "action": "close_session",
+                    "terminal_id": id.as_u64(),
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn detach_session(cx: &mut AsyncApp, terminal_id: Option<u64>) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let id = match terminal_id {
+                    Some(id) => EntityId::from(id),
+                    None => resolve_terminal(&panel, None, cx)?.entity_id(),
+                };
+                let detached =
+                    panel.update(cx, |panel, cx| panel.detach_terminal_by_id(id, window, cx));
+                if !detached {
+                    return Err(format!("no terminal with id {}", id.as_u64()));
+                }
+                Ok(json!({
+                    "status": "ok",
+                    "action": "detach_session",
+                    "terminal_id": id.as_u64(),
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn reattach_session(cx: &mut AsyncApp, terminal_id: u64) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let attached = panel.update(cx, |panel, cx| {
+                    panel.reattach_terminal_by_id(EntityId::from(terminal_id), window, cx)
+                });
+                if !attached {
+                    return Err(format!("no detached terminal with id {terminal_id}"));
+                }
+                Ok(json!({
+                    "status": "ok",
+                    "action": "reattach_session",
+                    "terminal_id": terminal_id,
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn list_detached(cx: &mut AsyncApp) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                Ok(panel.read(cx).detached_sessions_json(cx))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn rename_session(
+    cx: &mut AsyncApp,
+    terminal_id: Option<u64>,
+    title: Option<String>,
+) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let view = resolve_terminal(&panel, terminal_id, cx)?;
+                let id = view.entity_id();
+                view.update(cx, move |view, cx| view.set_custom_title(title, cx));
+                Ok(json!({
+                    "status": "ok",
+                    "action": "rename_session",
+                    "terminal_id": id.as_u64(),
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn focus_group(cx: &mut AsyncApp, group_id: u64) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let focused = panel.update(cx, |panel, cx| {
+                    panel.focus_group_by_id(group_id, window, cx)
+                });
+                if !focused {
+                    return Err(format!("no group with id {group_id}"));
+                }
+                window.activate_window();
+                Ok(json!({
+                    "status": "ok",
+                    "action": "focus_group",
+                    "group_id": group_id,
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn new_group(
+    cx: &mut AsyncApp,
+    name: Option<String>,
+    cwd: Option<PathBuf>,
+) -> Result<Value, String> {
+    if let Some(cwd) = &cwd {
+        if !cwd.is_dir() {
+            return Err(format!("cwd 不存在: {}", cwd.display()));
+        }
+    }
+
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let group_id = panel.update(cx, |panel, cx| {
+                    panel.create_group_from_api(name, cwd, window, cx)
+                });
+                window.activate_window();
+                Ok(json!({
+                    "status": "ok",
+                    "action": "new_group",
+                    "group_id": group_id,
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn delete_group(cx: &mut AsyncApp, group_id: u64) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                panel.update(cx, |panel, cx| {
+                    panel.delete_group_by_id(group_id, window, cx)
+                })?;
+                Ok(json!({
+                    "status": "ok",
+                    "action": "delete_group",
+                    "group_id": group_id,
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn rename_group(cx: &mut AsyncApp, group_id: u64, name: String) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let renamed =
+                    panel.update(cx, |panel, cx| panel.rename_group_by_id(group_id, name, cx));
+                if !renamed {
+                    return Err(format!("no group with id {group_id}"));
+                }
+                Ok(json!({
+                    "status": "ok",
+                    "action": "rename_group",
+                    "group_id": group_id,
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn move_session(cx: &mut AsyncApp, terminal_id: u64, group_id: u64) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let moved = panel.update(cx, |panel, cx| {
+                    panel.move_terminal_to_group_by_id(
+                        EntityId::from(terminal_id),
+                        group_id,
+                        window,
+                        cx,
+                    )
+                });
+                if !moved {
+                    return Err(format!("no terminal {terminal_id} or group {group_id}"));
+                }
+                Ok(json!({
+                    "status": "ok",
+                    "action": "move_session",
+                    "terminal_id": terminal_id,
+                    "group_id": group_id,
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn set_group_layout(
+    cx: &mut AsyncApp,
+    group_id: u64,
+    layout: String,
+) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                panel.update(cx, |panel, cx| {
+                    panel.set_group_layout_by_id(group_id, &layout, window, cx)
+                })?;
+                Ok(json!({
+                    "status": "ok",
+                    "action": "set_group_layout",
+                    "group_id": group_id,
+                    "layout": layout,
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn set_broadcast(
+    cx: &mut AsyncApp,
+    group_id: Option<u64>,
+    enabled: bool,
+) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let affected = panel.update(cx, |panel, cx| {
+                    panel.set_broadcast_input_by_id(group_id, enabled, cx)
+                })?;
+                Ok(json!({
+                    "status": "ok",
+                    "action": "set_broadcast",
+                    "group_id": affected,
+                    "enabled": enabled,
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn scroll(cx: &mut AsyncApp, terminal_id: Option<u64>, to: String) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let view = resolve_terminal(&panel, terminal_id, cx)?;
+                let id = view.entity_id();
+                let terminal = view.read(cx).terminal().clone();
+                let applied = terminal.update(cx, |terminal, _| match to.as_str() {
+                    "top" => {
+                        terminal.scroll_to_top();
+                        true
+                    }
+                    "bottom" => {
+                        terminal.scroll_to_bottom();
+                        true
+                    }
+                    "page_up" => {
+                        terminal.scroll_page_up();
+                        true
+                    }
+                    "page_down" => {
+                        terminal.scroll_page_down();
+                        true
+                    }
+                    "line_up" => {
+                        terminal.scroll_line_up();
+                        true
+                    }
+                    "line_down" => {
+                        terminal.scroll_line_down();
+                        true
+                    }
+                    _ => false,
+                });
+                if !applied {
+                    return Err(format!("unknown scroll target {to:?}"));
+                }
+                Ok(json!({
+                    "status": "ok",
+                    "action": "scroll",
+                    "terminal_id": id.as_u64(),
+                    "to": to,
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn set_font_size(
+    cx: &mut AsyncApp,
+    terminal_id: Option<u64>,
+    size: Option<f32>,
+) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let view = resolve_terminal(&panel, terminal_id, cx)?;
+                let id = view.entity_id();
+                view.update(cx, move |view, cx| {
+                    view.set_font_size_override(size.map(px), cx);
+                });
+                Ok(json!({
+                    "status": "ok",
+                    "action": "set_font_size",
+                    "terminal_id": id.as_u64(),
+                    "size": size,
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn set_color_scheme(
+    cx: &mut AsyncApp,
+    terminal_id: Option<u64>,
+    name: Option<String>,
+) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let view = resolve_terminal(&panel, terminal_id, cx)?;
+                let id = view.entity_id();
+                let display_name = name.clone();
+                view.update(cx, move |view, cx| view.set_color_scheme(name, cx));
+                Ok(json!({
+                    "status": "ok",
+                    "action": "set_color_scheme",
+                    "terminal_id": id.as_u64(),
+                    "name": display_name,
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn run_command(
+    cx: &mut AsyncApp,
+    terminal_id: Option<u64>,
+    text: String,
+    enter: bool,
+) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let view = resolve_terminal(&panel, terminal_id, cx)?;
+                let id = view.entity_id();
+                let terminal = view.read(cx).terminal().clone();
+                terminal.update(cx, move |terminal, _| {
+                    terminal.paste(&text);
+                    if enter {
+                        terminal.input(b"\r".to_vec());
+                    }
+                });
+                Ok(json!({
+                    "status": "ok",
+                    "action": "run",
+                    "terminal_id": id.as_u64(),
+                    "enter": enter,
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn list_session_templates(cx: &mut AsyncApp) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                Ok(panel.read(cx).list_session_templates())
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn save_session_template(cx: &mut AsyncApp, name: String) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+    let saved_name = name.clone();
+
+    window
+        .update(cx, move |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                panel.update(cx, |panel, cx| panel.save_session_template(name, cx))?;
+                Ok(json!({
+                    "status": "ok",
+                    "action": "save_session_template",
+                    "name": saved_name,
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn load_session_template(cx: &mut AsyncApp, name: String) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                let group_id = panel.update(cx, |panel, cx| {
+                    panel.load_session_template(&name, window, cx)
+                })?;
+                window.activate_window();
+                Ok(json!({
+                    "status": "ok",
+                    "action": "load_session_template",
+                    "name": name,
+                    "group_id": group_id,
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn delete_session_template(cx: &mut AsyncApp, name: String) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+    let deleted_name = name.clone();
+
+    window
+        .update(cx, move |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                panel.update(cx, |panel, _cx| panel.delete_session_template(&name))?;
+                Ok(json!({
+                    "status": "ok",
+                    "action": "delete_session_template",
+                    "name": deleted_name,
+                }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn new_window(cx: &mut AsyncApp) -> Result<Value, String> {
+    let window = open_workspace_window(cx).await?;
+    let window_id = window.window_id().as_u64();
+    window
+        .update(cx, |_multi_workspace, window, _cx| {
+            window.activate_window();
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(json!({
+        "status": "ok",
+        "action": "new_window",
+        "window_id": window_id,
+    }))
+}
+
 async fn focus(cx: &mut AsyncApp) -> Result<Value, String> {
     match workspace_window(cx).await? {
         Some(window) => {
@@ -629,7 +1346,7 @@ fn resolve_terminal(
     match terminal_id {
         Some(id) => panel
             .read(cx)
-            .terminal_view_by_id(EntityId::from(id))
+            .view_by_id_any(EntityId::from(id))
             .ok_or_else(|| format!("no terminal with id {id}")),
         None => panel
             .read(cx)

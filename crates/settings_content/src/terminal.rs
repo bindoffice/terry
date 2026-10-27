@@ -317,6 +317,15 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: []
     pub smart_selection: Option<Vec<SmartSelectionRuleContent>>,
+    /// Custom hint rules. Each rule is a regular expression matched against
+    /// every visible line; matches are offered by the "Show Hints" action.
+    ///
+    /// Built-in hints cover URLs, filesystem paths, git hashes, UUIDs, and
+    /// IP addresses. Rules here are evaluated after the URL and path hints,
+    /// so a custom rule can refine other matches without hiding links.
+    ///
+    /// Default: []
+    pub hints: Option<Vec<HintRuleContent>>,
     /// Extra SSH hosts offered by the "Connect to SSH Host…" picker, in
     /// addition to the hosts discovered in `~/.ssh/config`.
     ///
@@ -507,6 +516,34 @@ pub enum SmartSelectionActionContent {
     Select,
     /// Select the matched text and copy it to the clipboard.
     Copy,
+}
+
+/// A custom hint rule: a regex and what selecting a match does.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct HintRuleContent {
+    /// Optional human-readable label shown in the hints picker.
+    pub name: Option<String>,
+    /// Regular expression matched against each visible terminal line.
+    pub regex: String,
+    /// What to do with the matched text.
+    ///
+    /// Default: "copy"
+    pub action: Option<HintActionContent>,
+}
+
+/// What a hint rule does with a match.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
+#[serde(rename_all = "snake_case")]
+pub enum HintActionContent {
+    /// Open the match as a URL or path.
+    Open,
+    /// Copy the match to the clipboard.
+    #[default]
+    Copy,
+    /// Paste the match into the terminal.
+    Paste,
+    /// Select the match in the terminal.
+    Select,
 }
 
 /// A user-defined SSH host offered by the terminal's SSH picker.

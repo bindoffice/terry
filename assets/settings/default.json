@@ -2151,6 +2151,15 @@
     // Timeout for hover and Cmd-click path hyperlink discovery in milliseconds. Specifying a
     // timeout of `0` will disable path hyperlinking in terminal.
     "path_hyperlink_timeout_ms": 1,
+    // Custom rules for the "Show Hints" action (Ctrl+Shift+E). Each rule is a
+    // regex matched against every visible line, plus an action: open, copy,
+    // paste, or select. Built-in hints already cover URLs, paths, git hashes,
+    // UUIDs, and IP addresses. For example:
+    //
+    // "hints": [
+    //   { "name": "Issue", "regex": "#\\d+", "action": "copy" }
+    // ]
+    "hints": [],
     // Whether to show a badge on the terminal panel icon with the count of open terminals.
     "show_count_badge": false,
     // Whether to invoke the OS-specific alert sound when the terminal bell (BEL character) is printed.

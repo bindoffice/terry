@@ -18,7 +18,7 @@ use alacritty_terminal::{
     sync::FairMutex,
     term::{
         Config, Osc52, RenderableCursor, Term, TermMode,
-        cell::{Cell as AlacCell, Flags, Hyperlink as AlacHyperlink},
+        cell::{Cell as AlacCell, CellTextSizing, Flags, Hyperlink as AlacHyperlink},
         search::{Match, RegexIter, RegexSearch},
     },
     tty,
@@ -491,6 +491,7 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
                     format(window_size_from_terminal_bounds(bounds))
                 }))
             }
+            AlacTermEvent::ResizeWindow { columns, rows } => Self::ResizeWindow { columns, rows },
             AlacTermEvent::CursorBlinkingChange => Self::CursorBlinkingChange,
             AlacTermEvent::Wakeup => Self::Wakeup,
             AlacTermEvent::Bell => Self::Bell,
@@ -679,6 +680,11 @@ impl Cell {
         self.cell.zerowidth()
     }
 
+    #[inline]
+    pub fn text_sizing(&self) -> Option<&CellTextSizing> {
+        self.cell.text_sizing()
+    }
+
     #[cfg(test)]
     pub(crate) fn push_zerowidth(&mut self, character: char) {
         self.cell.push_zerowidth(character);
@@ -696,7 +702,9 @@ impl Cell {
 
     #[inline]
     pub fn is_wide_char_spacer(&self) -> bool {
-        self.cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+        self.cell
+            .flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
     }
 
     #[inline]
@@ -799,6 +807,36 @@ impl Modes {
         add_alacritty_mode(&mut mode, self, Self::MOUSE_DRAG, TermMode::MOUSE_DRAG);
         add_alacritty_mode(&mut mode, self, Self::MOUSE_MOTION, TermMode::MOUSE_MOTION);
         add_alacritty_mode(&mut mode, self, Self::VI, TermMode::VI);
+        add_alacritty_mode(
+            &mut mode,
+            self,
+            Self::KITTY_DISAMBIGUATE_ESC_CODES,
+            TermMode::DISAMBIGUATE_ESC_CODES,
+        );
+        add_alacritty_mode(
+            &mut mode,
+            self,
+            Self::KITTY_REPORT_EVENT_TYPES,
+            TermMode::REPORT_EVENT_TYPES,
+        );
+        add_alacritty_mode(
+            &mut mode,
+            self,
+            Self::KITTY_REPORT_ALTERNATE_KEYS,
+            TermMode::REPORT_ALTERNATE_KEYS,
+        );
+        add_alacritty_mode(
+            &mut mode,
+            self,
+            Self::KITTY_REPORT_ALL_KEYS_AS_ESC,
+            TermMode::REPORT_ALL_KEYS_AS_ESC,
+        );
+        add_alacritty_mode(
+            &mut mode,
+            self,
+            Self::KITTY_REPORT_ASSOCIATED_TEXT,
+            TermMode::REPORT_ASSOCIATED_TEXT,
+        );
         mode
     }
 }
@@ -895,8 +933,32 @@ fn terminal_modes_from_alacritty(mode: TermMode) -> Modes {
     add_terminal_mode(
         &mut terminal_modes,
         mode,
-        TermMode::KITTY_KEYBOARD_PROTOCOL,
-        Modes::KITTY_KEYBOARD_PROTOCOL,
+        TermMode::DISAMBIGUATE_ESC_CODES,
+        Modes::KITTY_DISAMBIGUATE_ESC_CODES,
+    );
+    add_terminal_mode(
+        &mut terminal_modes,
+        mode,
+        TermMode::REPORT_EVENT_TYPES,
+        Modes::KITTY_REPORT_EVENT_TYPES,
+    );
+    add_terminal_mode(
+        &mut terminal_modes,
+        mode,
+        TermMode::REPORT_ALTERNATE_KEYS,
+        Modes::KITTY_REPORT_ALTERNATE_KEYS,
+    );
+    add_terminal_mode(
+        &mut terminal_modes,
+        mode,
+        TermMode::REPORT_ALL_KEYS_AS_ESC,
+        Modes::KITTY_REPORT_ALL_KEYS_AS_ESC,
+    );
+    add_terminal_mode(
+        &mut terminal_modes,
+        mode,
+        TermMode::REPORT_ASSOCIATED_TEXT,
+        Modes::KITTY_REPORT_ASSOCIATED_TEXT,
     );
     terminal_modes
 }
@@ -1343,6 +1405,38 @@ mod tests {
         assert!(alacritty_modes.contains(TermMode::SGR_MOUSE));
         assert!(alacritty_modes.contains(TermMode::VI));
         assert!(!alacritty_modes.contains(TermMode::MOUSE_REPORT_CLICK));
+    }
+
+    #[test]
+    fn terminal_modes_round_trip_kitty_keyboard_flags() {
+        let alacritty_modes = TermMode::DISAMBIGUATE_ESC_CODES
+            | TermMode::REPORT_EVENT_TYPES
+            | TermMode::REPORT_ALTERNATE_KEYS
+            | TermMode::REPORT_ALL_KEYS_AS_ESC
+            | TermMode::REPORT_ASSOCIATED_TEXT;
+
+        let terminal_modes = terminal_modes_from_alacritty(alacritty_modes);
+        assert!(terminal_modes.contains(Modes::KITTY_DISAMBIGUATE_ESC_CODES));
+        assert!(terminal_modes.contains(Modes::KITTY_REPORT_EVENT_TYPES));
+        assert!(terminal_modes.contains(Modes::KITTY_REPORT_ALTERNATE_KEYS));
+        assert!(terminal_modes.contains(Modes::KITTY_REPORT_ALL_KEYS_AS_ESC));
+        assert!(terminal_modes.contains(Modes::KITTY_REPORT_ASSOCIATED_TEXT));
+        assert!(terminal_modes.contains(Modes::KITTY_KEYBOARD_PROTOCOL));
+
+        let alacritty_modes = terminal_modes.to_alacritty();
+        assert!(alacritty_modes.contains(TermMode::DISAMBIGUATE_ESC_CODES));
+        assert!(alacritty_modes.contains(TermMode::REPORT_EVENT_TYPES));
+        assert!(alacritty_modes.contains(TermMode::REPORT_ALTERNATE_KEYS));
+        assert!(alacritty_modes.contains(TermMode::REPORT_ALL_KEYS_AS_ESC));
+        assert!(alacritty_modes.contains(TermMode::REPORT_ASSOCIATED_TEXT));
+    }
+
+    #[test]
+    fn a_single_kitty_flag_still_enables_the_protocol() {
+        let terminal_modes = terminal_modes_from_alacritty(TermMode::DISAMBIGUATE_ESC_CODES);
+        assert!(terminal_modes.contains(Modes::KITTY_DISAMBIGUATE_ESC_CODES));
+        assert!(terminal_modes.intersects(Modes::KITTY_KEYBOARD_PROTOCOL));
+        assert!(!terminal_modes.contains(Modes::KITTY_KEYBOARD_PROTOCOL));
     }
 
     #[test]

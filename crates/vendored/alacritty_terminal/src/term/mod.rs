@@ -1,6 +1,6 @@
 //! Exports the `Term` type which is a high-level API for the Grid.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ops::{Index, IndexMut, Range};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,20 +13,21 @@ use base64::engine::general_purpose::STANDARD as Base64;
 use base64::Engine;
 use bitflags::bitflags;
 use log::{debug, trace};
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::event::{Event, EventListener};
 use crate::graphics::{Image, ImageState};
 use crate::grid::{Dimensions, Grid, GridIterator, Scroll};
 use crate::index::{self, Boundary, Column, Direction, Line, Point, Side};
 use crate::selection::{Selection, SelectionRange, SelectionType};
-use crate::term::cell::{Cell, Flags, LineLength};
+use crate::term::cell::{Cell, CellTextSizing, Flags, LineLength};
 use crate::term::color::Colors;
 use crate::vi_mode::{ViModeCursor, ViMotion};
 use crate::vte::ansi::{
-    self, Attr, CharsetIndex, Color, CursorShape, CursorStyle, Handler, Hyperlink, KeyboardModes,
-    KeyboardModesApplyBehavior, NamedColor, NamedMode, NamedPrivateMode, PrivateMode, Rgb,
-    StandardCharset,
+    self, cursor_icon::CursorIcon, Attr, CharsetIndex, Color, CursorShape, CursorStyle, Handler,
+    Hyperlink, KeyboardModes, KeyboardModesApplyBehavior, NamedColor, NamedMode, NamedPrivateMode,
+    PrivateMode, Rgb, StandardCharset,
 };
 
 pub mod cell;
@@ -282,9 +283,24 @@ impl TermDamageState {
     }
 }
 
+#[derive(Default, Debug, Clone)]
+struct PendingNotification {
+    title: String,
+    body: String,
+    title_b64: String,
+    body_b64: String,
+    done: bool,
+}
+
 pub struct Term<T> {
     /// Terminal focus controlling the cursor shape.
     pub is_focused: bool,
+
+    /// Mouse pointer shape requested by the application via OSC 22.
+    mouse_cursor_icon: Option<CursorIcon>,
+
+    /// Partially received OSC 99 notifications, keyed by notification id.
+    pending_notifications: HashMap<String, PendingNotification>,
 
     /// Cursor for keyboard selection.
     pub vi_mode_cursor: ViModeCursor,
@@ -511,6 +527,8 @@ impl<T> Term<T> {
             colors: color::Colors::default(),
             title_stack: Default::default(),
             is_focused: Default::default(),
+            mouse_cursor_icon: None,
+            pending_notifications: HashMap::new(),
             selection: Default::default(),
             title: Default::default(),
             mode: Default::default(),
@@ -710,6 +728,13 @@ impl<T> Term<T> {
                 tab_mode = true;
             }
 
+            if let Some(text_sizing) = cell.text_sizing() {
+                if let Some(sized_text) = &text_sizing.text {
+                    text.push_str(sized_text);
+                    continue;
+                }
+            }
+
             if !cell
                 .flags
                 .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
@@ -898,6 +923,11 @@ impl<T> Term<T> {
                 | TermMode::URGENCY_HINTS
                 | TermMode::KITTY_KEYBOARD_PROTOCOL,
         );
+
+        // Pointer shapes and unfinished notifications belong to the child
+        // that just exited.
+        self.mouse_cursor_icon = None;
+        self.pending_notifications.clear();
 
         // Re-enable modes that are on by default.
         self.mode.insert(
@@ -1179,6 +1209,12 @@ impl<T> Term<T> {
         }
     }
 
+    /// Mouse pointer shape requested by the application via OSC 22.
+    #[inline]
+    pub fn mouse_cursor_icon(&self) -> Option<CursorIcon> {
+        self.mouse_cursor_icon
+    }
+
     pub fn colors(&self) -> &Colors {
         &self.colors
     }
@@ -1311,24 +1347,20 @@ impl<T: EventListener> Handler for Term<T> {
             None => return,
         };
 
-        // Handle zero-width characters.
+        // Extend the previous cell when the new code point belongs to the same
+        // grapheme cluster (combining marks, ZWJ sequences, flags, keycaps...).
+        if let Some(point) = self.previous_cell_position() {
+            if let Some(mut cluster) = self.cell_grapheme_text(point) {
+                cluster.push(c);
+                if is_single_grapheme(&cluster) {
+                    self.extend_previous_grapheme(point, c, &cluster);
+                    return;
+                }
+            }
+        }
+
+        // A zero-width code point with no preceding grapheme is discarded.
         if width == 0 {
-            // Get previous column.
-            let mut column = self.grid.cursor.point.column;
-            if !self.grid.cursor.input_needs_wrap {
-                column.0 = column.saturating_sub(1);
-            }
-
-            // Put zerowidth characters over first fullwidth character cell.
-            let line = self.grid.cursor.point.line;
-            if self.grid[line][column]
-                .flags
-                .contains(Flags::WIDE_CHAR_SPACER)
-            {
-                column.0 = column.saturating_sub(1);
-            }
-
-            self.grid[line][column].push_zerowidth(c);
             return;
         }
 
@@ -2104,6 +2136,191 @@ impl<T: EventListener> Handler for Term<T> {
             .send_event(Event::Notification(title, body, progress));
     }
 
+    /// Set the mouse pointer shape (`OSC 22`).
+    #[inline]
+    fn set_mouse_cursor_icon(&mut self, icon: CursorIcon) {
+        self.mouse_cursor_icon = Some(icon);
+        self.event_proxy.send_event(Event::MouseCursorDirty);
+    }
+
+    /// Handle a chunk of an OSC 99 notification.
+    #[inline]
+    fn rich_notification(&mut self, metadata: &str, payload: &str) {
+        let mut id = String::new();
+        let mut done = true;
+        let mut kind = "title";
+        let mut encoded = false;
+        let mut occasion = "always";
+
+        for pair in metadata.split(':') {
+            let Some((key, value)) = pair.split_once('=') else {
+                continue;
+            };
+            match key {
+                "i" => id = sanitize_notification_id(value),
+                "d" => done = value != "0",
+                "p" => kind = value,
+                "e" => encoded = value == "1",
+                "o" => occasion = value,
+                _ => {}
+            }
+        }
+
+        let response_id = if id.is_empty() { "0" } else { id.as_str() };
+        match kind {
+            "?" => {
+                let text = format!("\x1b]99;i={response_id}:p=?;p=title,body:o=always\x1b\\");
+                self.event_proxy.send_event(Event::PtyWrite(text));
+                return;
+            }
+            "close" => {
+                if !id.is_empty() {
+                    self.pending_notifications.remove(&id);
+                }
+                return;
+            }
+            "alive" => {
+                let ids = self
+                    .pending_notifications
+                    .keys()
+                    .filter(|id| !id.is_empty())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let text = format!("\x1b]99;i={response_id}:p=alive;{ids}\x1b\\");
+                self.event_proxy.send_event(Event::PtyWrite(text));
+                return;
+            }
+            "title" | "body" => {}
+            // Icons, buttons and unknown payload types are ignored.
+            _ => return,
+        }
+
+        if (occasion == "unfocused" || occasion == "invisible") && self.is_focused {
+            return;
+        }
+
+        if payload.len() > 4096 {
+            return;
+        }
+        if self.pending_notifications.len() >= 256 && !self.pending_notifications.contains_key(&id)
+        {
+            return;
+        }
+
+        let entry = self.pending_notifications.entry(id.clone()).or_default();
+        match (kind, encoded) {
+            ("title", true) => entry.title_b64.push_str(payload),
+            ("body", true) => entry.body_b64.push_str(payload),
+            ("title", false) => entry.title.push_str(payload),
+            ("body", false) => entry.body.push_str(payload),
+            _ => unreachable!(),
+        }
+        entry.done = done;
+
+        if entry.title.len() + entry.body.len() + entry.title_b64.len() + entry.body_b64.len()
+            > 16 * 1024
+        {
+            self.pending_notifications.remove(&id);
+            return;
+        }
+
+        if done {
+            let notification = entry.clone();
+            if id.is_empty() {
+                self.pending_notifications.remove(&id);
+            }
+            let title = decode_notification_part(&notification.title, &notification.title_b64);
+            let body = decode_notification_part(&notification.body, &notification.body_b64);
+            let title = (!title.is_empty()).then_some(title);
+            let body = (!body.is_empty()).then_some(body);
+            if title.is_some() || body.is_some() {
+                self.event_proxy
+                    .send_event(Event::Notification(title, body, None));
+            }
+        }
+    }
+
+    /// Render text using the OSC 66 text sizing subset: scaled glyphs and
+    /// explicitly-sized blocks.
+    #[inline]
+    fn text_sizing(&mut self, metadata: &str, text: &str) {
+        if text.is_empty() || text.len() > 4096 {
+            return;
+        }
+        let Some(sizing) = parse_text_sizing(metadata) else {
+            return;
+        };
+        let scale = sizing.scale.max(1) as usize;
+        let width = sizing.width as usize;
+
+        if width > 0 {
+            let block_width = scale * width;
+            if block_width > self.columns() {
+                return;
+            }
+            if self.grid.cursor.point.column + block_width > self.columns() {
+                self.grid.cursor.point.column = Column(0);
+                self.linefeed();
+            }
+
+            let point = self.grid.cursor.point;
+            let first = text.chars().next().unwrap_or(' ');
+            let first_width = first.width().unwrap_or(0).max(1);
+            if block_width < first_width {
+                return;
+            }
+            self.input(first);
+            let cell = &mut self.grid[point.line][point.column];
+            cell.set_text_sizing(Some(CellTextSizing {
+                text: Some(text.to_string()),
+                ..sizing
+            }));
+            self.advance_cursor_cells(block_width - first_width);
+            self.mark_fully_damaged();
+            return;
+        }
+
+        if scale == 1 && sizing.num == 0 {
+            for c in text.chars() {
+                self.input(c);
+            }
+            return;
+        }
+
+        for c in text.chars() {
+            if c.width().unwrap_or(0) == 0 {
+                self.input(c);
+                continue;
+            }
+            let start = self.grid.cursor.point;
+            self.input(c);
+            let char_width = if self.grid[start.line][start.column]
+                .flags
+                .contains(Flags::WIDE_CHAR)
+            {
+                2
+            } else {
+                1
+            };
+            let cell = &mut self.grid[start.line][start.column];
+            cell.set_text_sizing(Some(CellTextSizing {
+                text: None,
+                width: char_width as u8,
+                ..sizing.clone()
+            }));
+            self.advance_cursor_cells((scale - 1) * char_width);
+        }
+        self.mark_fully_damaged();
+    }
+
+    /// Resize the OS window (`CSI 8 ; rows ; columns t`).
+    #[inline]
+    fn resize_window(&mut self, columns: usize, rows: usize) {
+        self.event_proxy
+            .send_event(Event::ResizeWindow { columns, rows });
+    }
+
     /// Track the working directory reported via `OSC 7;file://...`.
     #[inline]
     fn set_cwd(&mut self, cwd: Option<String>) {
@@ -2302,6 +2519,8 @@ impl<T: EventListener> Handler for Term<T> {
         self.vi_mode_cursor = Default::default();
         self.keyboard_mode_stack = Default::default();
         self.inactive_keyboard_mode_stack = Default::default();
+        self.mouse_cursor_icon = None;
+        self.pending_notifications.clear();
 
         // Preserve vi mode across resets.
         self.mode &= TermMode::VI;
@@ -2785,6 +3004,77 @@ fn version_number(mut version: &str) -> usize {
 /// Handles both `file:///path` (no host) and `file://host/path` forms,
 /// percent-decoding the path component. Returns `None` for non-`file://`
 /// URIs or URIs without a path.
+fn grapheme_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text).clamp(1, 2)
+}
+
+fn is_single_grapheme(text: &str) -> bool {
+    text.graphemes(true).count() == 1
+}
+
+fn decode_notification_part(plain: &str, encoded: &str) -> String {
+    let mut text = plain.to_string();
+    if !encoded.is_empty() {
+        if let Ok(bytes) = Base64.decode(encoded) {
+            if let Ok(decoded) = String::from_utf8(bytes) {
+                text.push_str(&decoded);
+            }
+        }
+    }
+    text
+}
+
+fn sanitize_notification_id(id: &str) -> String {
+    id.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '.'))
+        .take(128)
+        .collect()
+}
+
+fn parse_text_sizing(metadata: &str) -> Option<CellTextSizing> {
+    let mut sizing = CellTextSizing {
+        text: None,
+        scale: 1,
+        width: 0,
+        num: 0,
+        den: 0,
+        valign: 0,
+        halign: 0,
+    };
+
+    for pair in metadata.split(':') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        match key {
+            "s" => sizing.scale = value.parse::<u8>().ok()?,
+            "w" => sizing.width = value.parse::<u8>().ok()?,
+            "n" => sizing.num = value.parse::<u8>().ok()?,
+            "d" => sizing.den = value.parse::<u8>().ok()?,
+            "v" => sizing.valign = value.parse::<u8>().ok()?,
+            "h" => sizing.halign = value.parse::<u8>().ok()?,
+            _ => {}
+        }
+    }
+
+    if !(1..=7).contains(&sizing.scale)
+        || sizing.width > 7
+        || sizing.num > 15
+        || sizing.den > 15
+        || sizing.valign > 2
+        || sizing.halign > 2
+    {
+        return None;
+    }
+    if sizing.num == 0 {
+        sizing.den = 0;
+    } else if sizing.den <= sizing.num {
+        return None;
+    }
+
+    Some(sizing)
+}
+
 fn parse_cwd_uri(uri: &str) -> Option<PathBuf> {
     // RFC 8089: `file://` followed by an optional authority (host) then path.
     let rest = uri.strip_prefix("file://")?;
@@ -2844,6 +3134,123 @@ fn hex_value(byte: u8) -> Option<u8> {
 /// - 4096   graphics protocol
 /// - 16384  notifications with progress (OSC 9)
 const DA1_FLAGS: usize = 1 | 16 | 32 | 64 | 128 | 256 | 512 | 4096 | 16384;
+
+impl<T: EventListener> Term<T> {
+    fn advance_cursor_cells(&mut self, cells: usize) {
+        for _ in 0..cells {
+            if self.grid.cursor.point.column + 1 >= self.columns() {
+                self.grid.cursor.point.column = Column(0);
+                self.linefeed();
+            } else {
+                self.grid.cursor.point.column += 1;
+            }
+        }
+    }
+
+    /// The cell a newly received code point may extend into a grapheme cluster.
+    fn previous_cell_position(&self) -> Option<Point> {
+        let cursor = &self.grid.cursor;
+        if cursor.point.column == Column(0) && !cursor.input_needs_wrap {
+            return None;
+        }
+
+        let mut column = if cursor.input_needs_wrap {
+            cursor.point.column
+        } else {
+            Column(cursor.point.column.0 - 1)
+        };
+        let line = cursor.point.line;
+        if self.grid[line][column]
+            .flags
+            .contains(Flags::WIDE_CHAR_SPACER)
+        {
+            if column.0 == 0 {
+                return None;
+            }
+            column = Column(column.0 - 1);
+        }
+        Some(Point::new(line, column))
+    }
+
+    fn cell_grapheme_text(&self, point: Point) -> Option<String> {
+        let cell = &self.grid[point.line][point.column];
+        if cell.text_sizing().is_some() {
+            return None;
+        }
+        let mut text = String::new();
+        text.push(cell.c);
+        if let Some(zerowidth) = cell.zerowidth() {
+            text.extend(zerowidth);
+        }
+        Some(text)
+    }
+
+    /// Append a code point to the previous cell's grapheme cluster. If the
+    /// cluster's width changed, keep the wide-character spacer and cursor in
+    /// sync.
+    fn extend_previous_grapheme(&mut self, point: Point, c: char, cluster: &str) {
+        let old_width = if self.grid[point.line][point.column]
+            .flags
+            .contains(Flags::WIDE_CHAR)
+        {
+            2
+        } else {
+            1
+        };
+        self.grid[point.line][point.column].push_zerowidth(c);
+
+        let new_width = grapheme_width(cluster);
+        let columns = self.columns();
+        let line = point.line;
+
+        if new_width > old_width {
+            if point.column + 1 < columns {
+                let (fg, bg) = {
+                    let cell = &mut self.grid[line][point.column];
+                    cell.flags.insert(Flags::WIDE_CHAR);
+                    (cell.fg, cell.bg)
+                };
+                self.grid[line][point.column + 1] = Cell {
+                    c: ' ',
+                    fg,
+                    bg,
+                    flags: Flags::WIDE_CHAR_SPACER,
+                    extra: None,
+                };
+
+                if !self.grid.cursor.input_needs_wrap
+                    && self.grid.cursor.point.line == line
+                    && self.grid.cursor.point.column == Column(point.column.0 + 1)
+                {
+                    if point.column.0 + 2 < columns {
+                        self.grid.cursor.point.column = Column(point.column.0 + 2);
+                    } else {
+                        self.grid.cursor.input_needs_wrap = true;
+                    }
+                }
+            }
+        } else if new_width < old_width {
+            self.grid[line][point.column].flags.remove(Flags::WIDE_CHAR);
+            if point.column + 1 < columns {
+                let next = &mut self.grid[line][point.column + 1];
+                if next.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    next.c = ' ';
+                    next.flags.remove(Flags::WIDE_CHAR_SPACER);
+                    next.extra = None;
+                }
+            }
+            if !self.grid.cursor.input_needs_wrap
+                && self.grid.cursor.point.line == line
+                && self.grid.cursor.point.column == Column(point.column.0 + 2)
+            {
+                self.grid.cursor.point.column = Column(point.column.0 + 1);
+            }
+        }
+
+        self.damage
+            .damage_point(Point::new(line.0 as usize, point.column));
+    }
+}
 
 impl<T> Term<T> {
     /// Lines where shell prompts started (`OSC 133;A`/`F`), oldest first.
@@ -4317,6 +4724,192 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn osc99_notification_chunks_emit_event() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize::new(80, 24),
+            RecordingListener(events.clone()),
+        );
+        let mut processor = crate::vte::ansi::Processor::<crate::vte::ansi::StdSyncHandler>::new();
+
+        // d=0 holds the title until the body arrives.
+        processor.advance(&mut term, b"\x1b]99;i=1:d=0;Build\x1b\\");
+        assert!(events.lock().unwrap().is_empty());
+
+        processor.advance(&mut term, b"\x1b]99;i=1:p=body;passed\x1b\\");
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Event::Notification(title, body, progress) => {
+                assert_eq!(title.as_deref(), Some("Build"));
+                assert_eq!(body.as_deref(), Some("passed"));
+                assert_eq!(*progress, None);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn osc99_base64_payload_is_decoded() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize::new(80, 24),
+            RecordingListener(events.clone()),
+        );
+        let mut processor = crate::vte::ansi::Processor::<crate::vte::ansi::StdSyncHandler>::new();
+
+        processor.advance(&mut term, b"\x1b]99;i=2:e=1;SGVsbG8=\x1b\\");
+        let events = events.lock().unwrap();
+        match &events[0] {
+            Event::Notification(title, body, _) => {
+                assert_eq!(title.as_deref(), Some("Hello"));
+                assert_eq!(*body, None);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn osc22_sets_mouse_cursor_icon() {
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize::new(80, 24),
+            RecordingListener(Arc::new(Mutex::new(Vec::new()))),
+        );
+        let mut processor = crate::vte::ansi::Processor::<crate::vte::ansi::StdSyncHandler>::new();
+
+        processor.advance(&mut term, b"\x1b]22;pointer\x07");
+        assert_eq!(term.mouse_cursor_icon(), Some(CursorIcon::Pointer));
+    }
+
+    #[test]
+    fn csi8_t_requests_window_resize() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize::new(80, 24),
+            RecordingListener(events.clone()),
+        );
+        let mut processor = crate::vte::ansi::Processor::<crate::vte::ansi::StdSyncHandler>::new();
+
+        processor.advance(&mut term, b"\x1b[8;30;100t");
+        let events = events.lock().unwrap();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::ResizeWindow {
+                    columns: 100,
+                    rows: 30
+                }
+            )),
+            "events: {events:?}"
+        );
+    }
+
+    #[test]
+    fn osc66_marks_scaled_cells() {
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize::new(80, 24),
+            RecordingListener(Arc::new(Mutex::new(Vec::new()))),
+        );
+        let mut processor = crate::vte::ansi::Processor::<crate::vte::ansi::StdSyncHandler>::new();
+
+        processor.advance(&mut term, b"\x1b]66;s=2;abc\x07");
+
+        let grid = term.grid();
+        let first = grid[Line(0)][Column(0)]
+            .text_sizing()
+            .expect("first scaled cell");
+        assert_eq!(first.scale, 2);
+        assert_eq!(first.text, None);
+        assert!(grid[Line(0)][Column(2)].text_sizing().is_some());
+        assert!(grid[Line(0)][Column(4)].text_sizing().is_some());
+    }
+
+    #[test]
+    fn osc66_explicit_width_stores_block_text() {
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize::new(80, 24),
+            RecordingListener(Arc::new(Mutex::new(Vec::new()))),
+        );
+        let mut processor = crate::vte::ansi::Processor::<crate::vte::ansi::StdSyncHandler>::new();
+
+        processor.advance(&mut term, b"\x1b]66;w=2;Ha\x07");
+
+        let grid = term.grid();
+        let cell = &grid[Line(0)][Column(0)];
+        let sizing = cell.text_sizing().expect("sized block");
+        assert_eq!(sizing.width, 2);
+        assert_eq!(sizing.text.as_deref(), Some("Ha"));
+    }
+
+    #[test]
+    fn grapheme_zwj_emoji_is_one_cell() {
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize::new(80, 24),
+            RecordingListener(Arc::new(Mutex::new(Vec::new()))),
+        );
+        let mut processor = crate::vte::ansi::Processor::<crate::vte::ansi::StdSyncHandler>::new();
+
+        processor.advance(&mut term, "👨‍👩‍👧‍👦".as_bytes());
+
+        let grid = term.grid();
+        let cell = &grid[Line(0)][Column(0)];
+        assert!(cell.flags.contains(Flags::WIDE_CHAR));
+        assert!(cell.zerowidth().is_some_and(|chars| chars.len() >= 6));
+        assert!(grid[Line(0)][Column(1)]
+            .flags
+            .contains(Flags::WIDE_CHAR_SPACER));
+        assert_eq!(term.grid().cursor.point.column, Column(2));
+    }
+
+    #[test]
+    fn grapheme_flag_is_one_cell() {
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize::new(80, 24),
+            RecordingListener(Arc::new(Mutex::new(Vec::new()))),
+        );
+        let mut processor = crate::vte::ansi::Processor::<crate::vte::ansi::StdSyncHandler>::new();
+
+        processor.advance(&mut term, "🇺🇸".as_bytes());
+
+        let grid = term.grid();
+        let cell = &grid[Line(0)][Column(0)];
+        assert!(cell.flags.contains(Flags::WIDE_CHAR));
+        assert!(cell.zerowidth().is_some_and(|chars| chars.len() >= 1));
+        assert!(grid[Line(0)][Column(1)]
+            .flags
+            .contains(Flags::WIDE_CHAR_SPACER));
+        assert_eq!(term.grid().cursor.point.column, Column(2));
+    }
+
+    #[test]
+    fn grapheme_keycap_upgrades_to_wide_cell() {
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize::new(80, 24),
+            RecordingListener(Arc::new(Mutex::new(Vec::new()))),
+        );
+        let mut processor = crate::vte::ansi::Processor::<crate::vte::ansi::StdSyncHandler>::new();
+
+        processor.advance(&mut term, "1️⃣".as_bytes());
+
+        let grid = term.grid();
+        let cell = &grid[Line(0)][Column(0)];
+        assert!(cell.flags.contains(Flags::WIDE_CHAR));
+        assert!(grid[Line(0)][Column(1)]
+            .flags
+            .contains(Flags::WIDE_CHAR_SPACER));
+        assert_eq!(term.grid().cursor.point.column, Column(2));
     }
 
     #[test]

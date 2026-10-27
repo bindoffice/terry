@@ -906,6 +906,7 @@ impl VsCodeSettings {
             word_separators: None,
             vi_cursor_shape: None,
             smart_selection: None,
+            hints: None,
             ssh_hosts: None,
             ssh_reuse_connections: None,
             ssh_extra_args: None,

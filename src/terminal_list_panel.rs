@@ -807,6 +807,12 @@ enum GroupLayoutMode {
     Grid,
     /// All terminals maximized, one visible at a time (tab-like).
     Stack,
+    /// First terminal full-width on top; the rest side by side below.
+    Fat,
+    /// All terminals arranged in a single row.
+    Horizontal,
+    /// All terminals arranged in a single column.
+    Vertical,
 }
 
 impl GroupLayoutMode {
@@ -816,6 +822,21 @@ impl GroupLayoutMode {
             GroupLayoutMode::Tall => i18n::t("layout_tall"),
             GroupLayoutMode::Grid => i18n::t("layout_grid"),
             GroupLayoutMode::Stack => i18n::t("layout_stack"),
+            GroupLayoutMode::Fat => i18n::t("layout_fat"),
+            GroupLayoutMode::Horizontal => i18n::t("layout_horizontal"),
+            GroupLayoutMode::Vertical => i18n::t("layout_vertical"),
+        }
+    }
+
+    fn api_name(self) -> &'static str {
+        match self {
+            GroupLayoutMode::Manual => "manual",
+            GroupLayoutMode::Tall => "tall",
+            GroupLayoutMode::Grid => "grid",
+            GroupLayoutMode::Stack => "stack",
+            GroupLayoutMode::Fat => "fat",
+            GroupLayoutMode::Horizontal => "horizontal",
+            GroupLayoutMode::Vertical => "vertical",
         }
     }
 
@@ -834,6 +855,45 @@ impl GroupLayoutMode {
                 terminals: (0..count).collect(),
                 active: Some(count - 1),
             }),
+            GroupLayoutMode::Horizontal => {
+                if count == 1 {
+                    return Some(pane(0));
+                }
+                Some(GroupLayoutNode::Split {
+                    axis: PersistedAxis::Horizontal,
+                    flexes: vec![1.0; count],
+                    children: (0..count).map(pane).collect(),
+                })
+            }
+            GroupLayoutMode::Vertical => {
+                if count == 1 {
+                    return Some(pane(0));
+                }
+                Some(GroupLayoutNode::Split {
+                    axis: PersistedAxis::Vertical,
+                    flexes: vec![1.0; count],
+                    children: (0..count).map(pane).collect(),
+                })
+            }
+            GroupLayoutMode::Fat => {
+                if count == 1 {
+                    return Some(pane(0));
+                }
+                let bottom = if count == 2 {
+                    pane(1)
+                } else {
+                    GroupLayoutNode::Split {
+                        axis: PersistedAxis::Horizontal,
+                        flexes: vec![1.0; count - 1],
+                        children: (1..count).map(pane).collect(),
+                    }
+                };
+                Some(GroupLayoutNode::Split {
+                    axis: PersistedAxis::Vertical,
+                    flexes: vec![0.5, 0.5],
+                    children: vec![pane(0), bottom],
+                })
+            }
             GroupLayoutMode::Tall => {
                 if count == 1 {
                     return Some(pane(0));
@@ -1661,7 +1721,7 @@ impl TerminalListPanel {
     }
 
     /// Terminal view by id, including detached sessions.
-    fn view_by_id_any(&self, id: EntityId) -> Option<Entity<TerminalView>> {
+    pub fn view_by_id_any(&self, id: EntityId) -> Option<Entity<TerminalView>> {
         self.groups
             .iter()
             .flat_map(|group| group.terminals.iter())
@@ -2889,6 +2949,9 @@ impl TerminalListPanel {
                 GroupLayoutMode::Tall,
                 GroupLayoutMode::Grid,
                 GroupLayoutMode::Stack,
+                GroupLayoutMode::Fat,
+                GroupLayoutMode::Horizontal,
+                GroupLayoutMode::Vertical,
             ] {
                 let is_current = current_mode == Some(mode);
                 let checked = if is_current { "\u{2713} " } else { "" };
@@ -3467,7 +3530,7 @@ impl TerminalListPanel {
         cx: &App,
     ) -> Option<serde_json::Value> {
         let view = match terminal_id {
-            Some(id) => self.terminal_view_by_id(id)?,
+            Some(id) => self.view_by_id_any(id)?,
             None => self.active_terminal_view(cx)?,
         };
         let id = view.entity_id();
@@ -3493,6 +3556,266 @@ impl TerminalListPanel {
             "exited": terminal.has_exited(),
             "group": group.map(|group| group.name.to_string()),
         }))
+    }
+
+    /// Closes a grouped or detached terminal without showing a confirmation
+    /// prompt. Used by the remote-control API.
+    pub fn close_session_by_id(
+        &mut self,
+        terminal_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(index) = self
+            .detached_sessions
+            .iter()
+            .position(|session| session.view.entity_id() == terminal_id)
+        {
+            self.close_detached_session(index, cx);
+            return true;
+        }
+
+        if self.terminal_view_by_id(terminal_id).is_none() {
+            return false;
+        }
+        self.close_terminal_now(terminal_id, window, cx);
+        true
+    }
+
+    /// Detaches a grouped terminal, keeping its PTY alive.
+    pub fn detach_terminal_by_id(
+        &mut self,
+        terminal_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.terminal_view_by_id(terminal_id).is_none() {
+            return false;
+        }
+        self.detach_terminal(terminal_id, window, cx);
+        true
+    }
+
+    /// Reattaches a detached terminal into the active group.
+    pub fn reattach_terminal_by_id(
+        &mut self,
+        terminal_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(index) = self
+            .detached_sessions
+            .iter()
+            .position(|session| session.view.entity_id() == terminal_id)
+        else {
+            return false;
+        };
+        self.reattach_detached(index, window, cx);
+        true
+    }
+
+    /// Machine-readable list of detached sessions.
+    pub fn detached_sessions_json(&self, cx: &App) -> serde_json::Value {
+        let sessions: Vec<_> = self
+            .detached_sessions
+            .iter()
+            .map(|session| {
+                let terminal = session.view.read(cx).terminal().read(cx);
+                serde_json::json!({
+                    "terminal_id": session.view.entity_id().as_u64(),
+                    "title": session.title.to_string(),
+                    "cwd": session.cwd.as_ref().map(|cwd| cwd.display().to_string()),
+                    "command": terminal.foreground_process_command_name(),
+                    "exited": terminal.has_exited(),
+                })
+            })
+            .collect();
+        serde_json::json!({ "sessions": sessions })
+    }
+
+    /// Creates a group from the remote-control API and spawns its first
+    /// terminal. Returns the group id.
+    pub fn create_group_from_api(
+        &mut self,
+        name: Option<String>,
+        cwd: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let source = self.active_terminal_view(cx);
+        let cwd = cwd.or_else(|| self.active_terminal_cwd(cx));
+        let id = self.new_group_id();
+        let name = name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| format!("{} {}", i18n::t("group"), id.0 + 1));
+        self.groups.push(TerminalGroup {
+            id,
+            name: SharedString::from(name),
+            terminals: Vec::new(),
+            collapsed: false,
+            has_unread: false,
+            saved_layout: None,
+            layout_mode: GroupLayoutMode::Manual,
+            broadcast_input: false,
+            session_terminal_count: None,
+            restore_slots: Vec::new(),
+        });
+        self.switch_group(id, window, cx);
+        let profile = self.default_terminal_profile(cx);
+        self.spawn_terminal(
+            id,
+            cwd,
+            source,
+            None,
+            SpawnRestore::default(),
+            None,
+            profile,
+            window,
+            cx,
+        );
+        self.save_session(cx);
+        id.0 as u64
+    }
+
+    /// Deletes a group and drops all its terminals. Refuses to delete the last
+    /// group.
+    pub fn delete_group_by_id(
+        &mut self,
+        group_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.groups.len() <= 1 {
+            return Err("cannot delete the last group".to_string());
+        }
+        let Some(id) = self
+            .groups
+            .iter()
+            .find(|group| group.id.0 as u64 == group_id)
+            .map(|group| group.id)
+        else {
+            return Err(format!("no group with id {group_id}"));
+        };
+        self.delete_group_now(id, window, cx);
+        Ok(())
+    }
+
+    /// Renames a group.
+    pub fn rename_group_by_id(
+        &mut self,
+        group_id: u64,
+        name: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(group) = self
+            .groups
+            .iter_mut()
+            .find(|group| group.id.0 as u64 == group_id)
+        else {
+            return false;
+        };
+        group.name = SharedString::from(name);
+        self.save_session(cx);
+        cx.notify();
+        true
+    }
+
+    /// Switches to a group by its numeric id.
+    pub fn focus_group_by_id(
+        &mut self,
+        group_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(id) = self
+            .groups
+            .iter()
+            .find(|group| group.id.0 as u64 == group_id)
+            .map(|group| group.id)
+        else {
+            return false;
+        };
+        self.switch_group(id, window, cx);
+        true
+    }
+
+    /// Moves a terminal to another group.
+    pub fn move_terminal_to_group_by_id(
+        &mut self,
+        terminal_id: EntityId,
+        group_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(target_group_id) = self
+            .groups
+            .iter()
+            .find(|group| group.id.0 as u64 == group_id)
+            .map(|group| group.id)
+        else {
+            return false;
+        };
+        if self.terminal_view_by_id(terminal_id).is_none() {
+            return false;
+        }
+        self.move_terminal_to_group(terminal_id, target_group_id, window, cx);
+        true
+    }
+
+    /// Sets a group's tiling layout from an API name.
+    pub fn set_group_layout_by_id(
+        &mut self,
+        group_id: u64,
+        layout: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let mode = match layout {
+            "manual" | "splits" => GroupLayoutMode::Manual,
+            "tall" => GroupLayoutMode::Tall,
+            "fat" => GroupLayoutMode::Fat,
+            "grid" => GroupLayoutMode::Grid,
+            "stack" => GroupLayoutMode::Stack,
+            "horizontal" => GroupLayoutMode::Horizontal,
+            "vertical" => GroupLayoutMode::Vertical,
+            other => return Err(format!("unknown layout {other:?}")),
+        };
+        let Some(id) = self
+            .groups
+            .iter()
+            .find(|group| group.id.0 as u64 == group_id)
+            .map(|group| group.id)
+        else {
+            return Err(format!("no group with id {group_id}"));
+        };
+        self.set_group_layout(id, mode, window, cx);
+        Ok(())
+    }
+
+    /// Enables or disables broadcast input without showing a confirmation
+    /// prompt. Returns the affected group id.
+    pub fn set_broadcast_input_by_id(
+        &mut self,
+        group_id: Option<u64>,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<u64, String> {
+        let id = match group_id {
+            Some(group_id) => self
+                .groups
+                .iter()
+                .find(|group| group.id.0 as u64 == group_id)
+                .map(|group| group.id)
+                .ok_or_else(|| format!("no group with id {group_id}"))?,
+            None => self.active_group_id,
+        };
+        let Some(group) = self.groups.iter_mut().find(|group| group.id == id) else {
+            return Err("active group is missing".to_string());
+        };
+        group.broadcast_input = enabled;
+        self.save_session(cx);
+        cx.notify();
+        Ok(id.0 as u64)
     }
 
     /// Machine-readable summary of every group and terminal, used by the IPC
@@ -3533,11 +3856,16 @@ impl TerminalListPanel {
                     "active": group.id == self.active_group_id,
                     "collapsed": group.collapsed,
                     "broadcast_input": group.broadcast_input,
+                    "layout": group.layout_mode.api_name(),
                     "terminals": terminals,
                 })
             })
             .collect();
-        serde_json::json!({ "groups": groups })
+        serde_json::json!({
+            "active_group_id": self.active_group_id.0,
+            "groups": groups,
+            "detached": self.detached_sessions_json(cx)["sessions"].clone(),
+        })
     }
 
     /// Closes a terminal without asking for confirmation: remove it from every
@@ -4093,10 +4421,10 @@ impl TerminalListPanel {
         subscriptions.push(cx.subscribe(
             &terminal_view,
             move |this, sender, event: &terminal::Event, cx| {
-                let terminal::Event::UserInput(keystroke) = event else {
+                let terminal::Event::UserInput(keystroke, event_type) = event else {
                     return;
                 };
-                this.forward_broadcast(&sender, keystroke, cx);
+                this.forward_broadcast(&sender, keystroke, *event_type, cx);
             },
         ));
 
@@ -4221,6 +4549,7 @@ impl TerminalListPanel {
         &mut self,
         sender: &Entity<TerminalView>,
         keystroke: &Keystroke,
+        event_type: terminal::KeyEventType,
         cx: &mut Context<Self>,
     ) {
         let Some(group) = self.groups.iter().find(|g| {
@@ -4241,7 +4570,7 @@ impl TerminalListPanel {
             peer.update(cx, |view, cx| {
                 let (handled, vi_mode_enabled) = view.terminal().update(cx, |term, _cx| {
                     (
-                        term.try_keystroke(keystroke, option_as_meta),
+                        term.try_key_event(keystroke, event_type, option_as_meta),
                         term.vi_mode_enabled(),
                     )
                 });
@@ -4697,6 +5026,72 @@ impl TerminalListPanel {
         }
     }
 
+    /// Session templates are saved per group. The CLI calls this "session"
+    /// save/load; each template recreates one workflow group.
+    pub fn list_session_templates(&self) -> serde_json::Value {
+        let templates: Vec<_> = load_templates()
+            .into_iter()
+            .map(|template| {
+                serde_json::json!({
+                    "name": template.name,
+                    "layout": template.layout_mode.map(|mode| mode.api_name()),
+                    "broadcast_input": template.broadcast_input,
+                    "terminals": template.terminals.iter().map(|terminal| {
+                        serde_json::json!({
+                            "title": terminal.title,
+                            "cwd": terminal.cwd.as_ref().map(|cwd| cwd.display().to_string()),
+                        })
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        serde_json::json!({ "templates": templates })
+    }
+
+    pub fn save_session_template(
+        &mut self,
+        name: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if name.trim().is_empty() {
+            return Err("session name must not be empty".to_string());
+        }
+        if !self
+            .groups
+            .iter()
+            .any(|group| group.id == self.active_group_id)
+        {
+            return Err("no active group".to_string());
+        }
+        self.save_active_group_as_template(name, cx);
+        Ok(())
+    }
+
+    pub fn load_session_template(
+        &mut self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<u64, String> {
+        let template = load_templates()
+            .into_iter()
+            .find(|template| template.name == name)
+            .ok_or_else(|| format!("no session template named {name:?}"))?;
+        self.add_group_from_template(template, window, cx);
+        Ok(self.active_group_id.0 as u64)
+    }
+
+    pub fn delete_session_template(&mut self, name: &str) -> Result<(), String> {
+        let mut templates = load_templates();
+        let original_len = templates.len();
+        templates.retain(|template| template.name != name);
+        if templates.len() == original_len {
+            return Err(format!("no session template named {name:?}"));
+        }
+        write_templates(&templates);
+        Ok(())
+    }
+
     /// Captures the active group (terminals, launch origins, cwd and layout)
     /// as a reusable template. Re-saving under the same name overwrites it.
     fn save_active_group_as_template(&mut self, name: String, cx: &mut Context<Self>) {
@@ -4725,8 +5120,8 @@ impl TerminalListPanel {
             terminals.push(PersistedTerminal {
                 cwd,
                 title,
-                color_scheme: None,
-                font_size: None,
+                color_scheme: view_ref.color_scheme().map(str::to_owned),
+                font_size: view_ref.font_size_override().map(f32::from),
                 launch,
             });
         }
@@ -7025,6 +7420,51 @@ mod tests {
     use terminal::terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape};
     use util::paths::PathStyle;
     use workspace::{AppState, MultiWorkspace};
+
+    #[test]
+    fn layout_presets_generate_expected_axes() {
+        let horizontal = GroupLayoutMode::Horizontal.generate_layout(3).unwrap();
+        match horizontal {
+            GroupLayoutNode::Split {
+                axis: PersistedAxis::Horizontal,
+                children,
+                ..
+            } => assert_eq!(children.len(), 3),
+            _ => panic!("horizontal layout should be a single horizontal split"),
+        }
+
+        let vertical = GroupLayoutMode::Vertical.generate_layout(3).unwrap();
+        match vertical {
+            GroupLayoutNode::Split {
+                axis: PersistedAxis::Vertical,
+                children,
+                ..
+            } => assert_eq!(children.len(), 3),
+            _ => panic!("vertical layout should be a single vertical split"),
+        }
+
+        let fat = GroupLayoutMode::Fat.generate_layout(3).unwrap();
+        match fat {
+            GroupLayoutNode::Split {
+                axis: PersistedAxis::Vertical,
+                children,
+                ..
+            } => {
+                assert_eq!(children.len(), 2);
+                match &children[1] {
+                    GroupLayoutNode::Split {
+                        axis: PersistedAxis::Horizontal,
+                        children,
+                        ..
+                    } => assert_eq!(children.len(), 2),
+                    _ => panic!("fat layout should put the remaining panes in a row"),
+                }
+            }
+            _ => panic!("fat layout should split top/bottom first"),
+        }
+
+        assert!(GroupLayoutMode::Manual.generate_layout(3).is_none());
+    }
 
     #[test]
     fn coding_agent_names_match_known_clis() {

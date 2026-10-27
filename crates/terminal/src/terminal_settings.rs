@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 pub use settings::AlternateScroll;
 
 use settings::{
-    IntoGpui, PathHyperlinkRegex, RegisterSetting, ShowScrollbar, SmartSelectionActionContent,
-    SmartSelectionRuleContent, SshHostContent, TerminalBell, TerminalBlink, TerminalDockPosition,
-    TerminalLineHeight, VenvSettings, WorkingDirectory, merge_from::MergeFrom,
+    HintActionContent, HintRuleContent, IntoGpui, PathHyperlinkRegex, RegisterSetting,
+    ShowScrollbar, SmartSelectionActionContent, SmartSelectionRuleContent, SshHostContent,
+    TerminalBell, TerminalBlink, TerminalDockPosition, TerminalLineHeight, VenvSettings,
+    WorkingDirectory, merge_from::MergeFrom,
 };
 use task::Shell;
 use theme_settings::FontFamilyName;
@@ -79,6 +80,69 @@ impl From<SmartSelectionRuleContent> for SmartSelectionRule {
             compiled,
             action: action.unwrap_or_default().into(),
             description,
+        }
+    }
+}
+
+/// What a hint does with a match.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HintAction {
+    /// Open the match as a URL or path.
+    Open,
+    /// Copy the match to the clipboard.
+    #[default]
+    Copy,
+    /// Paste the match into the terminal.
+    Paste,
+    /// Select the match in the terminal.
+    Select,
+}
+
+impl From<HintActionContent> for HintAction {
+    fn from(value: HintActionContent) -> Self {
+        match value {
+            HintActionContent::Open => HintAction::Open,
+            HintActionContent::Copy => HintAction::Copy,
+            HintActionContent::Paste => HintAction::Paste,
+            HintActionContent::Select => HintAction::Select,
+        }
+    }
+}
+
+/// A resolved custom hint rule from settings.
+#[derive(Clone, Debug, Deserialize)]
+pub struct HintRule {
+    /// Optional human-readable label shown in the hints picker.
+    pub name: Option<String>,
+    /// The regex source, kept for diagnostics.
+    pub regex: String,
+    /// The compiled regex. `None` when the pattern was invalid.
+    #[serde(skip)]
+    pub compiled: Option<Regex>,
+    /// What to do with the matched text.
+    pub action: HintAction,
+}
+
+impl From<HintRuleContent> for HintRule {
+    fn from(value: HintRuleContent) -> Self {
+        let HintRuleContent {
+            name,
+            regex,
+            action,
+        } = value;
+        let compiled = match Regex::new(&regex) {
+            Ok(compiled) => Some(compiled),
+            Err(error) => {
+                log::warn!("ignoring invalid terminal hints regex {regex:?}: {error}");
+                None
+            }
+        };
+        Self {
+            name,
+            regex,
+            compiled,
+            action: action.unwrap_or_default().into(),
         }
     }
 }
@@ -174,6 +238,8 @@ pub struct TerminalSettings {
     pub vi_cursor_shape: Option<CursorShape>,
     /// Rules that refine double-click selection.
     pub smart_selection: Vec<SmartSelectionRule>,
+    /// Custom hint rules for the "Show Hints" action.
+    pub hints: Vec<HintRule>,
     /// User-defined SSH hosts for the SSH picker.
     pub ssh_hosts: Vec<TerminalSshHost>,
     /// Whether SSH launches reuse connections via ControlMaster.
@@ -300,6 +366,12 @@ impl settings::Settings for TerminalSettings {
             vi_cursor_shape: user_content.vi_cursor_shape.map(Into::into),
             smart_selection: user_content
                 .smart_selection
+                .unwrap_or_default()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            hints: user_content
+                .hints
                 .unwrap_or_default()
                 .into_iter()
                 .map(Into::into)
@@ -565,6 +637,32 @@ mod tests {
             SettingsContent::parse_json_with_comments(r#"{ "terminal": { "ligatures": true } }"#)
                 .unwrap();
         assert!(TerminalSettings::from_settings(&content).ligatures);
+    }
+
+    #[test]
+    fn parses_custom_hint_rules() {
+        let content = SettingsContent::parse_json_with_comments(
+            r##"{
+                "terminal": {
+                    "hints": [
+                        { "name": "Issues", "regex": "#\\d+", "action": "copy" },
+                        { "regex": "JIRA-\\d+", "action": "open" },
+                        { "regex": "(", "action": "select" }
+                    ]
+                }
+            }"##,
+        )
+        .unwrap();
+
+        let settings = TerminalSettings::from_settings(&content);
+        assert_eq!(settings.hints.len(), 3);
+        assert_eq!(settings.hints[0].name.as_deref(), Some("Issues"));
+        assert_eq!(settings.hints[0].action, HintAction::Copy);
+        assert!(settings.hints[0].compiled.is_some());
+        assert_eq!(settings.hints[1].action, HintAction::Open);
+        // Invalid regexes are kept as rules but skipped by the scanner.
+        assert_eq!(settings.hints[2].action, HintAction::Select);
+        assert!(settings.hints[2].compiled.is_none());
     }
 
     #[test]

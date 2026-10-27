@@ -19,11 +19,12 @@
 
 ## 功能特性
 
-- **终端工作区** — 分组管理多个终端，`ctrl-alt-shift-up` / `ctrl-alt-shift-down` 切换分组；按正确工作目录新建会话；分组支持自动平铺布局（手动 / tall / grid / stack，类似 kitty）；在分组右键菜单开启**广播输入**，一次键入同时发送到组内所有终端（`ctrl-alt-b`）
+- **终端工作区** — 分组管理多个终端，`ctrl-alt-shift-up` / `ctrl-alt-shift-down` 切换分组；按正确工作目录新建会话；分组支持自动平铺布局（manual / splits / tall / fat / grid / stack / horizontal / vertical，类似 kitty）；在分组右键菜单开启**广播输入**，一次键入同时发送到组内所有终端（`ctrl-alt-b`）
 - **Quake 终端** — 全局热键 `ctrl+\`` 随处呼出的下拉终端，贴顶显示（macOS）
-- **命令行** — 从脚本和编辑器驱动运行中的 Terry：`terry new-tab --cwd ~/src`、`terry send-text "cargo test"`
+- **命令行** — 从脚本和编辑器驱动运行中的 Terry：`terry new-tab --cwd ~/src`、`terry send-text "cargo test"`、`terry run "cargo test"`，以及 `terry session save/load` 保存可复用工作流
+- **Kittens / 插件** — 从 `kittens/` 目录发现可执行插件，用 `terry kitten list` / `terry kitten run NAME` 启动；插件会拿到 `TERRY_*` 上下文和自动化 API。注意这是 Terry 的插件协议，不是 kitty Python kitten API 的源码级兼容层
 - **终端图像** — 支持 kitty graphics 协议与 sixel，终端内直接显示图片，GIF 可动画（`chafa` / `viu` / `icat` 可用）
-- **终端协议** — kitty 键盘协议（CSI u）与 OSC 52 剪贴板写入（读取需显式开启 `"terminal": { "clipboard_read": true }`）
+- **终端协议** — kitty 键盘协议（CSI u，支持按下/重复/释放事件、备用键与关联文本）、OSC 52 剪贴板写入（读取需显式开启 `"terminal": { "clipboard_read": true }`）、OSC 99 桌面通知、OSC 22 鼠标指针形状、OSC 66 文本缩放、CSI 8 t 窗口尺寸调整，以及 Unicode grapheme 聚类（emoji ZWJ 序列、旗帜、keycap、组合字符）
 - **粘贴安全** — 多行粘贴默认先确认（可用 `"terminal": { "confirm_multiline_paste": false }` 关闭）
 - **Shell 集成** — zsh / fish 开箱即用：提示符标记（OSC 133 / VS Code OSC 633）与工作目录跟踪（OSC 7）；`ctrl-shift-up` / `ctrl-shift-down` 在各条命令的提示符之间跳转
 - **终端配置档** — 命名 Profile 可覆盖 Shell、环境变量与工作目录，并在 Shell 启动后执行命令（例如 `tmux` 或激活项目虚拟环境）；可在分组右键菜单中选择，或用 `default_profile` 设为默认
@@ -31,7 +32,7 @@
 - **tmux 会话** — 选择器可直接 attach 或新建本地 tmux 会话；远端等价于 `ssh … tmux new -A -s <名称>`。（原生 tmux **control mode**，即把远端 pane 渲染成 Terry 的分屏，尚未实现）
 - **终端配色方案** — 内置配色库（Dracula、Nord、Solarized、Gruvbox、One Dark、Tokyo Night、Catppuccin、Rosé Pine 等），只改变终端颜色；可按终端、按 Profile 或用 `terminal.color_scheme` 选择。可从「终端」菜单导入 Alacritty `.toml`、iTerm2 `.itermcolors` 或 Terry JSON
 - **会话恢复** — 重启后恢复分组、分屏布局、工作目录、标题、Profile 配色、每终端字号缩放，以及 Profile / SSH / tmux 启动方式
-- **链接跳转** — `Ctrl+Shift+E` 列出当前可见的所有链接（URL / 路径 / OSC 8），键盘选择打开
+- **Hints** — `Ctrl+Shift+E` 列出可见的 URL、路径、git hash、UUID、IP 与自定义正则匹配；可键盘选择打开、复制、粘贴或选中。自定义规则写在 `terminal.hints`，例如 `{ "regex": "#\\d+", "action": "copy" }`
 - **AI Agent** — 侧边栏与大模型对话，通过可配置的 Profile 调用命令与工具
 - **MCP** — 接入 Model Context Protocol 服务器，扩展 Agent 能力
 - **文件面板** — 在终端旁浏览项目目录树
@@ -61,9 +62,19 @@ Terry 解析 **OSC 133** 提示符标记（含 VS Code 的 **OSC 633** 变体）
 ```sh
 terry new-tab --cwd ~/src          # 在当前窗口新建标签页
 terry send-text "cargo test"       # 向活动终端粘贴文本
+terry run "cargo test"             # 粘贴文本并回车执行
+terry session save "Work"          # 把当前分组保存为 session 模板
+terry session load "Work"          # 从模板创建一个新分组
+terry session list                 # 列出已保存模板
+terry session delete "Work"        # 删除模板
+terry kitten list                  # 列出已安装的 kitten/插件
+terry kitten run hello --arg       # 运行 kitten（也可直接 terry kitten hello --arg）
+terry kitten path                  # 显示插件搜索目录
 ```
 
-`send-text` 只粘贴不执行 —— 永远不会自动附加换行。
+`send-text` 只粘贴不执行 —— 永远不会自动附加换行；`run` 会粘贴并提交。session 模板会保存分组内的终端、工作目录、profile/启动方式、平铺布局和广播设置。
+
+Kitten 是放在 `$TERRY_KITTEN_PATH`、Terry 配置目录下 `kittens/` 或数据目录下 `kittens/` 中的可执行文件（Unix 下需要 shebang 和可执行位）。插件继承 stdio，并获得 `TERRY_KITTEN_NAME`、`TERRY_KITTEN_DIR`、`TERRY_KITTEN_PATH`、`TERRY_PID`、`TERRY_IPC_URL`、`TERRY_IPC_TOKEN`、`TERRY_CONFIG_DIR`、`TERRY_DATA_DIR`，因此可以调用自动化 API 或 `terry` CLI。Kitten 是受信任的本地可执行文件，会拿到 IPC token，请只安装可信插件。这里不提供 kitty 的 Python kitten API；现有 kitten 需要按这个协议移植。
 
 已有实例在运行时再次启动 `terry` 会聚焦现有窗口，而不是启动第二个进程，并在 stderr 打印它把启动转交给了哪个进程（pid）。如果要在旧实例仍打开时运行新编译的二进制，使用 `terry --new-instance` 强制启动新实例。
 
@@ -71,13 +82,25 @@ terry send-text "cargo test"       # 向活动终端粘贴文本
 
 同一个带 bearer token 的本地服务器也接受 JSON 请求：
 
-- `/api/list_sessions` — 分组、终端 id、标题、cwd 与当前命令
-- `/api/focus_session` — 通过 `session_id` 聚焦终端
+- `/api/list_sessions` — 分组、分组 id、布局、终端 id、标题、cwd 与当前命令
+- `/api/focus_session` — 通过 `terminal_id` / `session_id` 聚焦终端
+- `/api/focus_group` — 通过 `group_id` 切换分组
 - `/api/send_keys` — 发送文本或 `ctrl-c` 等按键
+- `/api/run` — 粘贴文本并可选回车执行（`"enter": false` 关闭回车）
 - `/api/read_screen` — 以纯文本读取终端内容
 - `/api/get_context` — 活动终端的标题、cwd、分组与命令
+- `/api/close_session` — 不弹确认直接关闭终端（不传 id 时关闭活动终端）
+- `/api/detach_session`、`/api/reattach_session`、`/api/list_detached` — 将终端分离出分组、保持运行并重新挂载
+- `/api/rename_session` — 设置或清除终端标题（`"title": null` 清除）
+- `/api/new_group`、`/api/delete_group`（会终止组内终端）、`/api/rename_group` — 管理分组
+- `/api/move_session` — 把终端移动到其他分组
+- `/api/set_group_layout` — `manual`/`splits`、`tall`、`fat`、`grid`、`stack`、`horizontal` 或 `vertical`
+- `/api/list_session_templates`、`/api/save_session_template`、`/api/load_session_template`、`/api/delete_session_template` — 可复用工作流模板
+- `/api/set_broadcast` — 开启/关闭分组的广播输入
+- `/api/scroll` — `top`、`bottom`、`page_up`、`page_down`、`line_up` 或 `line_down`
+- `/api/set_font_size`、`/api/set_color_scheme` — 单终端显示覆盖（`null` 清除）
 - `/api/notify` — 发送系统通知
-- `/api/new_tab`、`/api/send_text`、`/api/focus`
+- `/api/new_tab`、`/api/send_text`、`/api/focus`、`/api/new_window`
 
 ## 命令输出
 

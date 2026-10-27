@@ -1296,7 +1296,7 @@
       "ctrl-shift-r": "terminal::RerunTask",
       "ctrl-alt-r": "terminal::RerunTask",
       "alt-t": "terminal::RerunTask",
-      "ctrl-shift-e": "terminal::OpenUrls",
+      "ctrl-shift-e": "terminal::ShowHints",
       "ctrl-shift-up": "terminal::JumpToPreviousPrompt",
       "ctrl-shift-down": "terminal::JumpToNextPrompt",
       "ctrl-alt-shift-up": "terminal_list_panel::PreviousGroup",

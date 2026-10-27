@@ -55,6 +55,9 @@ pub enum Event {
     /// Request to write the text area size.
     TextAreaSizeRequest(Arc<dyn Fn(WindowSize) -> String + Sync + Send + 'static>),
 
+    /// Request to resize the OS window to a character grid size (`CSI 8`).
+    ResizeWindow { columns: usize, rows: usize },
+
     /// Cursor blinking state has changed.
     CursorBlinkingChange,
 
@@ -83,7 +86,10 @@ impl Debug for Event {
         match self {
             Event::ClipboardStore(ty, text) => write!(f, "ClipboardStore({ty:?}, {text})"),
             Event::ClipboardLoad(ty, _) => write!(f, "ClipboardLoad({ty:?})"),
-            Event::TextAreaSizeRequest(_) => write!(f, "TextAreaSizeRequest"),
+            Event::TextAreaSizeRequest(_) => f.write_str("TextAreaSizeRequest"),
+            Event::ResizeWindow { columns, rows } => {
+                write!(f, "ResizeWindow({columns}x{rows})")
+            }
             Event::ColorRequest(index, _) => write!(f, "ColorRequest({index})"),
             Event::PtyWrite(text) => write!(f, "PtyWrite({text})"),
             Event::Title(title) => write!(f, "Title({title})"),

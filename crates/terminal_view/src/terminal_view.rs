@@ -1,5 +1,6 @@
 mod persistence;
 pub mod terminal_element;
+mod terminal_hint_picker;
 mod terminal_link_picker;
 pub mod terminal_panel;
 mod terminal_path_like_target;
@@ -11,10 +12,10 @@ use editor::{
 };
 use gpui::{
     A11ySubtreeBuilder, Action, AnyElement, App, ClipboardEntry, DismissEvent, Entity,
-    EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, KeyContext, KeyDownEvent, Keystroke,
-    MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, PromptLevel, Render, Role,
-    ScrollWheelEvent, Styled, Subscription, SystemNotification, Task, TaskExt, WeakEntity,
-    accesskit, actions, anchored, deferred, div,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, KeyContext, KeyDownEvent,
+    KeyUpEvent, Keystroke, MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, PromptLevel,
+    Render, Role, ScrollWheelEvent, Styled, Subscription, SystemNotification, Task, TaskExt,
+    WeakEntity, accesskit, actions, anchored, deferred, div,
 };
 use menu;
 use persistence::TerminalDb;
@@ -35,13 +36,14 @@ use std::{
 };
 use task::TaskId;
 use terminal::{
-    Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Modes, OpenUrls, Paste, PasteText,
-    Point, Range, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom,
-    ScrollToTop, Search, ShowCharacterPalette, TaskState, TaskStatus, Terminal, TerminalBounds,
-    ToggleViMode,
+    Clear, Copy, Event, HoveredWord, KeyEventType, MaybeNavigationTarget, Modes, OpenUrls, Paste,
+    PasteText, Point, Range, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp,
+    ScrollToBottom, ScrollToTop, Search, ShowCharacterPalette, TaskState, TaskStatus, Terminal,
+    TerminalBounds, ToggleViMode,
     terminal_settings::{CursorShape, TerminalSettings},
 };
 use terminal_element::TerminalElement;
+use terminal_hint_picker::{TerminalHintPicker, execute_hint};
 use terminal_link_picker::TerminalLinkPicker;
 use terminal_panel::TerminalPanel;
 use terminal_path_like_target::{hover_path_like_target, open_path_like_target};
@@ -240,6 +242,9 @@ actions!(
         SelectLastCommandOutput,
         /// Re-runs the previous command (requires OSC 133 shell integration).
         RerunLastCommand,
+        /// Lists URLs, paths, hashes, UUIDs, IPs and custom regex matches on the
+        /// visible screen, and lets the user act on one with the keyboard.
+        ShowHints,
         /// Toggles broadcast input for the active terminal group: keystrokes
         /// accepted by any terminal in the group are relayed to its peers.
         ToggleBroadcastInput,
@@ -1256,6 +1261,29 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Opens a picker listing generic hints visible in the terminal.
+    fn show_hints(&mut self, _: &ShowHints, window: &mut Window, cx: &mut Context<Self>) {
+        let rules = TerminalSettings::get_global(cx).hints.clone();
+        let hints = self.terminal.read(cx).visible_hints(&rules);
+        if hints.is_empty() {
+            return;
+        }
+        if let [hint] = hints.as_slice() {
+            execute_hint(&self.terminal, hint, cx);
+            return;
+        }
+
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let terminal = self.terminal.clone();
+        workspace.update(cx, |workspace, cx| {
+            workspace.toggle_modal(window, cx, |window, cx| {
+                TerminalHintPicker::new(terminal.clone(), hints, window, cx)
+            });
+        });
+    }
+
     /// Opens a picker listing every hyperlink visible in the terminal.
     fn open_urls(&mut self, _: &OpenUrls, window: &mut Window, cx: &mut Context<Self>) {
         let links = self
@@ -1632,6 +1660,37 @@ fn subscribe_for_terminal_events(
                     cx.emit(Event::Wakeup);
                 }
 
+                Event::ResizeWindow { columns, rows } => {
+                    let (columns, rows) = (*columns, *rows);
+                    if columns == 0 || rows == 0 {
+                        return;
+                    }
+                    let bounds = terminal.read(cx).last_content.terminal_bounds;
+                    if columns == bounds.num_columns() && rows == bounds.num_lines() {
+                        return;
+                    }
+                    let current = window.viewport_size();
+                    let chrome_width = if current.width > bounds.bounds.size.width {
+                        current.width - bounds.bounds.size.width
+                    } else {
+                        px(0.0)
+                    };
+                    let chrome_height = if current.height > bounds.bounds.size.height {
+                        current.height - bounds.bounds.size.height
+                    } else {
+                        px(0.0)
+                    };
+                    let target = gpui::size(
+                        bounds.cell_width * columns as f32 + chrome_width,
+                        bounds.line_height * rows as f32 + chrome_height,
+                    );
+                    if (current.width - target.width).abs() > px(1.0)
+                        || (current.height - target.height).abs() > px(1.0)
+                    {
+                        window.resize(target);
+                    }
+                }
+
                 Event::Notification(title, body, progress) => {
                     terminal_view.notification_progress = *progress;
                     if progress.is_some() {
@@ -1657,7 +1716,7 @@ fn subscribe_for_terminal_events(
                             (title, body)
                         };
                         cx.show_system_notification(SystemNotification {
-                            tag: "terminal-osc9".into(),
+                            tag: "terminal-notification".into(),
                             title: title.into(),
                             body: body.into(),
                             actions: Vec::new(),
@@ -1802,7 +1861,7 @@ fn subscribe_for_terminal_events(
                         });
                     }
                 }
-                Event::UserInput(_) => {
+                Event::UserInput(..) => {
                     // Broadcast relay is handled by the terminal list panel's
                     // subscription to this view; nothing to do here.
                 }
@@ -1863,14 +1922,27 @@ impl TerminalView {
     /// updates the cursor locally without sending data to the shell, so there's no
     /// shell output to automatically trigger a re-render.
     fn process_keystroke(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) -> bool {
+        self.process_key_event(keystroke, KeyEventType::Press, cx)
+    }
+
+    fn process_key_event(
+        &mut self,
+        keystroke: &Keystroke,
+        event_type: KeyEventType,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let (handled, vi_mode_enabled) = self.terminal.update(cx, |term, cx| {
             (
-                term.try_keystroke(keystroke, TerminalSettings::get_global(cx).option_as_meta),
+                term.try_key_event(
+                    keystroke,
+                    event_type,
+                    TerminalSettings::get_global(cx).option_as_meta,
+                ),
                 term.vi_mode_enabled(),
             )
         });
 
-        if handled && vi_mode_enabled {
+        if handled && vi_mode_enabled && event_type != KeyEventType::Release {
             cx.notify();
         }
 
@@ -1880,7 +1952,7 @@ impl TerminalView {
         // intentionally never broadcasts, to keep large clipboard payloads
         // from storming every terminal in the group.
         if handled {
-            cx.emit(Event::UserInput(keystroke.clone()));
+            cx.emit(Event::UserInput(keystroke.clone(), event_type));
         }
 
         handled
@@ -1890,7 +1962,18 @@ impl TerminalView {
         self.clear_bell(cx);
         self.pause_cursor_blinking(window, cx);
 
-        if self.process_keystroke(&event.keystroke, cx) {
+        let event_type = if event.is_held {
+            KeyEventType::Repeat
+        } else {
+            KeyEventType::Press
+        };
+        if self.process_key_event(&event.keystroke, event_type, cx) {
+            cx.stop_propagation();
+        }
+    }
+
+    fn key_up(&mut self, event: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.process_key_event(&event.keystroke, KeyEventType::Release, cx) {
             cx.stop_propagation();
         }
     }
@@ -2018,11 +2101,13 @@ impl Render for TerminalView {
             .on_action(cx.listener(TerminalView::rerun_last_command))
             .on_action(cx.listener(TerminalView::toggle_vi_mode))
             .on_action(cx.listener(TerminalView::open_urls))
+            .on_action(cx.listener(TerminalView::show_hints))
             .on_action(cx.listener(TerminalView::show_character_palette))
             .on_action(cx.listener(TerminalView::select_all))
             .on_action(cx.listener(TerminalView::rerun_task))
             .on_action(cx.listener(TerminalView::rename_terminal))
             .on_key_down(cx.listener(Self::key_down))
+            .on_key_up(cx.listener(Self::key_up))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {

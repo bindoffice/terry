@@ -526,6 +526,20 @@ pub trait Handler {
     ) {
     }
 
+    /// OSC 99 rich desktop notification metadata/payload.
+    ///
+    /// The metadata is the raw, colon separated `key=value` section and the
+    /// payload is everything after the second semicolon. The handler is
+    /// responsible for chunking (`i`/`d`), payload types (`p`), and decoding
+    /// (`e=1`).
+    fn rich_notification(&mut self, _metadata: &str, _payload: &str) {}
+
+    /// OSC 66 text sizing protocol.
+    ///
+    /// `metadata` is the raw colon separated `key=value` section and `text`
+    /// is the text to render.
+    fn text_sizing(&mut self, _metadata: &str, _text: &str) {}
+
     /// OSC to report the current working directory (`OSC 7;file://...`).
     ///
     /// The value is the raw `file://` URI; `None` indicates the directory was
@@ -754,6 +768,9 @@ pub trait Handler {
 
     /// Report text area size in characters.
     fn text_area_size_chars(&mut self) {}
+
+    /// Resize the OS window to the given character grid size (`CSI 8`).
+    fn resize_window(&mut self, _columns: usize, _rows: usize) {}
 
     /// Set hyperlink.
     fn set_hyperlink(&mut self, _: Option<Hyperlink>) {}
@@ -1551,6 +1568,36 @@ where
                 return;
             }
 
+            // Text sizing protocol.
+            b"66" => {
+                if params.len() < 2 {
+                    return unhandled(params);
+                }
+                let metadata = String::from_utf8_lossy(params[1]);
+                let text = params[2..]
+                    .iter()
+                    .flat_map(|param| str::from_utf8(param))
+                    .collect::<Vec<_>>()
+                    .join(";");
+                self.handler.text_sizing(&metadata, &text);
+                return;
+            }
+
+            // Rich desktop notification.
+            b"99" => {
+                if params.len() < 2 {
+                    return unhandled(params);
+                }
+                let metadata = String::from_utf8_lossy(params[1]);
+                let payload = params[2..]
+                    .iter()
+                    .flat_map(|param| str::from_utf8(param))
+                    .collect::<Vec<_>>()
+                    .join(";");
+                self.handler.rich_notification(&metadata, &payload);
+                return;
+            }
+
             // Show desktop notification (kitty/iTerm2).
             b"9" => {
                 // `OSC 9;title` (iTerm2) shows a notification whose payload is
@@ -1893,6 +1940,14 @@ where
             ('s', []) => handler.save_cursor_position(),
             ('T', []) => handler.scroll_down(next_param_or(1) as usize),
             ('t', []) => match next_param_or(1) as usize {
+                8 => {
+                    // CSI 8 ; rows ; columns t
+                    let rows = next_param_or(0) as usize;
+                    let columns = next_param_or(0) as usize;
+                    if rows > 0 && columns > 0 {
+                        handler.resize_window(columns, rows);
+                    }
+                }
                 14 => handler.text_area_size_pixels(),
                 18 => handler.text_area_size_chars(),
                 22 => handler.push_title(),

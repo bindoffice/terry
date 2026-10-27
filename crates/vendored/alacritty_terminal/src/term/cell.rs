@@ -121,10 +121,30 @@ impl ResetDiscriminant<Color> for Cell {
     }
 }
 
+/// Text rendered using the OSC 66 text sizing protocol.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct CellTextSizing {
+    /// Full text for explicitly-width (`w`) blocks. `None` means the cell's
+    /// single character is rendered at the scaled size.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Overall scale (1..=7).
+    pub scale: u8,
+    /// Width in scaled cells (0 means normal width).
+    pub width: u8,
+    /// Fractional-scale numerator/denominator.
+    pub num: u8,
+    pub den: u8,
+    /// Vertical/horizontal alignment for fractional scaling.
+    pub valign: u8,
+    pub halign: u8,
+}
+
 /// Dynamically allocated cell content.
 ///
 /// This storage is reserved for cell attributes which are rarely set. This allows reducing the
-/// allocation required ahead of time for every cell, with some additional overhead when the extra
+/// allocation required off the bat for every cell, with some additional overhead when the extra
 /// storage is actually required.
 #[derive(Default, Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -135,6 +155,9 @@ pub struct CellExtra {
     /// Image placement id this cell is the top-left of.
     #[serde(default)]
     image: Option<u32>,
+    /// OSC 66 text sizing metadata for the top-left cell of a block.
+    #[serde(default)]
+    text_sizing: Option<CellTextSizing>,
 }
 
 /// Content and attributes of a single cell in the terminal grid.
@@ -180,7 +203,9 @@ impl Cell {
     pub fn clear_wide(&mut self) {
         self.flags.remove(Flags::WIDE_CHAR);
         if let Some(extra) = self.extra.as_mut() {
-            Arc::make_mut(extra).zerowidth = Vec::new();
+            let extra = Arc::make_mut(extra);
+            extra.zerowidth = Vec::new();
+            extra.text_sizing = None;
         }
         self.c = ' ';
     }
@@ -190,7 +215,10 @@ impl Cell {
         // If we reset color and we don't have zerowidth we should drop extra storage.
         if color.is_none()
             && self.extra.as_ref().is_none_or(|extra| {
-                extra.zerowidth.is_empty() && extra.hyperlink.is_none() && extra.image.is_none()
+                extra.zerowidth.is_empty()
+                    && extra.hyperlink.is_none()
+                    && extra.image.is_none()
+                    && extra.text_sizing.is_none()
             })
         {
             self.extra = None;
@@ -213,6 +241,7 @@ impl Cell {
                 extra.zerowidth.is_empty()
                     && extra.underline_color.is_none()
                     && extra.image.is_none()
+                    && extra.text_sizing.is_none()
             });
 
         if should_drop {
@@ -236,6 +265,7 @@ impl Cell {
                 extra.zerowidth.is_empty()
                     && extra.underline_color.is_none()
                     && extra.hyperlink.is_none()
+                    && extra.text_sizing.is_none()
             });
 
         if should_drop {
@@ -250,6 +280,29 @@ impl Cell {
     #[inline]
     pub fn image(&self) -> Option<u32> {
         self.extra.as_ref()?.image
+    }
+
+    /// OSC 66 sizing metadata stored on this cell, if any.
+    #[inline]
+    pub fn text_sizing(&self) -> Option<&CellTextSizing> {
+        self.extra.as_ref()?.text_sizing.as_ref()
+    }
+
+    /// Set OSC 66 sizing metadata for this cell.
+    pub fn set_text_sizing(&mut self, sizing: Option<CellTextSizing>) {
+        let should_drop = sizing.is_none()
+            && self.extra.as_ref().is_none_or(|extra| {
+                extra.zerowidth.is_empty()
+                    && extra.underline_color.is_none()
+                    && extra.hyperlink.is_none()
+                    && extra.image.is_none()
+            });
+        if should_drop {
+            self.extra = None;
+        } else {
+            let extra = self.extra.get_or_insert(Default::default());
+            Arc::make_mut(extra).text_sizing = sizing;
+        }
     }
 }
 
@@ -269,6 +322,7 @@ impl GridCell for Cell {
             )
             && self.extra.as_ref().map(|extra| extra.zerowidth.is_empty()) != Some(false)
             && self.extra.as_ref().map(|extra| extra.image.is_none()) != Some(false)
+            && self.extra.as_ref().map(|extra| extra.text_sizing.is_none()) != Some(false)
     }
 
     #[inline]
@@ -317,6 +371,10 @@ impl LineLength for grid::Row<Cell> {
         for (index, cell) in self[..].iter().rev().enumerate() {
             if cell.c != ' '
                 || cell.extra.as_ref().map(|extra| extra.zerowidth.is_empty()) == Some(false)
+                || cell
+                    .extra
+                    .as_ref()
+                    .is_some_and(|extra| extra.text_sizing.is_some())
             {
                 length = Column(self.len() - index);
                 break;

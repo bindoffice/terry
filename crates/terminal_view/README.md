@@ -26,7 +26,7 @@ This keeps the user-facing terminal behavior unchanged while making future backe
 
 There are currently many distinct paths for getting keystrokes to the terminal:
 
-1. Terminal specific characters and bindings. Things like ctrl-a mapping to ASCII control character 1, ANSI escape codes associated with the function keys, etc. These are caught with a raw key-down handler in the element and are processed immediately. This is done with the `try_keystroke()` method on Terminal
+1. Terminal specific characters and bindings. Things like ctrl-a mapping to ASCII control character 1, ANSI escape codes associated with the function keys, etc. These are caught with raw key-down/key-up handlers in the element and are processed immediately. Key events go through `try_key_event()` on Terminal (with `try_keystroke()` as the press-only wrapper) so the kitty keyboard protocol can report press, repeat and release events.
 
 2. GPU Action handlers. GPUI clobbers a few vital keys by adding bindings to them in the global context. These keys are synthesized and then dispatched through the same `try_keystroke()` API as the above mappings
 

@@ -13,8 +13,8 @@ use language::CursorShape as EditorCursorShape;
 use settings::Settings;
 use std::time::Instant;
 use terminal::{
-    Cell, Color, Content, CursorShape, IndexedCell, Modes, NamedColor, Point, Range, Terminal,
-    TerminalBounds, is_app_chosen_exact_color as terminal_is_app_chosen_exact_color,
+    Cell, Color, Content, CursorIcon, CursorShape, IndexedCell, Modes, NamedColor, Point, Range,
+    Terminal, TerminalBounds, is_app_chosen_exact_color as terminal_is_app_chosen_exact_color,
     is_default_background_color, terminal_settings::TerminalSettings,
 };
 use theme::Theme;
@@ -100,6 +100,11 @@ pub struct BatchedTextRun {
     pub cell_count: usize,
     pub style: TextRun,
     pub font_size: AbsoluteLength,
+    /// Font scale for OSC 66 sized text (1.0 for normal cells).
+    pub scale: f32,
+    /// Whether this run is a single OSC 66 sized block and must not be merged
+    /// with adjacent normal cells.
+    pub sized: bool,
 }
 
 impl BatchedTextRun {
@@ -117,11 +122,34 @@ impl BatchedTextRun {
             cell_count: 1,
             style,
             font_size,
+            scale: 1.0,
+            sized: false,
+        }
+    }
+
+    fn new_from_sized(
+        start_point: LayoutPoint,
+        text: String,
+        mut style: TextRun,
+        font_size: AbsoluteLength,
+        scale: f32,
+    ) -> Self {
+        style.len = text.len();
+        BatchedTextRun {
+            start_point,
+            text,
+            cell_count: 1,
+            style,
+            font_size,
+            scale,
+            sized: true,
         }
     }
 
     fn can_append(&self, other_style: &TextRun) -> bool {
-        self.style.font == other_style.font
+        !self.sized
+            && self.scale == 1.0
+            && self.style.font == other_style.font
             && self.style.color == other_style.color
             && self.style.background_color == other_style.background_color
             && self.style.underline == other_style.underline
@@ -162,22 +190,20 @@ impl BatchedTextRun {
             origin.y + self.start_point.line as f32 * dimensions.line_height,
         );
 
+        let scale = self.scale.max(0.05);
+        let font_size = self.font_size.to_pixels(window.rem_size()) * scale;
+        let line_height = dimensions.line_height * scale;
+        let force_width = if self.sized { None } else { force_width };
+
         window
             .text_system()
             .shape_line(
                 self.text.clone().into(),
-                self.font_size.to_pixels(window.rem_size()),
+                font_size,
                 std::slice::from_ref(&self.style),
                 force_width,
             )
-            .paint(
-                pos,
-                dimensions.line_height,
-                gpui::TextAlign::Left,
-                None,
-                window,
-                cx,
-            )
+            .paint(pos, line_height, gpui::TextAlign::Left, None, window, cx)
             .log_err();
     }
 }
@@ -327,6 +353,33 @@ fn merge_background_regions(regions: Vec<BackgroundRegion>) -> Vec<BackgroundReg
     merged
 }
 
+fn cursor_style_for_icon(icon: CursorIcon) -> gpui::CursorStyle {
+    use gpui::CursorStyle;
+
+    match icon {
+        CursorIcon::Default => CursorStyle::Arrow,
+        CursorIcon::Text => CursorStyle::IBeam,
+        CursorIcon::VerticalText => CursorStyle::IBeamCursorForVerticalLayout,
+        CursorIcon::Pointer => CursorStyle::PointingHand,
+        CursorIcon::Crosshair | CursorIcon::Cell => CursorStyle::Crosshair,
+        CursorIcon::Grab => CursorStyle::OpenHand,
+        CursorIcon::Grabbing => CursorStyle::ClosedHand,
+        CursorIcon::ContextMenu => CursorStyle::ContextualMenu,
+        CursorIcon::Copy => CursorStyle::DragCopy,
+        CursorIcon::Alias => CursorStyle::DragLink,
+        CursorIcon::NotAllowed | CursorIcon::NoDrop => CursorStyle::OperationNotAllowed,
+        CursorIcon::EResize => CursorStyle::ResizeRight,
+        CursorIcon::WResize => CursorStyle::ResizeLeft,
+        CursorIcon::NResize => CursorStyle::ResizeUp,
+        CursorIcon::SResize => CursorStyle::ResizeDown,
+        CursorIcon::EwResize | CursorIcon::ColResize => CursorStyle::ResizeLeftRight,
+        CursorIcon::NsResize | CursorIcon::RowResize => CursorStyle::ResizeUpDown,
+        CursorIcon::NeResize | CursorIcon::SwResize => CursorStyle::ResizeUpRightDownLeft,
+        CursorIcon::NwResize | CursorIcon::SeResize => CursorStyle::ResizeUpLeftDownRight,
+        _ => CursorStyle::Arrow,
+    }
+}
+
 /// The GPUI element that paints the terminal.
 /// We need to keep a reference to the model for mouse events, do we need it for any other terminal stuff, or can we move that to connection?
 pub struct TerminalElement {
@@ -406,8 +459,6 @@ impl TerminalElement {
                 batched_runs.push(batch);
             }
 
-            let mut previous_cell_had_extras = false;
-
             for cell in line {
                 let point = cell.point();
                 let cell = cell.cell();
@@ -439,14 +490,53 @@ impl TerminalElement {
                     continue;
                 }
 
-                // Skip spaces that follow cells with extras (emoji variation sequences)
-                if cell.character() == ' ' && previous_cell_had_extras {
-                    previous_cell_had_extras = false;
+                // OSC 66 sized text is rendered as a standalone run. It must
+                // not be merged with adjacent normal cells.
+                if let Some(sizing) = cell.text_sizing().cloned() {
+                    if let Some(batch) = current_batch.take() {
+                        batched_runs.push(batch);
+                    }
+
+                    let text = sizing.text.clone().unwrap_or_else(|| {
+                        let mut text = String::new();
+                        text.push(cell.character());
+                        if let Some(chars) = cell.zerowidth() {
+                            text.extend(chars);
+                        }
+                        text
+                    });
+                    let fraction = if sizing.den > 0 {
+                        sizing.num as f32 / sizing.den as f32
+                    } else {
+                        1.0
+                    };
+                    let mut scale = (sizing.scale.max(1) as f32 * fraction).max(0.05);
+                    if let Some(text) = &sizing.text {
+                        let block_columns =
+                            (sizing.scale.max(1) as f32 * sizing.width.max(1) as f32).max(1.0);
+                        let natural_columns = text.chars().count().max(1) as f32;
+                        scale = scale.min((block_columns / natural_columns).max(0.1));
+                    }
+                    let cell_style = TerminalElement::cell_style(
+                        point,
+                        cell,
+                        fg,
+                        bg,
+                        theme,
+                        text_style,
+                        hyperlink,
+                        minimum_contrast,
+                    );
+                    batched_runs.push(BatchedTextRun::new_from_sized(
+                        LayoutPoint::new(display_line, point.column as i32),
+                        text,
+                        cell_style,
+                        text_style.font_size,
+                        scale,
+                    ));
+                    cell_count += 1;
                     continue;
                 }
-                // Update tracking for next iteration
-                previous_cell_had_extras =
-                    matches!(cell.zerowidth(), Some(chars) if !chars.is_empty());
 
                 //Layout current cell text
                 {
@@ -1474,11 +1564,18 @@ impl Element for TerminalElement {
                 &layout.content_mode,
                 window,
             );
+            let terminal_cursor_style = self
+                .terminal
+                .read(cx)
+                .mouse_cursor_icon()
+                .map(cursor_style_for_icon);
             if window.modifiers().secondary()
                 && bounds.contains(&window.mouse_position())
                 && self.terminal_view.read(cx).hover.is_some()
             {
                 window.set_cursor_style(gpui::CursorStyle::PointingHand, &layout.hitbox);
+            } else if let Some(style) = terminal_cursor_style {
+                window.set_cursor_style(style, &layout.hitbox);
             } else {
                 window.set_cursor_style(gpui::CursorStyle::IBeam, &layout.hitbox);
             }

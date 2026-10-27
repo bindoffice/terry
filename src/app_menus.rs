@@ -286,6 +286,7 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
                         i18n::t("jump_to_next_prompt"),
                         terminal_view::JumpToNextPrompt,
                     ),
+                    MenuItem::action(i18n::t("show_hints"), terminal_view::ShowHints),
                     MenuItem::separator(),
                     MenuItem::action(
                         i18n::t("copy_last_command_output"),

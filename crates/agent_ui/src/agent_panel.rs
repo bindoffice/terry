@@ -2209,7 +2209,8 @@ impl AgentPanel {
                 | TerminalEvent::Notification(_, _, _)
                 | TerminalEvent::CommandStarted
                 | TerminalEvent::LastCommandFinished(_)
-                | TerminalEvent::UserInput(_) => {}
+                | TerminalEvent::ResizeWindow { .. }
+                | TerminalEvent::UserInput(..) => {}
             },
         );
 
