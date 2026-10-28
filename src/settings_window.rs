@@ -4,6 +4,7 @@ use gpui::{
     ParentElement, Render, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, div,
     px,
 };
+use platform_title_bar::PlatformTitleBar;
 use settings::{Settings, SettingsStore, UiLanguage, update_settings_file};
 use strum::VariantArray;
 use terminal::terminal_settings::{CursorShape as TerminalCursorShape, TerminalSettings};
@@ -15,6 +16,8 @@ use ui::{
 };
 use util::ResultExt;
 use vim_mode_setting::VimModeSetting;
+
+use crate::window_title_bar;
 
 /// Must stay aligned with [`UiLanguage`] variant declaration order.
 const LANGUAGE_LABELS: &[&str] = &[
@@ -84,6 +87,9 @@ pub struct SettingsWindow {
     font_size_menu: Entity<ContextMenu>,
     font_family_menu: Entity<ContextMenu>,
     last_language: Option<UiLanguage>,
+    /// Drawn only on Linux when the window falls back to client-side
+    /// decorations (e.g. GNOME on Wayland), which have to be provided by us.
+    title_bar: Option<Entity<PlatformTitleBar>>,
 }
 
 impl SettingsWindow {
@@ -93,6 +99,7 @@ impl SettingsWindow {
         let language_menu = build_language_menu(language, window, cx);
         let font_size_menu = build_font_size_menu(window, cx);
         let font_family_menu = build_font_family_menu(window, cx);
+        let title_bar = window_title_bar::new_window_title_bar("terry-settings-title-bar", cx);
         cx.observe_global::<SettingsStore>(|_, cx| cx.notify())
             .detach();
         Self {
@@ -102,6 +109,7 @@ impl SettingsWindow {
             font_size_menu,
             font_family_menu,
             last_language: Some(language),
+            title_bar,
         }
     }
 
@@ -334,15 +342,32 @@ impl SettingsWindow {
                             ),
                     )
                     .child(
-                        Button::new("select-theme", i18n::t("select_theme"))
-                            .style(ButtonStyle::Outlined)
-                            .size(ButtonSize::Medium)
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(
-                                    zed_actions::theme_selector::Toggle::default().boxed_clone(),
-                                    cx,
-                                );
-                            }),
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("select-theme", i18n::t("select_theme"))
+                                    .style(ButtonStyle::Outlined)
+                                    .size(ButtonSize::Medium)
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(
+                                            zed_actions::theme_selector::Toggle::default()
+                                                .boxed_clone(),
+                                            cx,
+                                        );
+                                    }),
+                            )
+                            .child(
+                                Button::new("open-theme-generator", i18n::t("theme_generator"))
+                                    .style(ButtonStyle::Outlined)
+                                    .size(ButtonSize::Medium)
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(
+                                            crate::theme_generator::OpenThemeGenerator
+                                                .boxed_clone(),
+                                            cx,
+                                        );
+                                    }),
+                            ),
                     )
                     .into_any_element(),
             ))
@@ -1208,6 +1233,16 @@ impl Render for SettingsWindow {
         self.font_family_menu = build_font_family_menu(window, cx);
         self.font_size_menu = build_font_size_menu(window, cx);
 
+        // When the window is client-decorated (e.g. GNOME on Wayland) the
+        // compositor draws no title bar, so we have to provide one that
+        // contains the window controls ourselves.
+        let title_bar = window_title_bar::render_window_title_bar(
+            &self.title_bar,
+            i18n::t("settings"),
+            window,
+            cx,
+        );
+
         div()
             .id("terry-settings")
             .key_context("SettingsWindow")
@@ -1217,6 +1252,7 @@ impl Render for SettingsWindow {
             .flex_col()
             .bg(cx.theme().colors().background)
             .text_color(cx.theme().colors().text)
+            .children(title_bar)
             .child(
                 div()
                     .px_4()

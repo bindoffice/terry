@@ -463,6 +463,26 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
                 "agent_card_description",
                 "Run multiple threads at once, mix and match any ACP-compatible agent, and keep work conflict-free with worktrees.",
             );
+            m.insert("theme_generator", "Theme Generator");
+            m.insert("theme_generator_name", "Name");
+            m.insert("theme_generator_name_placeholder", "My Theme");
+            m.insert("theme_generator_preview", "Preview");
+            m.insert("theme_generator_colors", "Colors");
+            m.insert("theme_generator_group_interface", "Interface");
+            m.insert("theme_generator_group_window", "Window");
+            m.insert("theme_generator_group_status", "Status");
+            m.insert("theme_generator_group_syntax", "Syntax");
+            m.insert("theme_generator_dark", "Dark");
+            m.insert("theme_generator_light", "Light");
+            m.insert("theme_generator_save", "Save & Apply");
+            m.insert("theme_generator_saved", "Saved to");
+            m.insert("theme_generator_empty_name", "Enter a theme name");
+            m.insert("theme_generator_save_failed", "Failed to save theme");
+            m.insert("theme_generator_hue", "Hue");
+            m.insert("theme_generator_saturation", "Saturation");
+            m.insert("theme_generator_lightness", "Lightness");
+            m.insert("theme_generator_opacity", "Opacity");
+            m.insert("theme_generator_presets", "Presets");
             m
         });
         locales.insert("zh-CN", {
@@ -887,6 +907,26 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
                 "agent_card_description",
                 "同时运行多个线程，自由组合 ACP 兼容 Agent，并用 worktree 避免冲突。",
             );
+            m.insert("theme_generator", "主题生成器");
+            m.insert("theme_generator_name", "名称");
+            m.insert("theme_generator_name_placeholder", "我的主题");
+            m.insert("theme_generator_preview", "预览");
+            m.insert("theme_generator_colors", "颜色");
+            m.insert("theme_generator_group_interface", "界面");
+            m.insert("theme_generator_group_window", "窗口");
+            m.insert("theme_generator_group_status", "状态");
+            m.insert("theme_generator_group_syntax", "语法");
+            m.insert("theme_generator_dark", "深色");
+            m.insert("theme_generator_light", "浅色");
+            m.insert("theme_generator_save", "保存并应用");
+            m.insert("theme_generator_saved", "已保存到");
+            m.insert("theme_generator_empty_name", "请输入主题名称");
+            m.insert("theme_generator_save_failed", "保存主题失败");
+            m.insert("theme_generator_hue", "色相");
+            m.insert("theme_generator_saturation", "饱和度");
+            m.insert("theme_generator_lightness", "亮度");
+            m.insert("theme_generator_opacity", "不透明度");
+            m.insert("theme_generator_presets", "预设色");
             m
         });
         locales.insert("zh-TW", {
@@ -1170,6 +1210,26 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("terry_tagline", "面向下一步的終端機工作區");
             m.insert("recent_terminals", "最近終端機");
             m.insert("recent_folders", "最近資料夾");
+            m.insert("theme_generator", "主題產生器");
+            m.insert("theme_generator_name", "名稱");
+            m.insert("theme_generator_name_placeholder", "我的主題");
+            m.insert("theme_generator_preview", "預覽");
+            m.insert("theme_generator_colors", "顏色");
+            m.insert("theme_generator_group_interface", "介面");
+            m.insert("theme_generator_group_window", "視窗");
+            m.insert("theme_generator_group_status", "狀態");
+            m.insert("theme_generator_group_syntax", "語法");
+            m.insert("theme_generator_dark", "深色");
+            m.insert("theme_generator_light", "淺色");
+            m.insert("theme_generator_save", "儲存並套用");
+            m.insert("theme_generator_saved", "已儲存至");
+            m.insert("theme_generator_empty_name", "請輸入主題名稱");
+            m.insert("theme_generator_save_failed", "儲存主題失敗");
+            m.insert("theme_generator_hue", "色相");
+            m.insert("theme_generator_saturation", "飽和度");
+            m.insert("theme_generator_lightness", "亮度");
+            m.insert("theme_generator_opacity", "不透明度");
+            m.insert("theme_generator_presets", "預設色");
             m
         });
         locales.insert("ja", {

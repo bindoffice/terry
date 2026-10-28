@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 mod agent_switcher;
 mod app_icon;
 mod app_menus;
@@ -20,8 +22,10 @@ mod status_bar_items;
 mod terminal_list_panel;
 mod terminal_picker;
 mod terry_keymap;
+mod theme_generator;
 mod tmux_control;
 mod tmux_native;
+mod window_title_bar;
 use std::sync::Arc;
 
 use assets::Assets;
@@ -348,6 +352,7 @@ fn main() {
         );
         file_list_panel::init(cx);
         app_title_bar::init(cx);
+        theme_generator::init(cx);
         clipboard_history::init(cx);
         command_history::init(cx);
         cx.set_global(crate::session_recording::SessionRecording::default());

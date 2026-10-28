@@ -1,4 +1,9 @@
 // This crate was essentially pulled out verbatim from main `zed` crate to avoid having to run RustEmbed macro whenever zed has to be rebuilt. It saves a second or two on an incremental build.
+//
+// Note that assets are embedded at compile time, so adding new files under
+// `assets/` (for example, a bundled theme) only shows up after this crate is
+// rebuilt. RustEmbed does not track the addition of new files, so an
+// incremental build may need `cargo clean -p assets`.
 
 use anyhow::Context as _;
 use gpui::{App, AssetSource, Result, SharedString};

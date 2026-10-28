@@ -445,3 +445,39 @@ pub fn increase_buffer_font_size(cx: &mut App) {
 pub fn decrease_buffer_font_size(cx: &mut App) {
     adjust_buffer_font_size(cx, |size| size - px(1.0));
 }
+
+#[cfg(test)]
+mod bundled_themes_tests {
+    use std::path::{Path, PathBuf};
+
+    use super::ThemeFamilyContent;
+
+    fn collect_theme_files(dir: &Path, files: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("failed to read bundled themes directory") {
+            let path = entry.expect("failed to read bundled theme entry").path();
+            if path.is_dir() {
+                collect_theme_files(&path, files);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                files.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_themes_deserialize() {
+        let themes_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes");
+        let mut files = Vec::new();
+        collect_theme_files(&themes_dir, &mut files);
+        assert!(!files.is_empty(), "no bundled themes were found");
+
+        for path in files {
+            let contents = std::fs::read(&path).expect("failed to read bundled theme");
+            serde_json::from_slice::<ThemeFamilyContent>(&contents).unwrap_or_else(|error| {
+                panic!("failed to parse bundled theme {}: {error}", path.display())
+            });
+        }
+    }
+}

@@ -91,7 +91,22 @@ impl PlatformTitleBar {
         if self.platform_style == PlatformStyle::Linux
             && matches!(decorations, Decorations::Client { .. })
         {
-            self.button_layout.or_else(|| cx.button_layout())
+            // Without an explicit layout we would render no window controls at
+            // all, leaving client-decorated windows with no way to be closed,
+            // minimized or maximized. Fall back to the built-in layout when
+            // neither the window nor the platform provides one.
+            self.button_layout
+                .or_else(|| cx.button_layout())
+                .or_else(|| {
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    {
+                        Some(WindowButtonLayout::linux_default())
+                    }
+                    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+                    {
+                        None
+                    }
+                })
         } else {
             None
         }
