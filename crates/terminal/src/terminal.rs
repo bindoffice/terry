@@ -2697,10 +2697,15 @@ impl Terminal {
     ///Paste text into the terminal
     pub fn paste(&mut self, text: &str) {
         let sanitized = sanitize_paste(text);
+        // Collapse CRLF and lone CR into LF before any wrapping. Programs that
+        // insert bracketed paste verbatim would otherwise turn every Windows
+        // line ending into two line breaks; the non-bracketed path rewrites the
+        // remaining LF to CR below.
+        let text = sanitized.replace("\r\n", "\n").replace('\r', "\n");
         let paste_text = if self.last_content.mode.contains(Modes::BRACKETED_PASTE) {
-            format!("\x1b[200~{sanitized}\x1b[201~")
+            format!("\x1b[200~{text}\x1b[201~")
         } else {
-            sanitized.replace("\r\n", "\r").replace('\n', "\r")
+            text.replace('\n', "\r")
         };
 
         self.input(paste_text.into_bytes());
@@ -5592,6 +5597,59 @@ mod tests {
             term.image_state_mut().clear();
             let content = make_content(&mut term, &terminal.last_content);
             assert!(content.images.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_paste_normalizes_line_endings(cx: &mut TestAppContext) {
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        let refresh_modes = |terminal: &mut Terminal| {
+            let mut term = terminal.term.lock();
+            terminal.last_content = make_content(&mut term, &terminal.last_content);
+        };
+
+        // With bracketed paste, CRLF and lone CR collapse into one line break
+        // each instead of being inserted twice.
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b[?2004h", cx);
+            refresh_modes(terminal);
+            assert!(terminal.last_content.mode.contains(Modes::BRACKETED_PASTE));
+
+            terminal.paste("one\r\ntwo\r\nthree");
+            terminal.paste("lone\rcr");
+            assert_eq!(
+                terminal.take_input_log(),
+                vec![
+                    b"\x1b[200~one\ntwo\nthree\x1b[201~".to_vec(),
+                    b"\x1b[200~lone\ncr\x1b[201~".to_vec(),
+                ]
+            );
+        });
+
+        // Without bracketed paste, line breaks are still sent as carriage
+        // returns so the program sees plain Enter keys.
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b[?2004l", cx);
+            refresh_modes(terminal);
+            assert!(!terminal.last_content.mode.contains(Modes::BRACKETED_PASTE));
+
+            terminal.paste("one\r\ntwo");
+            terminal.paste("plain\ntext");
+            assert_eq!(
+                terminal.take_input_log(),
+                vec![b"one\rtwo".to_vec(), b"plain\rtext".to_vec()]
+            );
         });
     }
 
