@@ -371,6 +371,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("zoom_out", "Zoom Out");
             m.insert("about_terry", "About Terry");
             m.insert("about_terry_description", "A terminal-focused workspace.");
+            m.insert("settings_tab_about", "About");
+            m.insert("about_version", "Version");
+            m.insert("about_version_description", "The installed Terry build version.");
+            m.insert("about_website", "Website");
+            m.insert("about_website_description", "Open the Terry project website.");
             m.insert("check_for_updates", "Check for Updates…");
             m.insert("checking_for_updates", "Checking for updates…");
             m.insert("up_to_date", "Up to date");
@@ -818,6 +823,11 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("zoom_out", "缩小");
             m.insert("about_terry", "关于 Terry");
             m.insert("about_terry_description", "以终端为中心的工作区。");
+            m.insert("settings_tab_about", "关于");
+            m.insert("about_version", "版本");
+            m.insert("about_version_description", "当前安装的 Terry 版本。");
+            m.insert("about_website", "官方网站");
+            m.insert("about_website_description", "打开 Terry 项目网站。");
             m.insert("check_for_updates", "检查更新…");
             m.insert("checking_for_updates", "正在检查更新…");
             m.insert("up_to_date", "已是最新版本");

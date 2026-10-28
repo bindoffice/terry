@@ -52,16 +52,18 @@ enum SettingsTab {
     Terminal,
     Keyboard,
     Agent,
+    About,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::General,
         Self::Appearance,
         Self::Editor,
         Self::Terminal,
         Self::Keyboard,
         Self::Agent,
+        Self::About,
     ];
 
     fn label(self) -> String {
@@ -72,6 +74,7 @@ impl SettingsTab {
             Self::Terminal => i18n::t("terminal"),
             Self::Keyboard => i18n::t("settings_tab_keyboard"),
             Self::Agent => i18n::t("agent"),
+            Self::About => i18n::t("settings_tab_about"),
         }
     }
 
@@ -181,6 +184,12 @@ impl SettingsWindow {
                     SettingsTab::Agent.label(),
                     cx.listener(|this, _, _, cx| {
                         this.select_tab(SettingsTab::Agent, cx);
+                    }),
+                ),
+                ToggleButtonSimple::new(
+                    SettingsTab::About.label(),
+                    cx.listener(|this, _, _, cx| {
+                        this.select_tab(SettingsTab::About, cx);
                     }),
                 ),
             ],
@@ -1004,6 +1013,31 @@ impl SettingsWindow {
         )
     }
 
+    fn render_about_tab(&self, _cx: &App) -> AnyElement {
+        v_flex()
+            .gap_4()
+            .child(settings_section(
+                i18n::t("about_terry"),
+                i18n::t("about_terry_description"),
+                Label::new("Terry").into_any_element(),
+            ))
+            .child(settings_section(
+                i18n::t("about_version"),
+                i18n::t("about_version_description"),
+                Label::new(env!("TERRY_VERSION")).into_any_element(),
+            ))
+            .child(settings_section(
+                i18n::t("about_website"),
+                i18n::t("about_website_description"),
+                Button::new("open-terry-website", "https://bindoffice.com")
+                    .style(ButtonStyle::Outlined)
+                    .size(ButtonSize::Medium)
+                    .on_click(|_, _, cx| cx.open_url("https://bindoffice.com"))
+                    .into_any_element(),
+            ))
+            .into_any_element()
+    }
+
     fn render_active_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.active_tab {
             SettingsTab::General => self.render_general_tab(window, cx),
@@ -1012,6 +1046,7 @@ impl SettingsWindow {
             SettingsTab::Terminal => self.render_terminal_tab(window, cx),
             SettingsTab::Keyboard => self.render_keyboard_tab(cx),
             SettingsTab::Agent => self.render_agent_tab(cx),
+            SettingsTab::About => self.render_about_tab(cx),
         }
     }
 }

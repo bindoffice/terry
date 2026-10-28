@@ -388,14 +388,9 @@ impl Render for UpdateStatusItem {
         let status = cx.global::<UpdateCheckerState>().status.clone();
 
         let element: gpui::AnyElement = match status {
-            UpdateStatus::Idle => {
-                let version = display_version(&AppVersion::global(cx));
-                Button::new("app-version", version)
-                    .label_size(LabelSize::Small)
-                    .tooltip(Tooltip::text(i18n::t("check_for_updates")))
-                    .on_click(|_, _window, cx| check_for_updates(cx))
-                    .into_any_element()
-            }
+            // The version is shown on the settings About page; keep the status
+            // bar empty until there is an update to report.
+            UpdateStatus::Idle => gpui::Empty.into_any_element(),
             UpdateStatus::Checking => Button::new(
                 "update-checking",
                 i18n::t("checking_for_updates"),
