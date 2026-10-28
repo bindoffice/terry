@@ -376,6 +376,20 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("about_version_description", "The installed Terry build version.");
             m.insert("about_website", "Website");
             m.insert("about_website_description", "Open the Terry project website.");
+            m.insert("about_updates", "Updates");
+            m.insert(
+                "about_updates_description",
+                "Check whether a newer Terry release is available.",
+            );
+            m.insert("about_support", "Support");
+            m.insert(
+                "about_support_description",
+                "Open the configuration or log folder when reporting a problem.",
+            );
+            m.insert("open_config_folder", "Open Config Folder");
+            m.insert("open_log_folder", "Open Log Folder");
+            m.insert("reopen_closed_terminal", "Reopen Closed Terminal");
+            m.insert("move_tab_to_new_window", "Move Tab to New Window");
             m.insert("check_for_updates", "Check for Updates…");
             m.insert("checking_for_updates", "Checking for updates…");
             m.insert("up_to_date", "Up to date");
@@ -828,6 +842,20 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("about_version_description", "当前安装的 Terry 版本。");
             m.insert("about_website", "官方网站");
             m.insert("about_website_description", "打开 Terry 项目网站。");
+            m.insert("about_updates", "更新");
+            m.insert(
+                "about_updates_description",
+                "检查是否有更新版本的 Terry。",
+            );
+            m.insert("about_support", "支持");
+            m.insert(
+                "about_support_description",
+                "反馈问题时，可打开配置目录或日志目录。",
+            );
+            m.insert("open_config_folder", "打开配置目录");
+            m.insert("open_log_folder", "打开日志目录");
+            m.insert("reopen_closed_terminal", "重新打开已关闭的终端");
+            m.insert("move_tab_to_new_window", "将标签移到新窗口");
             m.insert("check_for_updates", "检查更新…");
             m.insert("checking_for_updates", "正在检查更新…");
             m.insert("up_to_date", "已是最新版本");

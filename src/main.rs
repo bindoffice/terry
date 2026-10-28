@@ -11,6 +11,7 @@ mod ipc;
 mod keymap_settings;
 mod kittens;
 mod llm_provider_settings;
+mod move_to_window;
 mod process_inspector;
 mod quake_terminal;
 mod remote_hosts;
@@ -244,6 +245,7 @@ fn main() {
         });
         i18n::init(cx);
         settings_window::init(cx);
+        move_to_window::init(cx);
         keymap_settings::init(cx);
         keymap_editor::init(cx);
         llm_provider_settings::init(cx);

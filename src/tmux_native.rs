@@ -1,11 +1,9 @@
-//! Native tmux panes via control mode (experimental).
+//! Native tmux panes via control mode.
 //!
 //! Attaches to a tmux session with `tmux -CC`, mirrors every pane into a
 //! display-only terminal and forwards keystrokes back with `send-keys`. Panes
-//! are added to the active group and tiled.
-//!
-//! Layout fidelity is approximate: panes are tiled by the group's layout mode
-//! rather than reproducing tmux's split tree.
+//! are grouped per tmux window and laid out from tmux's layout tree, so
+//! opening or closing a window in tmux adds or removes a Terry group.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -104,7 +102,15 @@ pub fn attach(target: String, window: &mut Window, cx: &mut Context<TerminalList
                         let Some((window_id, pane_id, cwd)) = parse_pane_line(&line) else {
                             continue;
                         };
-                        if panes.contains_key(&pane_id) {
+                        if let Some(terminal) = panes.get(&pane_id) {
+                            // The pane may already have been created from a
+                            // layout event; backfill its working directory.
+                            if cwd.is_some() {
+                                let terminal_id = terminal.entity_id();
+                                let _ = panel.update_in(cx, |panel, _window, cx| {
+                                    panel.note_mirrored_pane_cwd(terminal_id, cwd, cx)
+                                });
+                            }
                             continue;
                         }
                         let buffered = pending.remove(&pane_id).unwrap_or_default();
@@ -141,8 +147,109 @@ pub fn attach(target: String, window: &mut Window, cx: &mut Context<TerminalList
                             Err(_) => break,
                         }
                     }
+                    ControlEvent::WindowAdd(window) => {
+                        let window_id = window.0;
+                        // A new tmux window (e.g. `prefix + c`) needs its own
+                        // group; ask tmux for the current pane list so the
+                        // panes are mirrored as well.
+                        if panel
+                            .update_in(cx, |panel, _window, cx| {
+                                panel.tmux_window_added(window_id, cx)
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                        if let Ok(mut client) = client.lock() {
+                            let _ = client.send(LIST_PANES_SIMPLE);
+                        }
+                    }
+                    ControlEvent::WindowClose(window) => {
+                        let window_id = window.0;
+                        if panel
+                            .update_in(cx, |panel, window, cx| {
+                                panel.remove_tmux_window(window_id, window, cx)
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                        // Drop the mirrored terminals too, otherwise their
+                        // display-only entities stay alive after the group is gone.
+                        if let Some(closed) = pane_order.remove(&window_id) {
+                            for pane_id in closed {
+                                panes.remove(&pane_id);
+                                pending.remove(&pane_id);
+                            }
+                        }
+                    }
                     ControlEvent::LayoutChange { window, layout } => {
                         let window_id = window.0;
+                        let mut leaves = Vec::new();
+                        collect_layout_panes(&layout, &mut leaves);
+
+                        // Mirror panes that appeared since the last pane list
+                        // (for example a split created inside tmux).
+                        let mut failed = false;
+                        for pane_id in &leaves {
+                            if panes.contains_key(pane_id) {
+                                continue;
+                            }
+                            let buffered = pending.remove(pane_id).unwrap_or_default();
+                            let pane_client = current.clone();
+                            let created = panel.update_in(cx, |panel, window, cx| {
+                                panel.add_mirrored_pane(
+                                    window_id,
+                                    *pane_id,
+                                    None,
+                                    buffered,
+                                    pane_client,
+                                    window,
+                                    cx,
+                                )
+                            });
+                            match created {
+                                Ok(Some(terminal)) => {
+                                    pane_order.entry(window_id).or_default().push(*pane_id);
+                                    panes.insert(*pane_id, terminal);
+                                }
+                                Ok(None) => {}
+                                Err(_) => {
+                                    failed = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if failed {
+                            break;
+                        }
+
+                        // Drop mirrors for panes that no longer exist.
+                        if let Some(order) = pane_order.get(&window_id).cloned() {
+                            for pane_id in order {
+                                if leaves.contains(&pane_id) {
+                                    continue;
+                                }
+                                if let Some(terminal) = panes.remove(&pane_id) {
+                                    let terminal_id = terminal.entity_id();
+                                    let removed = panel.update_in(cx, |panel, window, cx| {
+                                        panel.remove_tmux_pane(terminal_id, window, cx)
+                                    });
+                                    if removed.is_err() {
+                                        failed = true;
+                                        break;
+                                    }
+                                }
+                                pending.remove(&pane_id);
+                                if let Some(order) = pane_order.get_mut(&window_id) {
+                                    order.retain(|id| *id != pane_id);
+                                }
+                            }
+                        }
+                        if failed {
+                            break;
+                        }
+
                         let order = pane_order.get(&window_id).cloned().unwrap_or_default();
                         let applied = panel.update_in(cx, |panel, window, cx| {
                             panel.apply_tmux_layout(window_id, &order, &layout, window, cx);
@@ -206,6 +313,21 @@ async fn backoff(attempts: &mut u32, target: &str, cx: &mut gpui::AsyncWindowCon
     log::info!("tmux native: reconnecting to {target} in {delay:?} (attempt {attempts})");
     cx.background_executor().timer(delay).await;
     true
+}
+
+/// Collects the pane ids referenced by a parsed tmux layout tree.
+fn collect_layout_panes(layout: &crate::tmux_control::Layout, out: &mut Vec<u32>) {
+    match layout {
+        crate::tmux_control::Layout::Leaf {
+            pane: Some(pane), ..
+        } => out.push(*pane),
+        crate::tmux_control::Layout::Leaf { .. } => {}
+        crate::tmux_control::Layout::Split { children, .. } => {
+            for child in children {
+                collect_layout_panes(child, out);
+            }
+        }
+    }
 }
 
 /// Parses `window_id|||pane_id|||cwd` lines returned by

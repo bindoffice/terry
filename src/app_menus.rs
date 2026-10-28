@@ -251,6 +251,14 @@ pub fn app_menus(cx: &App) -> Vec<Menu> {
                         i18n::t("new_group"),
                         zed_actions::terminal_list_panel::NewGroup,
                     ),
+                    MenuItem::action(
+                        i18n::t("reopen_closed_terminal"),
+                        zed_actions::terminal_list_panel::ReopenClosedTerminal,
+                    ),
+                    MenuItem::action(
+                        i18n::t("move_tab_to_new_window"),
+                        crate::move_to_window::MoveTabToNewWindow,
+                    ),
                 ];
                 let profiles = TerminalSettings::get_global(cx).profiles.clone();
                 if !profiles.is_empty() {

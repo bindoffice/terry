@@ -20,6 +20,7 @@
 ## 功能特性
 
 - **终端工作区** — 分组管理多个终端，`ctrl-alt-shift-up` / `ctrl-alt-shift-down` 切换分组；按正确工作目录新建会话；分组支持自动平铺布局（manual / splits / tall / fat / grid / stack / horizontal / vertical，类似 kitty）；在分组右键菜单开启**广播输入**，一次键入同时发送到组内所有终端（`ctrl-alt-b`）
+- **标签管理** — `cmd-shift-t`（`ctrl-shift-t`）重新打开最近关闭的终端，并恢复工作目录、Profile/SSH/tmux 启动方式、配色和字号；“将标签移到新窗口”会把运行中的终端（进程保留）移到新窗口
 - **Quake 终端** — 全局热键 `ctrl+\`` 随处呼出的下拉终端，贴顶显示（macOS）
 - **命令行** — 从脚本和编辑器驱动运行中的 Terry：`terry new-tab --cwd ~/src`、`terry send-text "cargo test"`、`terry run "cargo test"`，以及 `terry session save/load` 保存可复用工作流
 - **Kittens / 插件** — 从 `kittens/` 目录发现可执行插件，用 `terry kitten list` / `terry kitten run NAME` 启动；插件会拿到 `TERRY_*` 上下文和自动化 API。注意这是 Terry 的插件协议，不是 kitty Python kitten API 的源码级兼容层
@@ -29,7 +30,7 @@
 - **Shell 集成** — zsh / fish 开箱即用：提示符标记（OSC 133 / VS Code OSC 633）与工作目录跟踪（OSC 7）；`ctrl-shift-up` / `ctrl-shift-down` 在各条命令的提示符之间跳转
 - **终端配置档** — 命名 Profile 可覆盖 Shell、环境变量与工作目录，并在 Shell 启动后执行命令（例如 `tmux` 或激活项目虚拟环境）；可在分组右键菜单中选择，或用 `default_profile` 设为默认
 - **SSH 主机** — 从 `~/.ssh/config` 与 `terminal.ssh_hosts` 生成主机选择器；连接会复用 60 秒（`ControlMaster`），同一主机的第二个终端瞬间打开。「通过 tmux 连接」会在远端 attach 或新建 tmux 会话
-- **tmux 会话** — 选择器可直接 attach 或新建本地 tmux 会话；远端等价于 `ssh … tmux new -A -s <名称>`。（原生 tmux **control mode**，即把远端 pane 渲染成 Terry 的分屏，尚未实现）
+- **tmux 会话** — 选择器可直接 attach 或新建本地 tmux 会话；远端等价于 `ssh … tmux new -A -s <名称>`。选择「原生分屏」后会通过 tmux **control mode**（`tmux -CC`）把每个 tmux window 映射成 Terry 分组、每个 pane 映射成原生分屏，输入、布局变化、窗口重命名与断线重连都会同步；不选原生分屏时会话仍运行在单个终端里
 - **终端配色方案** — 内置配色库（Dracula、Nord、Solarized、Gruvbox、One Dark、Tokyo Night、Catppuccin、Rosé Pine 等），只改变终端颜色；可按终端、按 Profile 或用 `terminal.color_scheme` 选择。可从「终端」菜单导入 Alacritty `.toml`、iTerm2 `.itermcolors` 或 Terry JSON
 - **会话恢复** — 重启后恢复分组、分屏布局、工作目录、标题、Profile 配色、每终端字号缩放，以及 Profile / SSH / tmux 启动方式
 - **Hints** — `Ctrl+Shift+E` 列出可见的 URL、路径、git hash、UUID、IP 与自定义正则匹配；可键盘选择打开、复制、粘贴或选中。自定义规则写在 `terminal.hints`，例如 `{ "regex": "#\\d+", "action": "copy" }`

@@ -1,20 +1,16 @@
 //! tmux control mode (`tmux -CC`) protocol core.
 //!
-//! Terry currently attaches tmux sessions as a raw PTY, which means the whole
-//! tmux UI is drawn inside one terminal. Native integration requires speaking
-//! tmux's *control mode* protocol: tmux reports windows, panes, layouts and
-//! pane output as line-oriented events, and accepts commands on stdin.
-//!
-//! This module implements that protocol as a standalone, testable foundation:
+//! Native integration speaks tmux's *control mode* protocol: tmux reports
+//! windows, panes, layouts and pane output as line-oriented events, and accepts
+//! commands on stdin. The bridge that maps those events onto Terry's groups,
+//! panes and display-only terminals lives in `src/tmux_native.rs`; this module
+//! only parses the protocol and drives the client process:
 //!
 //! * [`parse_line`] turns a control-mode line into a [`ControlEvent`].
 //! * [`unescape_octal`] decodes the `%output` payload escaping.
 //! * [`parse_layout`] turns a tmux layout string into a [`Layout`] tree.
 //! * [`ControlClient`] spawns `tmux -CC`, writes commands and reads events.
 //! * Helpers build the commands used to forward input and size changes.
-//!
-//! The UI wiring (mapping panes onto native panes) is intentionally not part of
-//! this module yet, so nothing here is reachable from the app UI.
 #![allow(dead_code)]
 
 use std::io::{self, BufRead, BufReader, Write};

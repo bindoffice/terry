@@ -974,6 +974,9 @@ pub mod terminal_list_panel {
             NextGroup,
             /// Switches to the previous terminal group.
             PreviousGroup,
+            /// Reopens the most recently closed terminal, falling back to the
+            /// previous pane item when there is nothing to reopen.
+            ReopenClosedTerminal,
             /// Opens the SSH host picker.
             ConnectSshHost,
             /// Opens the SSH host picker and attaches a tmux session on the

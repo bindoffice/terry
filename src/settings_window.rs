@@ -2,7 +2,7 @@ use fs::Fs;
 use gpui::{
     Action, AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement,
     ParentElement, Render, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, div,
-    px,
+    img, px,
 };
 use platform_title_bar::PlatformTitleBar;
 use settings::{Settings, SettingsStore, UiLanguage, update_settings_file};
@@ -1016,11 +1016,26 @@ impl SettingsWindow {
     fn render_about_tab(&self, _cx: &App) -> AnyElement {
         v_flex()
             .gap_4()
-            .child(settings_section(
-                i18n::t("about_terry"),
-                i18n::t("about_terry_description"),
-                Label::new("Terry").into_any_element(),
-            ))
+            .child(
+                v_flex()
+                    .items_center()
+                    .gap_2()
+                    .py_2()
+                    .child(
+                        img("images/terry_logo.png")
+                            .size(rems_from_px(72.))
+                            .rounded_xl()
+                            .overflow_hidden(),
+                    )
+                    .child(Label::new("Terry"))
+                    .child(
+                        div().max_w(px(320.)).text_center().child(
+                            Label::new(i18n::t("about_terry_description"))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
+                    ),
+            )
             .child(settings_section(
                 i18n::t("about_version"),
                 i18n::t("about_version_description"),
@@ -1033,6 +1048,41 @@ impl SettingsWindow {
                     .style(ButtonStyle::Outlined)
                     .size(ButtonSize::Medium)
                     .on_click(|_, _, cx| cx.open_url("https://bindoffice.com"))
+                    .into_any_element(),
+            ))
+            .child(settings_section(
+                i18n::t("about_updates"),
+                i18n::t("about_updates_description"),
+                Button::new("about-check-for-updates", i18n::t("check_for_updates"))
+                    .style(ButtonStyle::Outlined)
+                    .size(ButtonSize::Medium)
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(update_checker::CheckForUpdates.boxed_clone(), cx);
+                    })
+                    .into_any_element(),
+            ))
+            .child(settings_section(
+                i18n::t("about_support"),
+                i18n::t("about_support_description"),
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("open-config-folder", i18n::t("open_config_folder"))
+                            .style(ButtonStyle::Outlined)
+                            .size(ButtonSize::Medium)
+                            .on_click(|_, _, cx| cx.open_with_system(paths::config_dir())),
+                    )
+                    .child(
+                        Button::new("open-log-folder", i18n::t("open_log_folder"))
+                            .style(ButtonStyle::Outlined)
+                            .size(ButtonSize::Medium)
+                            .on_click(|_, _, cx| {
+                                let path = paths::log_file()
+                                    .parent()
+                                    .unwrap_or_else(|| paths::config_dir().as_path());
+                                cx.open_with_system(path);
+                            }),
+                    )
                     .into_any_element(),
             ))
             .into_any_element()

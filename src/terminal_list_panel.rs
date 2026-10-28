@@ -16,10 +16,11 @@ use ui::{
 };
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent, PanelStatusButton};
-use workspace::{ItemHandle, Member, Pane, PaneAxis, PaneGroup};
+use workspace::{ItemHandle, Member, Pane, PaneAxis, PaneGroup, ReopenClosedItem};
 use zed_actions::terminal_list_panel::{
     AttachTmuxSession, ConnectSshHost, ConnectSshHostWithTmux, ImportTerminalColorScheme, NewGroup,
-    NewTerminal, NextGroup, PreviousGroup, SelectTerminalColorScheme, ToggleFocus,
+    NewTerminal, NextGroup, PreviousGroup, ReopenClosedTerminal, SelectTerminalColorScheme,
+    ToggleFocus,
 };
 
 use serde::{Deserialize, Serialize};
@@ -84,6 +85,13 @@ fn release_session_claim(workspace_key: &str, owner: EntityId) {
 struct ParkedAgentSession {
     view: Entity<TerminalView>,
     cwd: Option<PathBuf>,
+}
+
+/// A terminal the user closed, remembered so it can be reopened with the same
+/// cwd, launch (profile / ssh / tmux), colors and font size.
+struct ClosedTerminal {
+    group_id: GroupId,
+    terminal: PersistedTerminal,
 }
 
 /// A live terminal kept alive outside every group so its PTY, scrollback and
@@ -726,7 +734,7 @@ struct PersistedTerminal {
 /// Replayable launch information for a persisted terminal.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum PersistedLaunch {
+pub(crate) enum PersistedLaunch {
     /// A named profile from `terminal.profiles`.
     Profile { name: String },
     /// A direct program invocation (SSH, tmux, ...).
@@ -1092,6 +1100,18 @@ pub fn init(cx: &mut App) {
                 panel.update(cx, |panel, cx| panel.new_terminal(window, cx));
             });
         });
+        workspace.register_action(|workspace, _: &ReopenClosedTerminal, window, cx| {
+            let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
+                return;
+            };
+            window.defer(cx, move |window, cx| {
+                let reopened =
+                    panel.update(cx, |panel, cx| panel.reopen_closed_terminal(window, cx));
+                if !reopened {
+                    window.dispatch_action(ReopenClosedItem.boxed_clone(), cx);
+                }
+            });
+        });
         workspace.register_action(|workspace, _: &NewGroup, window, cx| {
             let Some(panel) = workspace.panel::<TerminalListPanel>(cx) else {
                 return;
@@ -1411,6 +1431,11 @@ pub struct TerminalListPanel {
     /// Coding-agent terminals closed by the user. The PTY stays alive so the
     /// next new terminal can reattach instead of starting a fresh shell.
     parked_agent_sessions: Vec<ParkedAgentSession>,
+    /// Terminals closed by the user, most recent last, so they can be reopened.
+    recently_closed: Vec<ClosedTerminal>,
+    /// Set while removals must not populate [`Self::recently_closed`] (tab moved
+    /// to another window, tmux mirror rebuilt).
+    suppress_recently_closed: bool,
     /// Live terminals removed from every group but still running. They are not
     /// persisted: quitting the app releases their PTYs like any other view.
     detached_sessions: Vec<DetachedSession>,
@@ -1563,6 +1588,8 @@ impl TerminalListPanel {
             command_history_persist: Task::ready(()),
             restore_cwd_guard_until: None,
             parked_agent_sessions: Vec::new(),
+            recently_closed: Vec::new(),
+            suppress_recently_closed: false,
             detached_sessions: Vec::new(),
             group_switch_hint: None,
             switch_hint_generation: 0,
@@ -2372,37 +2399,7 @@ impl TerminalListPanel {
             // Replay the original launch (named profile, `ssh`, `tmux`, ...)
             // instead of opening a plain shell. A profile that no longer exists
             // falls back to the default shell rather than failing the restore.
-            let (profile, launch) = match launch {
-                Some(PersistedLaunch::Profile { name }) => {
-                    let profile = TerminalSettings::get_global(cx).profile(&name).cloned();
-                    (profile, Some(PersistedLaunch::Profile { name }))
-                }
-                Some(PersistedLaunch::Command {
-                    program,
-                    args,
-                    title,
-                }) => {
-                    let launch = PersistedLaunch::Command {
-                        program: program.clone(),
-                        args: args.clone(),
-                        title: title.clone(),
-                    };
-                    let profile = TerminalProfile {
-                        name: format!("restored:{program}"),
-                        shell: Some(task::Shell::WithArguments {
-                            program,
-                            args,
-                            title_override: title,
-                        }),
-                        working_directory: None,
-                        env: Default::default(),
-                        command: None,
-                        color_scheme: None,
-                    };
-                    (Some(profile), Some(launch))
-                }
-                None => (None, None),
-            };
+            let (profile, launch) = Self::resolve_persisted_launch(launch, cx);
             self.spawn_terminal(
                 id,
                 cwd,
@@ -3045,6 +3042,7 @@ impl TerminalListPanel {
             let clone_view = terminal_view.clone();
             let rename_view = terminal_view.clone();
             let close_panel = panel.clone();
+            let moved_panel = panel.clone();
             let menu = menu
                 .entry(i18n::t("clone_terminal"), None, move |window, cx| {
                     clone_panel.update(cx, |this, cx| {
@@ -3055,7 +3053,22 @@ impl TerminalListPanel {
                     rename_view.update(cx, |this, cx| {
                         this.rename_terminal(&terminal_view::RenameTerminal, window, cx)
                     });
-                });
+                })
+                .entry(
+                    i18n::t("move_tab_to_new_window"),
+                    None,
+                    move |window, cx| {
+                        // The command moves the active tab, so focus this row
+                        // first when it was right-clicked from the sidebar.
+                        moved_panel.update(cx, |this, cx| {
+                            this.focus_terminal_by_id(terminal_id, window, cx);
+                        });
+                        window.dispatch_action(
+                            crate::move_to_window::MoveTabToNewWindow.boxed_clone(),
+                            cx,
+                        );
+                    },
+                );
 
             let menu = if move_targets.is_empty() {
                 menu
@@ -3892,6 +3905,237 @@ impl TerminalListPanel {
             }
         }
         self.remove_terminal_by_id(terminal_id, window, cx);
+    }
+
+    /// Creates a group when the panel has none and records the launch recipe
+    /// for a terminal tab moving in from another window.
+    pub(crate) fn prepare_for_moved_terminal(
+        &mut self,
+        view: &Entity<TerminalView>,
+        cwd: Option<PathBuf>,
+        launch: Option<PersistedLaunch>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.groups.is_empty() {
+            let id = self.new_group_id();
+            self.groups.push(TerminalGroup {
+                id,
+                name: SharedString::from(i18n::t("terminals")),
+                terminals: Vec::new(),
+                collapsed: false,
+                has_unread: false,
+                saved_layout: None,
+                layout_mode: GroupLayoutMode::Manual,
+                broadcast_input: false,
+                session_terminal_count: None,
+                restore_slots: Vec::new(),
+            });
+            self.active_group_id = id;
+        }
+        let view_id = view.entity_id();
+        self.terminal_spawn_cwds.insert(view_id, cwd);
+        if let Some(launch) = launch {
+            self.terminal_launches.insert(view_id, launch);
+        }
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Ensures a terminal moved in from another window is tracked by the
+    /// active group, even when `ItemAdded` was skipped (e.g. during session
+    /// restore). Idempotent: an already tracked view is left in place.
+    pub(crate) fn adopt_moved_terminal(
+        &mut self,
+        view: &Entity<TerminalView>,
+        cwd: Option<PathBuf>,
+        launch: Option<PersistedLaunch>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.groups.is_empty() {
+            let id = self.new_group_id();
+            self.groups.push(TerminalGroup {
+                id,
+                name: SharedString::from(i18n::t("terminals")),
+                terminals: Vec::new(),
+                collapsed: false,
+                has_unread: false,
+                saved_layout: None,
+                layout_mode: GroupLayoutMode::Manual,
+                broadcast_input: false,
+                session_terminal_count: None,
+                restore_slots: Vec::new(),
+            });
+            self.active_group_id = id;
+        }
+        let view_id = view.entity_id();
+        let tracked = self
+            .groups
+            .iter()
+            .any(|group| group.terminals.iter().any(|t| t.entity_id() == view_id));
+        if !tracked {
+            if let Some(group) = self
+                .groups
+                .iter_mut()
+                .find(|group| group.id == self.active_group_id)
+            {
+                group.terminals.push(view.clone());
+            }
+        }
+        self.terminal_spawn_cwds.insert(view_id, cwd);
+        if let Some(launch) = launch {
+            self.terminal_launches.insert(view_id, launch);
+        }
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Stops or resumes remembering closed terminals around non-close removals.
+    pub(crate) fn set_suppress_recently_closed(&mut self, suppress: bool) {
+        self.suppress_recently_closed = suppress;
+    }
+
+    /// Cwd and launch recipe captured before a terminal leaves this panel.
+    pub(crate) fn terminal_move_metadata(
+        &self,
+        view_id: EntityId,
+    ) -> (Option<PathBuf>, Option<PersistedLaunch>) {
+        (
+            self.terminal_spawn_cwds.get(&view_id).cloned().flatten(),
+            self.terminal_launches.get(&view_id).cloned(),
+        )
+    }
+
+    /// Remembers a terminal that is about to close so it can be reopened.
+    fn remember_closed_terminal(&mut self, terminal_id: EntityId, cx: &App) {
+        const MAX_RECENTLY_CLOSED: usize = 10;
+        let Some(view) = self.terminal_view_by_id(terminal_id) else {
+            return;
+        };
+        let Some(group_id) = self.groups.iter().find_map(|group| {
+            group
+                .terminals
+                .iter()
+                .any(|view| view.entity_id() == terminal_id)
+                .then_some(group.id)
+        }) else {
+            return;
+        };
+        let (cwd, title, color_scheme, font_size) = {
+            let view = view.read(cx);
+            let terminal = view.terminal().read(cx);
+            let cwd = self
+                .terminal_spawn_cwds
+                .get(&terminal_id)
+                .cloned()
+                .flatten()
+                .or_else(|| terminal.working_directory());
+            (
+                cwd,
+                view.custom_title().map(str::to_owned),
+                view.color_scheme().map(str::to_owned),
+                view.font_size_override().map(f32::from),
+            )
+        };
+        let launch = self.terminal_launches.get(&terminal_id).cloned();
+        if self.recently_closed.len() >= MAX_RECENTLY_CLOSED {
+            self.recently_closed.remove(0);
+        }
+        self.recently_closed.push(ClosedTerminal {
+            group_id,
+            terminal: PersistedTerminal {
+                cwd,
+                title,
+                color_scheme,
+                font_size,
+                launch,
+            },
+        });
+    }
+
+    /// Reopens the most recently closed terminal in its original group when it
+    /// still exists, otherwise in the active group. Returns false when there is
+    /// nothing left to reopen.
+    pub fn reopen_closed_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(closed) = self.recently_closed.pop() else {
+            return false;
+        };
+        let group_id = if self.groups.iter().any(|group| group.id == closed.group_id) {
+            closed.group_id
+        } else if self
+            .groups
+            .iter()
+            .any(|group| group.id == self.active_group_id)
+        {
+            self.active_group_id
+        } else {
+            return false;
+        };
+        let PersistedTerminal {
+            cwd,
+            title,
+            color_scheme,
+            font_size,
+            launch,
+        } = closed.terminal;
+        let (profile, launch) = Self::resolve_persisted_launch(launch, cx);
+        self.spawn_terminal(
+            group_id,
+            cwd,
+            None,
+            None,
+            SpawnRestore {
+                index: None,
+                title,
+                color_scheme,
+                font_size,
+                launch,
+            },
+            None,
+            profile,
+            window,
+            cx,
+        );
+        true
+    }
+
+    /// Resolves a persisted launch into the profile and launch record used by
+    /// [`Self::spawn_terminal`]. A profile that no longer exists falls back to
+    /// the default shell rather than failing.
+    fn resolve_persisted_launch(
+        launch: Option<PersistedLaunch>,
+        cx: &App,
+    ) -> (Option<TerminalProfile>, Option<PersistedLaunch>) {
+        match launch {
+            Some(PersistedLaunch::Profile { name }) => {
+                let profile = TerminalSettings::get_global(cx).profile(&name).cloned();
+                (profile, Some(PersistedLaunch::Profile { name }))
+            }
+            Some(PersistedLaunch::Command {
+                program,
+                args,
+                title,
+            }) => {
+                let launch = PersistedLaunch::Command {
+                    program: program.clone(),
+                    args: args.clone(),
+                    title: title.clone(),
+                };
+                let profile = TerminalProfile {
+                    name: format!("restored:{program}"),
+                    shell: Some(task::Shell::WithArguments {
+                        program,
+                        args,
+                        title_override: title,
+                    }),
+                    working_directory: None,
+                    env: Default::default(),
+                    command: None,
+                    color_scheme: None,
+                };
+                (Some(profile), Some(launch))
+            }
+            None => (None, None),
+        }
     }
 
     /// Spawns a shell terminal and attaches it to the given group. The
@@ -5264,6 +5508,7 @@ impl TerminalListPanel {
             self.terminal_spawn_cwds.remove(view_id);
             self.agent_waiting.remove(view_id);
         }
+        self.suppress_recently_closed = true;
         if let Some(pane) = self.display_pane_entity(cx) {
             for view_id in &mirrored {
                 let view_id = *view_id;
@@ -5272,10 +5517,133 @@ impl TerminalListPanel {
                 });
             }
         }
+        self.suppress_recently_closed = false;
         for group_id in group_ids {
             if let Some(index) = self.groups.iter().position(|group| group.id == group_id) {
                 self.groups.remove(index);
             }
+        }
+        if !self
+            .groups
+            .iter()
+            .any(|group| group.id == self.active_group_id)
+        {
+            if let Some(first) = self.groups.first() {
+                self.active_group_id = first.id;
+            }
+        }
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Creates the group for a tmux window that appeared after attach, so its
+    /// layout and panes can be mirrored.
+    pub(crate) fn tmux_window_added(&mut self, window_id: u32, cx: &mut Context<Self>) {
+        self.ensure_tmux_group(window_id, cx);
+    }
+
+    /// Records the working directory of a mirrored tmux pane that was created
+    /// from a layout event before its pane list entry arrived.
+    pub(crate) fn note_mirrored_pane_cwd(
+        &mut self,
+        terminal_id: EntityId,
+        cwd: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view_id) = self
+            .groups
+            .iter()
+            .flat_map(|group| group.terminals.iter())
+            .find(|view| view.read(cx).terminal().entity_id() == terminal_id)
+            .map(|view| view.entity_id())
+        else {
+            return;
+        };
+        self.terminal_spawn_cwds.insert(view_id, cwd);
+        self.save_session(cx);
+    }
+
+    /// Removes one mirrored pane (its tmux pane was closed) without disturbing
+    /// the rest of the tmux window.
+    pub(crate) fn remove_tmux_pane(
+        &mut self,
+        terminal_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((group_id, view)) = self.groups.iter().find_map(|group| {
+            group
+                .terminals
+                .iter()
+                .find(|view| view.read(cx).terminal().entity_id() == terminal_id)
+                .map(|view| (group.id, (*view).clone()))
+        }) else {
+            return;
+        };
+        let view_id = view.entity_id();
+        self.tmux_mirrored.remove(&view_id);
+        self._terminal_subscriptions.remove(&view_id);
+        self.terminal_activity.remove(&view_id);
+        self.terminal_launches.remove(&view_id);
+        self.terminal_spawn_cwds.remove(&view_id);
+        self.agent_waiting.remove(&view_id);
+        if group_id == self.active_group_id {
+            self.suppress_recently_closed = true;
+            if let Some(pane) = self.display_pane_entity(cx) {
+                pane.update(cx, |pane, cx| {
+                    pane.remove_item(view_id, false, false, window, cx);
+                });
+            }
+            self.suppress_recently_closed = false;
+        } else if let Some(group) = self.groups.iter_mut().find(|group| group.id == group_id) {
+            group.terminals.retain(|view| view.entity_id() != view_id);
+        }
+        self.save_session(cx);
+        cx.notify();
+    }
+
+    /// Removes the group mirroring a tmux window that was closed in tmux.
+    pub(crate) fn remove_tmux_window(
+        &mut self,
+        window_id: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group_id) = self.tmux_window_groups.remove(&window_id) else {
+            return;
+        };
+        let view_ids: Vec<EntityId> = self
+            .groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .map(|group| {
+                group
+                    .terminals
+                    .iter()
+                    .map(|view| view.entity_id())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for view_id in &view_ids {
+            self._terminal_subscriptions.remove(view_id);
+            self.terminal_activity.remove(view_id);
+            self.terminal_launches.remove(view_id);
+            self.terminal_spawn_cwds.remove(view_id);
+            self.agent_waiting.remove(view_id);
+            self.tmux_mirrored.remove(view_id);
+        }
+        self.suppress_recently_closed = true;
+        if let Some(pane) = self.display_pane_entity(cx) {
+            for view_id in view_ids {
+                pane.update(cx, |pane, cx| {
+                    pane.remove_item(view_id, false, false, window, cx);
+                });
+            }
+        }
+        self.suppress_recently_closed = false;
+        if let Some(index) = self.groups.iter().position(|group| group.id == group_id) {
+            self.groups.remove(index);
         }
         if !self
             .groups
@@ -6521,6 +6889,9 @@ impl TerminalListPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.suppress_recently_closed {
+            self.remember_closed_terminal(item_id, cx);
+        }
         self._terminal_subscriptions.remove(&item_id);
         self.terminal_activity.remove(&item_id);
         let mut changed = false;

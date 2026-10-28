@@ -682,7 +682,7 @@
       "shift-find": "pane::DeploySearch",
       "ctrl-shift-f": "pane::DeploySearch",
       "ctrl-shift-h": ["pane::DeploySearch", { "replace_enabled": true }],
-      "ctrl-shift-t": "pane::ReopenClosedItem",
+      "ctrl-shift-t": "terminal_list_panel::ReopenClosedTerminal",
       "ctrl-k ctrl-p": "workspace::ReopenLastPicker",
       "ctrl-k ctrl-s": "zed::OpenKeymap",
       "ctrl-k ctrl-t": "theme_selector::Toggle",

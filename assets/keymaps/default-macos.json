@@ -734,7 +734,7 @@
       "ctrl-alt-+": ["workspace::IncreaseOpenDocksSize", { "px": 0 }],
       "cmd-shift-f": "pane::DeploySearch",
       "cmd-shift-h": ["pane::DeploySearch", { "replace_enabled": true }],
-      "cmd-shift-t": "pane::ReopenClosedItem",
+      "cmd-shift-t": "terminal_list_panel::ReopenClosedTerminal",
       "cmd-k cmd-p": "workspace::ReopenLastPicker",
       "cmd-k cmd-s": "zed::OpenKeymap",
       "cmd-k cmd-t": "theme_selector::Toggle",

@@ -505,6 +505,21 @@ impl TerminalView {
         }
     }
 
+    /// Rebinds this view after it moves to a pane in another window, so
+    /// workspace-relative actions keep working.
+    pub fn rebind_workspace(
+        &mut self,
+        workspace: WeakEntity<Workspace>,
+        project: WeakEntity<Project>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace = workspace.clone();
+        self.project = project;
+        self._terminal_subscriptions =
+            subscribe_for_terminal_events(&self.terminal, workspace, window, cx);
+    }
+
     /// Enable 'embedded' mode where the terminal displays the full content with an optional limit of lines.
     pub fn set_embedded_mode(
         &mut self,
