@@ -2188,7 +2188,8 @@
     "notify_on_command_finish": false,
     // Ask before pasting text that contains more than one line. Multi-line
     // pastes into a shell can execute commands immediately, so this is on by
-    // default.
+    // default. Choosing "Paste and Don't Ask Again" in the prompt sets this to
+    // false.
     // Default: true
     "confirm_multiline_paste": true,
     // Terminal background opacity, from 0.0 (fully transparent) to 1.0

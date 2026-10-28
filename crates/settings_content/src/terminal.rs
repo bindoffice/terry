@@ -262,7 +262,8 @@ pub struct TerminalSettingsContent {
     /// Default: false
     pub notify_on_command_finish: Option<bool>,
     /// Whether to ask for confirmation before pasting text containing more
-    /// than one line into the terminal.
+    /// than one line into the terminal. Choosing "Paste and Don't Ask Again"
+    /// in the prompt sets this to `false`.
     ///
     /// Default: true
     pub confirm_multiline_paste: Option<bool>,

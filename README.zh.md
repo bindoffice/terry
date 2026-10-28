@@ -25,7 +25,7 @@
 - **Kittens / 插件** — 从 `kittens/` 目录发现可执行插件，用 `terry kitten list` / `terry kitten run NAME` 启动；插件会拿到 `TERRY_*` 上下文和自动化 API。注意这是 Terry 的插件协议，不是 kitty Python kitten API 的源码级兼容层
 - **终端图像** — 支持 kitty graphics 协议与 sixel，终端内直接显示图片，GIF 可动画（`chafa` / `viu` / `icat` 可用）
 - **终端协议** — kitty 键盘协议（CSI u，支持按下/重复/释放事件、备用键与关联文本）、OSC 52 剪贴板写入（读取需显式开启 `"terminal": { "clipboard_read": true }`）、OSC 99 桌面通知、OSC 22 鼠标指针形状、OSC 66 文本缩放、CSI 8 t 窗口尺寸调整，以及 Unicode grapheme 聚类（emoji ZWJ 序列、旗帜、keycap、组合字符）
-- **粘贴安全** — 多行粘贴默认先确认（可用 `"terminal": { "confirm_multiline_paste": false }` 关闭）
+- **粘贴安全** — 多行粘贴默认先确认；在弹窗中选择「粘贴，不再询问」即可关闭，也可用 `"terminal": { "confirm_multiline_paste": false }` 关闭
 - **Shell 集成** — zsh / fish 开箱即用：提示符标记（OSC 133 / VS Code OSC 633）与工作目录跟踪（OSC 7）；`ctrl-shift-up` / `ctrl-shift-down` 在各条命令的提示符之间跳转
 - **终端配置档** — 命名 Profile 可覆盖 Shell、环境变量与工作目录，并在 Shell 启动后执行命令（例如 `tmux` 或激活项目虚拟环境）；可在分组右键菜单中选择，或用 `default_profile` 设为默认
 - **SSH 主机** — 从 `~/.ssh/config` 与 `terminal.ssh_hosts` 生成主机选择器；连接会复用 60 秒（`ControlMaster`），同一主机的第二个终端瞬间打开。「通过 tmux 连接」会在远端 attach 或新建 tmux 会话

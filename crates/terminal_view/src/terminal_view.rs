@@ -10,12 +10,13 @@ use editor::{
     Editor, EditorSettings, actions::SelectAll, blink_manager::BlinkManager,
     ui_scrollbar_settings_from_raw,
 };
+use fs::Fs;
 use gpui::{
     A11ySubtreeBuilder, Action, AnyElement, App, ClipboardEntry, DismissEvent, Entity,
     EventEmitter, ExternalPaths, FocusHandle, Focusable, Font, KeyContext, KeyDownEvent,
-    KeyUpEvent, Keystroke, MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, PromptLevel,
-    Render, Role, ScrollWheelEvent, Styled, Subscription, SystemNotification, Task, TaskExt,
-    WeakEntity, accesskit, actions, anchored, deferred, div,
+    KeyUpEvent, Keystroke, MouseButton, MouseDownEvent, Pixels, Point as GpuiPoint, PromptButton,
+    PromptLevel, Render, Role, ScrollWheelEvent, Styled, Subscription, SystemNotification, Task,
+    TaskExt, WeakEntity, accesskit, actions, anchored, deferred, div,
 };
 use menu;
 use persistence::TerminalDb;
@@ -24,6 +25,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{
     SeedQuerySetting, Settings, SettingsStore, TerminalBell, TerminalBlink, WorkingDirectory,
+    update_settings_file,
 };
 use std::{
     any::Any,
@@ -1427,17 +1429,38 @@ impl TerminalView {
             PromptLevel::Warning,
             &i18n::t("paste_multiline_title"),
             Some(&i18n::t("paste_multiline_detail")),
-            &[i18n::t_str("paste"), i18n::t_str("cancel")],
+            &[
+                PromptButton::ok(i18n::t_str("paste")),
+                PromptButton::new(i18n::t_str("paste_and_dont_ask")),
+                PromptButton::cancel(i18n::t_str("cancel")),
+            ],
             cx,
         );
         cx.spawn(async move |this, cx| {
-            if answer.await == Ok(0) {
-                this.update(cx, |this, cx| {
-                    this.terminal
-                        .update(cx, |terminal, _cx| terminal.paste(&text));
-                })
-                .ok();
+            let Ok(choice) = answer.await else {
+                return;
+            };
+            if choice > 1 {
+                return;
             }
+            // Index 1 is "Paste and Don't Ask Again": persist the choice so later
+            // multi-line pastes go straight through. Settings → Terminal can turn
+            // the prompt back on.
+            if choice == 1 {
+                cx.update(|cx| {
+                    update_settings_file(<dyn Fs>::global(cx), cx, |content, _| {
+                        content
+                            .terminal
+                            .get_or_insert_default()
+                            .confirm_multiline_paste = Some(false);
+                    });
+                });
+            }
+            this.update(cx, |this, cx| {
+                this.terminal
+                    .update(cx, |terminal, _cx| terminal.paste(&text));
+            })
+            .ok();
         })
         .detach();
     }

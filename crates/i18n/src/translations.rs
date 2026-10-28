@@ -140,14 +140,15 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("confirm_multiline_paste", "Confirm Multiline Paste");
             m.insert(
                 "confirm_multiline_paste_description",
-                "Ask before pasting text with more than one line, since shells may execute it immediately.",
+                "Ask before pasting text with more than one line, since shells may execute it immediately. Choosing \u{201c}Paste and Don't Ask Again\u{201d} in the prompt turns this off.",
             );
             m.insert("paste_multiline_title", "Paste multiple lines?");
             m.insert(
                 "paste_multiline_detail",
                 "The clipboard contains multiple lines. Pasting may execute them immediately.",
             );
-                        m.insert("menu_file", "File");
+            m.insert("paste_and_dont_ask", "Paste and Don't Ask Again");
+            m.insert("menu_file", "File");
             m.insert("open", "Open…");
             m.insert("open_recent", "Open Recent…");
             m.insert("add_folder_to_project", "Add Folder to Project…");
@@ -584,13 +585,14 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("confirm_multiline_paste", "多行粘贴确认");
             m.insert(
                 "confirm_multiline_paste_description",
-                "粘贴多行文本前先确认，因为 Shell 可能会立即执行这些命令。",
+                "粘贴多行文本前先确认，因为 Shell 可能会立即执行这些命令。在弹窗中选择「粘贴，不再询问」可关闭此提示。",
             );
             m.insert("paste_multiline_title", "粘贴多行文本？");
             m.insert(
                 "paste_multiline_detail",
                 "剪贴板包含多行文本，粘贴后可能会立即执行。",
             );
+            m.insert("paste_and_dont_ask", "粘贴，不再询问");
             m.insert("menu_file", "文件");
             m.insert("open", "打开…");
             m.insert("open_recent", "打开最近项目…");
@@ -923,6 +925,7 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("copy", "拷貝");
             m.insert("paste", "貼上");
             m.insert("paste_text", "貼上純文字");
+            m.insert("paste_and_dont_ask", "貼上，不再詢問");
             m.insert("select_all", "全選");
             m.insert("clear", "清除");
             m.insert("inline_assist", "行內助手");
