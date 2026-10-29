@@ -1099,28 +1099,27 @@ async fn new_tab(cx: &mut AsyncApp, cwd: Option<PathBuf>) -> Result<Value, Strin
     // successes.
     let before = window
         .update(cx, move |multi_workspace, window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let before = {
-                    let panel = panel.read(cx);
-                    (panel.terminal_count(), panel.focused_terminal_id(cx))
-                };
-                panel.update(cx, |panel, cx| {
-                    // open_shell_at no-ops when the active group is missing, so
-                    // make sure one exists first (create_default_group is
-                    // idempotent).
-                    panel.create_default_group(window, cx);
-                    match &cwd {
-                        Some(cwd) => panel.open_shell_at(cwd.clone(), window, cx),
-                        None => panel.new_terminal(window, cx),
-                    }
-                });
-                window.activate_window();
-                Ok::<_, String>(before)
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let before = {
+                let panel = panel.read(cx);
+                (panel.terminal_count(), panel.focused_terminal_id(cx))
+            };
+            panel.update(cx, |panel, cx| {
+                // open_shell_at no-ops when the active group is missing, so
+                // make sure one exists first (create_default_group is
+                // idempotent).
+                panel.create_default_group(window, cx);
+                match &cwd {
+                    Some(cwd) => panel.open_shell_at(cwd.clone(), window, cx),
+                    None => panel.new_terminal(window, cx),
+                }
+            });
+            window.activate_window();
+            Ok::<_, String>(before)
         })
         .map_err(|error| error.to_string())??;
 
@@ -1133,13 +1132,14 @@ async fn new_tab(cx: &mut AsyncApp, cwd: Option<PathBuf>) -> Result<Value, Strin
             .await;
         let state = window
             .update(cx, |multi_workspace, _window, cx| {
-                let workspace = multi_workspace.workspace().clone();
-                workspace.update(cx, |workspace, cx| {
-                    workspace.panel::<TerminalListPanel>(cx).map(|panel| {
+                multi_workspace
+                    .workspace()
+                    .read(cx)
+                    .panel::<TerminalListPanel>(cx)
+                    .map(|panel| {
                         let panel = panel.read(cx);
                         (panel.terminal_count(), panel.focused_terminal_id(cx))
                     })
-                })
             })
             .map_err(|error| error.to_string())?;
         let Some((count, focused)) = state else {
@@ -1185,23 +1185,22 @@ async fn send_text(
 
     window
         .update(cx, move |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let view = resolve_terminal(&panel, terminal_id, cx)?;
-                let id = view.entity_id().as_u64();
-                view.update(cx, |view, cx| {
-                    view.terminal()
-                        .update(cx, |terminal, _cx| terminal.paste(text));
-                });
-                Ok(json!({
-                    "status": "ok",
-                    "action": "send_text",
-                    "terminal_id": id,
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let view = resolve_terminal(&panel, terminal_id, cx)?;
+            let id = view.entity_id().as_u64();
+            view.update(cx, |view, cx| {
+                view.terminal()
+                    .update(cx, |terminal, _cx| terminal.paste(text));
+            });
+            Ok(json!({
+                "status": "ok",
+                "action": "send_text",
+                "terminal_id": id,
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1216,26 +1215,24 @@ async fn close_session(cx: &mut AsyncApp, terminal_id: Option<u64>) -> Result<Va
 
     window
         .update(cx, move |multi_workspace, window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let id = match terminal_id {
-                    Some(id) => EntityId::from(id),
-                    None => resolve_terminal(&panel, None, cx)?.entity_id(),
-                };
-                let closed =
-                    panel.update(cx, |panel, cx| panel.close_session_by_id(id, window, cx));
-                if !closed {
-                    return Err(format!("no terminal with id {}", id.as_u64()));
-                }
-                Ok(json!({
-                    "status": "ok",
-                    "action": "close_session",
-                    "terminal_id": id.as_u64(),
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let id = match terminal_id {
+                Some(id) => EntityId::from(id),
+                None => resolve_terminal(&panel, None, cx)?.entity_id(),
+            };
+            let closed = panel.update(cx, |panel, cx| panel.close_session_by_id(id, window, cx));
+            if !closed {
+                return Err(format!("no terminal with id {}", id.as_u64()));
+            }
+            Ok(json!({
+                "status": "ok",
+                "action": "close_session",
+                "terminal_id": id.as_u64(),
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1247,26 +1244,25 @@ async fn detach_session(cx: &mut AsyncApp, terminal_id: Option<u64>) -> Result<V
 
     window
         .update(cx, move |multi_workspace, window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let id = match terminal_id {
-                    Some(id) => EntityId::from(id),
-                    None => resolve_terminal(&panel, None, cx)?.entity_id(),
-                };
-                let detached =
-                    panel.update(cx, |panel, cx| panel.detach_terminal_by_id(id, window, cx));
-                if !detached {
-                    return Err(format!("no terminal with id {}", id.as_u64()));
-                }
-                Ok(json!({
-                    "status": "ok",
-                    "action": "detach_session",
-                    "terminal_id": id.as_u64(),
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let id = match terminal_id {
+                Some(id) => EntityId::from(id),
+                None => resolve_terminal(&panel, None, cx)?.entity_id(),
+            };
+            let detached =
+                panel.update(cx, |panel, cx| panel.detach_terminal_by_id(id, window, cx));
+            if !detached {
+                return Err(format!("no terminal with id {}", id.as_u64()));
+            }
+            Ok(json!({
+                "status": "ok",
+                "action": "detach_session",
+                "terminal_id": id.as_u64(),
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1278,23 +1274,22 @@ async fn reattach_session(cx: &mut AsyncApp, terminal_id: u64) -> Result<Value, 
 
     window
         .update(cx, move |multi_workspace, window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let attached = panel.update(cx, |panel, cx| {
-                    panel.reattach_terminal_by_id(EntityId::from(terminal_id), window, cx)
-                });
-                if !attached {
-                    return Err(format!("no detached terminal with id {terminal_id}"));
-                }
-                Ok(json!({
-                    "status": "ok",
-                    "action": "reattach_session",
-                    "terminal_id": terminal_id,
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let attached = panel.update(cx, |panel, cx| {
+                panel.reattach_terminal_by_id(EntityId::from(terminal_id), window, cx)
+            });
+            if !attached {
+                return Err(format!("no detached terminal with id {terminal_id}"));
+            }
+            Ok(json!({
+                "status": "ok",
+                "action": "reattach_session",
+                "terminal_id": terminal_id,
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1306,13 +1301,12 @@ async fn list_detached(cx: &mut AsyncApp) -> Result<Value, String> {
 
     window
         .update(cx, |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                Ok(panel.read(cx).detached_sessions_json(cx))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            Ok(panel.read(cx).detached_sessions_json(cx))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1328,20 +1322,19 @@ async fn rename_session(
 
     window
         .update(cx, move |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let view = resolve_terminal(&panel, terminal_id, cx)?;
-                let id = view.entity_id();
-                view.update(cx, move |view, cx| view.set_custom_title(title, cx));
-                Ok(json!({
-                    "status": "ok",
-                    "action": "rename_session",
-                    "terminal_id": id.as_u64(),
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let view = resolve_terminal(&panel, terminal_id, cx)?;
+            let id = view.entity_id();
+            view.update(cx, move |view, cx| view.set_custom_title(title, cx));
+            Ok(json!({
+                "status": "ok",
+                "action": "rename_session",
+                "terminal_id": id.as_u64(),
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1353,24 +1346,23 @@ async fn focus_group(cx: &mut AsyncApp, group_id: u64) -> Result<Value, String> 
 
     window
         .update(cx, move |multi_workspace, window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let focused = panel.update(cx, |panel, cx| {
-                    panel.focus_group_by_id(group_id, window, cx)
-                });
-                if !focused {
-                    return Err(format!("no group with id {group_id}"));
-                }
-                window.activate_window();
-                Ok(json!({
-                    "status": "ok",
-                    "action": "focus_group",
-                    "group_id": group_id,
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let focused = panel.update(cx, |panel, cx| {
+                panel.focus_group_by_id(group_id, window, cx)
+            });
+            if !focused {
+                return Err(format!("no group with id {group_id}"));
+            }
+            window.activate_window();
+            Ok(json!({
+                "status": "ok",
+                "action": "focus_group",
+                "group_id": group_id,
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1392,21 +1384,20 @@ async fn new_group(
 
     window
         .update(cx, move |multi_workspace, window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let group_id = panel.update(cx, |panel, cx| {
-                    panel.create_group_from_api(name, cwd, window, cx)
-                });
-                window.activate_window();
-                Ok(json!({
-                    "status": "ok",
-                    "action": "new_group",
-                    "group_id": group_id,
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let group_id = panel.update(cx, |panel, cx| {
+                panel.create_group_from_api(name, cwd, window, cx)
+            });
+            window.activate_window();
+            Ok(json!({
+                "status": "ok",
+                "action": "new_group",
+                "group_id": group_id,
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1418,20 +1409,19 @@ async fn delete_group(cx: &mut AsyncApp, group_id: u64) -> Result<Value, String>
 
     window
         .update(cx, move |multi_workspace, window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                panel.update(cx, |panel, cx| {
-                    panel.delete_group_by_id(group_id, window, cx)
-                })?;
-                Ok(json!({
-                    "status": "ok",
-                    "action": "delete_group",
-                    "group_id": group_id,
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            panel.update(cx, |panel, cx| {
+                panel.delete_group_by_id(group_id, window, cx)
+            })?;
+            Ok(json!({
+                "status": "ok",
+                "action": "delete_group",
+                "group_id": group_id,
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1443,22 +1433,21 @@ async fn rename_group(cx: &mut AsyncApp, group_id: u64, name: String) -> Result<
 
     window
         .update(cx, move |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let renamed =
-                    panel.update(cx, |panel, cx| panel.rename_group_by_id(group_id, name, cx));
-                if !renamed {
-                    return Err(format!("no group with id {group_id}"));
-                }
-                Ok(json!({
-                    "status": "ok",
-                    "action": "rename_group",
-                    "group_id": group_id,
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let renamed =
+                panel.update(cx, |panel, cx| panel.rename_group_by_id(group_id, name, cx));
+            if !renamed {
+                return Err(format!("no group with id {group_id}"));
+            }
+            Ok(json!({
+                "status": "ok",
+                "action": "rename_group",
+                "group_id": group_id,
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1470,29 +1459,28 @@ async fn move_session(cx: &mut AsyncApp, terminal_id: u64, group_id: u64) -> Res
 
     window
         .update(cx, move |multi_workspace, window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let moved = panel.update(cx, |panel, cx| {
-                    panel.move_terminal_to_group_by_id(
-                        EntityId::from(terminal_id),
-                        group_id,
-                        window,
-                        cx,
-                    )
-                });
-                if !moved {
-                    return Err(format!("no terminal {terminal_id} or group {group_id}"));
-                }
-                Ok(json!({
-                    "status": "ok",
-                    "action": "move_session",
-                    "terminal_id": terminal_id,
-                    "group_id": group_id,
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let moved = panel.update(cx, |panel, cx| {
+                panel.move_terminal_to_group_by_id(
+                    EntityId::from(terminal_id),
+                    group_id,
+                    window,
+                    cx,
+                )
+            });
+            if !moved {
+                return Err(format!("no terminal {terminal_id} or group {group_id}"));
+            }
+            Ok(json!({
+                "status": "ok",
+                "action": "move_session",
+                "terminal_id": terminal_id,
+                "group_id": group_id,
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1508,21 +1496,20 @@ async fn set_group_layout(
 
     window
         .update(cx, move |multi_workspace, window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                panel.update(cx, |panel, cx| {
-                    panel.set_group_layout_by_id(group_id, &layout, window, cx)
-                })?;
-                Ok(json!({
-                    "status": "ok",
-                    "action": "set_group_layout",
-                    "group_id": group_id,
-                    "layout": layout,
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            panel.update(cx, |panel, cx| {
+                panel.set_group_layout_by_id(group_id, &layout, window, cx)
+            })?;
+            Ok(json!({
+                "status": "ok",
+                "action": "set_group_layout",
+                "group_id": group_id,
+                "layout": layout,
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1538,21 +1525,20 @@ async fn set_broadcast(
 
     window
         .update(cx, move |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let affected = panel.update(cx, |panel, cx| {
-                    panel.set_broadcast_input_by_id(group_id, enabled, cx)
-                })?;
-                Ok(json!({
-                    "status": "ok",
-                    "action": "set_broadcast",
-                    "group_id": affected,
-                    "enabled": enabled,
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let affected = panel.update(cx, |panel, cx| {
+                panel.set_broadcast_input_by_id(group_id, enabled, cx)
+            })?;
+            Ok(json!({
+                "status": "ok",
+                "action": "set_broadcast",
+                "group_id": affected,
+                "enabled": enabled,
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1564,51 +1550,50 @@ async fn scroll(cx: &mut AsyncApp, terminal_id: Option<u64>, to: String) -> Resu
 
     window
         .update(cx, move |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let view = resolve_terminal(&panel, terminal_id, cx)?;
-                let id = view.entity_id();
-                let terminal = view.read(cx).terminal().clone();
-                let applied = terminal.update(cx, |terminal, _| match to.as_str() {
-                    "top" => {
-                        terminal.scroll_to_top();
-                        true
-                    }
-                    "bottom" => {
-                        terminal.scroll_to_bottom();
-                        true
-                    }
-                    "page_up" => {
-                        terminal.scroll_page_up();
-                        true
-                    }
-                    "page_down" => {
-                        terminal.scroll_page_down();
-                        true
-                    }
-                    "line_up" => {
-                        terminal.scroll_line_up();
-                        true
-                    }
-                    "line_down" => {
-                        terminal.scroll_line_down();
-                        true
-                    }
-                    _ => false,
-                });
-                if !applied {
-                    return Err(format!("unknown scroll target {to:?}"));
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let view = resolve_terminal(&panel, terminal_id, cx)?;
+            let id = view.entity_id();
+            let terminal = view.read(cx).terminal().clone();
+            let applied = terminal.update(cx, |terminal, _| match to.as_str() {
+                "top" => {
+                    terminal.scroll_to_top();
+                    true
                 }
-                Ok(json!({
-                    "status": "ok",
-                    "action": "scroll",
-                    "terminal_id": id.as_u64(),
-                    "to": to,
-                }))
-            })
+                "bottom" => {
+                    terminal.scroll_to_bottom();
+                    true
+                }
+                "page_up" => {
+                    terminal.scroll_page_up();
+                    true
+                }
+                "page_down" => {
+                    terminal.scroll_page_down();
+                    true
+                }
+                "line_up" => {
+                    terminal.scroll_line_up();
+                    true
+                }
+                "line_down" => {
+                    terminal.scroll_line_down();
+                    true
+                }
+                _ => false,
+            });
+            if !applied {
+                return Err(format!("unknown scroll target {to:?}"));
+            }
+            Ok(json!({
+                "status": "ok",
+                "action": "scroll",
+                "terminal_id": id.as_u64(),
+                "to": to,
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1624,23 +1609,22 @@ async fn set_font_size(
 
     window
         .update(cx, move |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let view = resolve_terminal(&panel, terminal_id, cx)?;
-                let id = view.entity_id();
-                view.update(cx, move |view, cx| {
-                    view.set_font_size_override(size.map(px), cx);
-                });
-                Ok(json!({
-                    "status": "ok",
-                    "action": "set_font_size",
-                    "terminal_id": id.as_u64(),
-                    "size": size,
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let view = resolve_terminal(&panel, terminal_id, cx)?;
+            let id = view.entity_id();
+            view.update(cx, move |view, cx| {
+                view.set_font_size_override(size.map(px), cx);
+            });
+            Ok(json!({
+                "status": "ok",
+                "action": "set_font_size",
+                "terminal_id": id.as_u64(),
+                "size": size,
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1656,22 +1640,21 @@ async fn set_color_scheme(
 
     window
         .update(cx, move |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let view = resolve_terminal(&panel, terminal_id, cx)?;
-                let id = view.entity_id();
-                let display_name = name.clone();
-                view.update(cx, move |view, cx| view.set_color_scheme(name, cx));
-                Ok(json!({
-                    "status": "ok",
-                    "action": "set_color_scheme",
-                    "terminal_id": id.as_u64(),
-                    "name": display_name,
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let view = resolve_terminal(&panel, terminal_id, cx)?;
+            let id = view.entity_id();
+            let display_name = name.clone();
+            view.update(cx, move |view, cx| view.set_color_scheme(name, cx));
+            Ok(json!({
+                "status": "ok",
+                "action": "set_color_scheme",
+                "terminal_id": id.as_u64(),
+                "name": display_name,
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1721,13 +1704,12 @@ async fn list_session_templates(cx: &mut AsyncApp) -> Result<Value, String> {
 
     window
         .update(cx, |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                Ok(panel.read(cx).list_session_templates())
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            Ok(panel.read(cx).list_session_templates())
         })
         .map_err(|error| error.to_string())?
 }
@@ -1740,18 +1722,17 @@ async fn save_session_template(cx: &mut AsyncApp, name: String) -> Result<Value,
 
     window
         .update(cx, move |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                panel.update(cx, |panel, cx| panel.save_session_template(name, cx))?;
-                Ok(json!({
-                    "status": "ok",
-                    "action": "save_session_template",
-                    "name": saved_name,
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            panel.update(cx, |panel, cx| panel.save_session_template(name, cx))?;
+            Ok(json!({
+                "status": "ok",
+                "action": "save_session_template",
+                "name": saved_name,
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1763,22 +1744,21 @@ async fn load_session_template(cx: &mut AsyncApp, name: String) -> Result<Value,
 
     window
         .update(cx, move |multi_workspace, window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let group_id = panel.update(cx, |panel, cx| {
-                    panel.load_session_template(&name, window, cx)
-                })?;
-                window.activate_window();
-                Ok(json!({
-                    "status": "ok",
-                    "action": "load_session_template",
-                    "name": name,
-                    "group_id": group_id,
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let group_id = panel.update(cx, |panel, cx| {
+                panel.load_session_template(&name, window, cx)
+            })?;
+            window.activate_window();
+            Ok(json!({
+                "status": "ok",
+                "action": "load_session_template",
+                "name": name,
+                "group_id": group_id,
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1791,18 +1771,17 @@ async fn delete_session_template(cx: &mut AsyncApp, name: String) -> Result<Valu
 
     window
         .update(cx, move |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                panel.update(cx, |panel, _cx| panel.delete_session_template(&name))?;
-                Ok(json!({
-                    "status": "ok",
-                    "action": "delete_session_template",
-                    "name": deleted_name,
-                }))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            panel.update(cx, |panel, _cx| panel.delete_session_template(&name))?;
+            Ok(json!({
+                "status": "ok",
+                "action": "delete_session_template",
+                "name": deleted_name,
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1847,22 +1826,21 @@ async fn focus_terminal(cx: &mut AsyncApp, terminal_id: Option<u64>) -> Result<V
 
     window
         .update(cx, move |multi_workspace, window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                if let Some(id) = terminal_id {
-                    let focused = panel.update(cx, |panel, cx| {
-                        panel.focus_terminal_by_id(EntityId::from(id), window, cx)
-                    });
-                    if !focused {
-                        return Err(format!("no terminal with id {id}"));
-                    }
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            if let Some(id) = terminal_id {
+                let focused = panel.update(cx, |panel, cx| {
+                    panel.focus_terminal_by_id(EntityId::from(id), window, cx)
+                });
+                if !focused {
+                    return Err(format!("no terminal with id {id}"));
                 }
-                window.activate_window();
-                Ok(json!({ "status": "ok", "action": "focus_session" }))
-            })
+            }
+            window.activate_window();
+            Ok(json!({ "status": "ok", "action": "focus_session" }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1874,13 +1852,12 @@ async fn list_sessions(cx: &mut AsyncApp) -> Result<Value, String> {
 
     window
         .update(cx, |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                Ok(panel.read(cx).session_info(cx))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            Ok(panel.read(cx).session_info(cx))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1914,25 +1891,24 @@ async fn send_keys(
 
     window
         .update(cx, move |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let view = resolve_terminal(&panel, terminal_id, cx)?;
-                let option_as_meta = TerminalSettings::get_global(cx).option_as_meta;
-                view.update(cx, move |view, cx| {
-                    view.terminal().update(cx, |terminal, _cx| {
-                        let handled = Keystroke::parse(&keys).ok().is_some_and(|keystroke| {
-                            terminal.try_keystroke(&keystroke, option_as_meta)
-                        });
-                        if !handled {
-                            terminal.input(keys.into_bytes());
-                        }
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let view = resolve_terminal(&panel, terminal_id, cx)?;
+            let option_as_meta = TerminalSettings::get_global(cx).option_as_meta;
+            view.update(cx, move |view, cx| {
+                view.terminal().update(cx, |terminal, _cx| {
+                    let handled = Keystroke::parse(&keys).ok().is_some_and(|keystroke| {
+                        terminal.try_keystroke(&keystroke, option_as_meta)
                     });
+                    if !handled {
+                        terminal.input(keys.into_bytes());
+                    }
                 });
-                Ok(json!({ "status": "ok", "action": "send_keys" }))
-            })
+            });
+            Ok(json!({ "status": "ok", "action": "send_keys" }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1983,14 +1959,13 @@ async fn report_agent_state(
 
     window
         .update(cx, move |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                panel.update(cx, |panel, cx| {
-                    panel.apply_reported_agent_state(&token, &state, message, agent.as_deref(), cx)
-                })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            panel.update(cx, |panel, cx| {
+                panel.apply_reported_agent_state(&token, &state, message, agent.as_deref(), cx)
             })
         })
         .map_err(|error| error.to_string())?
@@ -2009,14 +1984,13 @@ async fn report_agent_session(
 
     window
         .update(cx, move |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                panel.update(cx, |panel, cx| {
-                    panel.apply_reported_agent_session(&token, &agent, session_path, session_id, cx)
-                })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            panel.update(cx, |panel, cx| {
+                panel.apply_reported_agent_session(&token, &agent, session_path, session_id, cx)
             })
         })
         .map_err(|error| error.to_string())?
@@ -2043,13 +2017,12 @@ async fn list_agent_states(cx: &mut AsyncApp) -> Result<Value, String> {
 
     window
         .update(cx, move |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                Ok(panel.read(cx).agent_states_json(cx))
-            })
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            Ok(panel.read(cx).agent_states_json(cx))
         })
         .map_err(|error| error.to_string())?
 }
