@@ -3801,6 +3801,18 @@ impl TerminalListPanel {
         .detach_and_log_err(cx);
     }
 
+    /// Ends a daemon session without blocking the caller.
+    ///
+    /// `kill` round-trips to the daemon over a socket, and an unreachable
+    /// daemon can take seconds to fail, so close paths must not wait on it.
+    fn kill_daemon_session(session: String) {
+        std::thread::spawn(move || {
+            if let Err(error) = crate::persistent_sessions::kill(&session) {
+                log::debug!("failed to kill daemon session {session}: {error}");
+            }
+        });
+    }
+
     fn delete_group_now(&mut self, group_id: GroupId, window: &mut Window, cx: &mut Context<Self>) {
         if self.groups.len() <= 1 {
             return;
@@ -3817,9 +3829,7 @@ impl TerminalListPanel {
         // detaching here would leave sessions nobody can reach from the UI.
         for id in &terminal_ids {
             if let Some(session) = self.terminal_daemon_sessions.remove(id) {
-                if let Err(error) = crate::persistent_sessions::kill(&session) {
-                    log::debug!("failed to kill daemon session {session}: {error}");
-                }
+                Self::kill_daemon_session(session);
             }
         }
         for id in &terminal_ids {
@@ -6889,6 +6899,9 @@ impl TerminalListPanel {
         }
         let session = self.detached_sessions.remove(index);
         let id = session.view.entity_id();
+        if let Some(daemon_session) = self.terminal_daemon_sessions.remove(&id) {
+            Self::kill_daemon_session(daemon_session);
+        }
         self._terminal_subscriptions.remove(&id);
         self.terminal_activity.remove(&id);
         self.terminal_spawn_cwds.remove(&id);
@@ -7560,6 +7573,9 @@ impl TerminalListPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A terminal moving to another window keeps its session: the receiving
+        // panel takes it over rather than starting a new shell.
+        let moving_to_another_window = self.suppress_recently_closed;
         if !self.suppress_recently_closed {
             self.remember_closed_terminal(item_id, cx);
         }
@@ -7571,7 +7587,7 @@ impl TerminalListPanel {
         self.reported_agent_states.remove(&item_id);
         self.agent_session_refs.remove(&item_id);
         self.terminal_tokens.retain(|_, id| *id != item_id);
-        self.terminal_daemon_sessions.remove(&item_id);
+        let daemon_session = self.terminal_daemon_sessions.remove(&item_id);
         let mut changed = false;
         let mut emptied_group: Option<GroupId> = None;
         let mut removed_from_active_auto = false;
@@ -7622,11 +7638,30 @@ impl TerminalListPanel {
                 break;
             }
         }
+        let was_parked = parked.is_some();
         if let Some(session) = parked {
+            // A parked agent keeps running, so its daemon session keeps its
+            // mapping and stays reachable once the view is reattached.
+            let parked_id = session.view.entity_id();
+            if let Some(daemon_session) = &daemon_session {
+                self.terminal_daemon_sessions
+                    .insert(parked_id, daemon_session.clone());
+            }
             self.parked_agent_sessions.push(session);
             if self.parked_agent_sessions.len() > PARKED_AGENT_SESSION_LIMIT {
                 let overflow = self.parked_agent_sessions.len() - PARKED_AGENT_SESSION_LIMIT;
-                self.parked_agent_sessions.drain(0..overflow);
+                let dropped: Vec<EntityId> = self
+                    .parked_agent_sessions
+                    .drain(0..overflow)
+                    .map(|session| session.view.entity_id())
+                    .collect();
+                // Dropping a parked view releases its PTY locally; a daemon
+                // session would otherwise keep running with no view left.
+                for id in dropped {
+                    if let Some(session) = self.terminal_daemon_sessions.remove(&id) {
+                        Self::kill_daemon_session(session);
+                    }
+                }
             }
         }
         if let Some((agent_id, bin, cwd)) = remembered {
@@ -7634,6 +7669,24 @@ impl TerminalListPanel {
         }
         if !changed {
             return;
+        }
+
+        // Closing a terminal ends its shell. Without this the daemon keeps the
+        // PTY (and whatever it is running) alive, and reopening the terminal
+        // reattaches to that same busy shell, so anything typed afterwards
+        // queues behind the abandoned command. Explicit detach and parked agent
+        // sessions keep their processes on purpose.
+        if !was_parked && !moving_to_another_window {
+            if let Some(session) = daemon_session {
+                // Reopening must start a fresh shell: the old session is gone,
+                // and reusing its id could race the kill below.
+                for closed in self.recently_closed.iter_mut() {
+                    if closed.terminal.daemon_session.as_deref() == Some(session.as_str()) {
+                        closed.terminal.daemon_session = None;
+                    }
+                }
+                Self::kill_daemon_session(session);
+            }
         }
 
         // Auto-tiling groups need a re-flow once the pane removal settles.
