@@ -45,12 +45,11 @@ pub struct AttachedSession {
 pub fn connect_and_spawn(spec: SessionSpec) -> anyhow::Result<AttachedSession> {
     with_control(|control| {
         let session = control.spawn(&spec)?;
-        let (reader, writer) = attach(
-            &terminal_daemon::socket_path(),
-            &session,
-            spec.cols,
-            spec.rows,
-        )?;
+        // Attach without a size: `spec` carries the spawn default, which is not
+        // the window's real grid (and would shrink a reattached session). The
+        // view pushes the true size through the resize sink once it is laid
+        // out.
+        let (reader, writer) = attach(&terminal_daemon::socket_path(), &session, 0, 0)?;
         Ok(AttachedSession {
             reader,
             writer: Arc::new(writer),
@@ -296,7 +295,12 @@ pub fn wire(
         })));
         let resize = writer.clone();
         terminal.set_resize_sink(Some(Arc::new(move |columns: u16, rows: u16| {
-            let _ = resize.resize(columns, rows);
+            // A pane that has not been laid out yet reports a degenerate grid
+            // (one cell per axis), and pushing that would reflow the shell to a
+            // single column. The real size arrives once the terminal is shown.
+            if columns > 1 && rows > 1 {
+                let _ = resize.resize(columns, rows);
+            }
         })));
     });
 

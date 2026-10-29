@@ -445,7 +445,13 @@ fn attach_connection(
         return Ok(());
     };
 
-    session.resize(cols, rows);
+    // A client that does not know the real grid size yet (a reattach at startup,
+    // before the view has been laid out) passes 0 and lets the view push the
+    // true size through `Resize`. Resizing here would clobber a session that is
+    // still running at its previous size.
+    if cols > 0 && rows > 0 {
+        session.resize(cols, rows);
+    }
     let (subscriber_id, replay, exited, size, events) = session.subscribe();
 
     let result = (|| -> anyhow::Result<()> {
