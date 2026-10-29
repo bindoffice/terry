@@ -314,10 +314,36 @@ pub fn wire(
     let terminal = terminal.clone();
     cx.spawn(async move |cx| {
         use futures::StreamExt as _;
+        // A command that prints a lot reaches us as one daemon frame per line:
+        // the PTY is line-buffered, so each write there becomes a read here.
+        // Every `write_output` repaints the terminal and refreshes the sidebar
+        // and tab bar, so handling them one by one makes burst output cost
+        // ~1ms per line. Drain whatever is already queued into a single write
+        // instead; the in-process PTY path coalesces the same way (it batches
+        // events on a 4ms timer before touching the UI).
+        let mut pending: Vec<u8> = Vec::new();
+        let mut exit_code = None;
         while let Some(event) = receiver.next().await {
-            if let Event::Output(bytes) = event {
-                terminal.update(cx, |terminal, cx| terminal.write_output(&bytes, cx));
-            } else if let Event::Exited(code) = event {
+            match event {
+                Event::Output(bytes) => pending.extend_from_slice(&bytes),
+                Event::Exited(code) => exit_code = Some(code),
+            }
+
+            while let Ok(event) = receiver.try_recv() {
+                match event {
+                    Event::Output(bytes) => pending.extend_from_slice(&bytes),
+                    Event::Exited(code) => {
+                        exit_code = Some(code);
+                        break;
+                    }
+                }
+            }
+
+            if !pending.is_empty() {
+                terminal.update(cx, |terminal, cx| terminal.write_output(&pending, cx));
+                pending.clear();
+            }
+            if let Some(code) = exit_code.take() {
                 terminal.update(cx, |terminal, cx| terminal.mark_exited(code, cx));
                 break;
             }
