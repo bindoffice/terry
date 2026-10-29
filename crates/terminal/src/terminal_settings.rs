@@ -223,6 +223,9 @@ pub struct TerminalSettings {
     /// Whether to ask for confirmation before pasting text that contains more
     /// than one line.
     pub confirm_multiline_paste: bool,
+    /// Keep terminal processes alive in a background daemon so they survive
+    /// quitting Terry.
+    pub persistent_sessions: bool,
     /// Terminal background opacity, `0.0` to `1.0`.
     pub background_opacity: f32,
     /// Blur the desktop behind a translucent terminal background.
@@ -353,6 +356,7 @@ impl settings::Settings for TerminalSettings {
             clipboard_read: user_content.clipboard_read.unwrap_or(false),
             notify_on_command_finish: user_content.notify_on_command_finish.unwrap_or(false),
             confirm_multiline_paste: user_content.confirm_multiline_paste.unwrap_or(true),
+            persistent_sessions: user_content.persistent_sessions.unwrap_or(false),
             background_opacity: user_content
                 .background_opacity
                 .unwrap_or(1.0)

@@ -4,7 +4,7 @@ mod mappings;
 mod alacritty;
 pub mod color_scheme;
 mod pty_info;
-mod shell_integration;
+pub mod shell_integration;
 pub mod terminal_settings;
 
 #[cfg(not(windows))]
@@ -66,24 +66,24 @@ use gpui::{
     Point as GpuiPoint, Rgba, ScrollWheelEvent, Size, Task, TouchPhase, Window, actions, black, px,
 };
 
-pub use crate::alacritty::OutputSink;
 #[cfg(not(windows))]
 use crate::alacritty::current_child_signal_mask;
+pub use crate::alacritty::{OutputSink, ResizeSink};
 pub use crate::hints::{HintKind, HintMatch};
 pub use crate::terminal_settings::HintAction;
 
 use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, OutputTap, PtySender, RegexSearches,
-    append_text_to_term, apply_config, clear_saved_screen, columns, content_text, display_offset,
-    display_only_term_config, find_all_visible_links, find_from_terminal_point, full_content_range,
-    last_command_input_text, last_command_output_range, last_command_output_text,
-    last_non_empty_lines, last_prompt_mark as last_term_prompt_mark, make_content, new_term,
-    open_pty, prompt_marks as term_prompt_marks, pty_options, pty_term_config, resize,
-    screen_lines, scroll_display, scroll_to_point, scroll_to_point_aligned, search_matches,
-    selection_text, set_default_cursor_style, set_selection as set_term_selection,
-    set_text_options, shrink_to_used, smart_selection_range, spawn_event_loop,
-    synchronized_updates, toggle_vi_mode as toggle_term_vi_mode, total_lines,
+    ResizeTap, append_text_to_term, apply_config, clear_saved_screen, columns, content_text,
+    display_offset, display_only_term_config, find_all_visible_links, find_from_terminal_point,
+    full_content_range, last_command_input_text, last_command_output_range,
+    last_command_output_text, last_non_empty_lines, last_prompt_mark as last_term_prompt_mark,
+    make_content, new_term, open_pty, prompt_marks as term_prompt_marks, pty_options,
+    pty_term_config, resize, screen_lines, scroll_display, scroll_to_point,
+    scroll_to_point_aligned, search_matches, selection_text, set_default_cursor_style,
+    set_selection as set_term_selection, set_text_options, shrink_to_used, smart_selection_range,
+    spawn_event_loop, synchronized_updates, toggle_vi_mode as toggle_term_vi_mode, total_lines,
     update_selection as update_term_selection, update_selection_to_vi_cursor,
     update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
 };
@@ -1113,6 +1113,7 @@ impl TerminalBuilder {
             term,
             output_tap,
             input_tap: OutputTap::default(),
+            resize_tap: ResizeTap::default(),
             term_config: config,
             output_processor: Processor::<StdSyncHandler>::new(),
             title_override: None,
@@ -1155,6 +1156,7 @@ impl TerminalBuilder {
                 window_id,
             },
             child_exited: None,
+            reported_exit_code: None,
             keyboard_input_sent: false,
             init_command_startup_marker: None,
             init_command_startup_tx: None,
@@ -1436,6 +1438,7 @@ impl TerminalBuilder {
                 terminal_type,
                 output_tap,
                 input_tap: OutputTap::default(),
+                resize_tap: ResizeTap::default(),
                 subprocess,
                 completion_tx,
                 term,
@@ -1481,6 +1484,7 @@ impl TerminalBuilder {
                     window_id,
                 },
                 child_exited: None,
+                reported_exit_code: None,
                 keyboard_input_sent: false,
                 init_command_startup_marker: None,
                 init_command_startup_tx: None,
@@ -1628,6 +1632,9 @@ pub struct Terminal {
     /// instead of the PTY, which lets a terminal mirror a remote session (for
     /// example tmux in control mode).
     input_tap: OutputTap,
+    /// Optional sink for grid size changes, used by mirror terminals that have
+    /// no PTY of their own to resize.
+    resize_tap: ResizeTap,
     output_processor: Processor<StdSyncHandler>,
     events: VecDeque<InternalEvent>,
     /// This is only used for mouse mode cell change detection
@@ -1674,6 +1681,9 @@ pub struct Terminal {
     template: CopyTemplate,
     activation_script: Vec<String>,
     child_exited: Option<ExitStatus>,
+    /// Exit code reported by a session host (the terminal daemon), which owns
+    /// the child process and never hands it to this emulator.
+    reported_exit_code: Option<i32>,
     keyboard_input_sent: bool,
     init_command_startup_marker: Option<String>,
     init_command_startup_tx: Option<Sender<()>>,
@@ -2386,6 +2396,18 @@ impl Terminal {
             return;
         }
 
+        // Terminals that mirror a session owned by another process have no PTY
+        // of their own, so forward the grid size instead of relying on the
+        // event loop's resize path.
+        if old_bounds.num_lines() != new_bounds.num_lines()
+            || old_bounds.num_columns() != new_bounds.num_columns()
+        {
+            self.resize_tap.emit(
+                new_bounds.num_columns() as u16,
+                new_bounds.num_lines() as u16,
+            );
+        }
+
         match self.events.back_mut() {
             Some(InternalEvent::Resize(pending_bounds)) => *pending_bounds = new_bounds,
             _ => self.events.push_back(InternalEvent::Resize(new_bounds)),
@@ -2822,6 +2844,12 @@ impl Terminal {
     /// mirrors a remote session.
     pub fn set_input_sink(&mut self, sink: Option<OutputSink>) {
         self.input_tap.set(sink);
+    }
+
+    /// Reports grid size changes here. Used when the terminal mirrors a session
+    /// owned by another process, which needs to resize its PTY.
+    pub fn set_resize_sink(&mut self, sink: Option<ResizeSink>) {
+        self.resize_tap.set(sink);
     }
 
     pub fn last_n_non_empty_lines(&self, n: usize) -> Vec<String> {
@@ -3347,7 +3375,17 @@ impl Terminal {
 
     /// Whether the process attached to this terminal has exited.
     pub fn has_exited(&self) -> bool {
-        self.child_exited.is_some()
+        self.child_exited.is_some() || self.reported_exit_code.is_some()
+    }
+
+    /// Records an exit reported by a session host (the terminal daemon).
+    ///
+    /// The child process belongs to the daemon, so this emulator never receives
+    /// an `ExitStatus` of its own; the reported code is the authoritative one.
+    pub fn mark_exited(&mut self, code: i32, cx: &mut Context<Self>) {
+        self.reported_exit_code = Some(code);
+        self.last_exit_code = Some(code as i64);
+        cx.emit(Event::Wakeup);
     }
 
     /// Force-refreshes the foreground process cwd. Prefer this when spawning a
@@ -3370,6 +3408,22 @@ impl Terminal {
                 .read()
                 .as_ref()
                 .and_then(|process| foreground_process_command_from_argv(&process.argv)),
+            TerminalType::DisplayOnly => None,
+        }
+    }
+
+    /// Script path passed to a `node`/`bun`/`deno` foreground process, if any.
+    ///
+    /// npm-installed CLIs run as `node .../node_modules/<package>/dist/cli.js`,
+    /// so their process name is the runtime rather than the tool itself. Callers
+    /// use this path to recognise such tools.
+    pub fn foreground_process_script_path(&self) -> Option<String> {
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => info
+                .current
+                .read()
+                .as_ref()
+                .and_then(|process| foreground_process_script_from_argv(&process.argv)),
             TerminalType::DisplayOnly => None,
         }
     }
@@ -3608,14 +3662,30 @@ impl Terminal {
     }
 
     pub fn clone_builder(&self, cx: &App, cwd: Option<PathBuf>) -> Task<Result<TerminalBuilder>> {
+        self.clone_builder_with_env(cx, cwd, &HashMap::default())
+    }
+
+    /// Like [`Self::clone_builder`], but lets the caller override environment
+    /// variables. Used to give a cloned terminal its own
+    /// `TERRY_TERMINAL_TOKEN` instead of inheriting the source terminal's.
+    pub fn clone_builder_with_env(
+        &self,
+        cx: &App,
+        cwd: Option<PathBuf>,
+        env_overrides: &HashMap<String, String>,
+    ) -> Task<Result<TerminalBuilder>> {
         // Prefer an explicitly supplied cwd (often a freshly refreshed path)
         // over the cached title-update value, which can be stale or empty.
         let working_directory = cwd.or_else(|| self.working_directory());
+        let mut env = self.template.env.clone();
+        for (key, value) in env_overrides {
+            env.insert(key.clone(), value.clone());
+        }
         TerminalBuilder::new(
             working_directory,
             None,
             self.template.shell.clone(),
-            self.template.env.clone(),
+            env,
             self.template.cursor_shape,
             self.template.alternate_scroll,
             self.template.max_scroll_history_lines,
@@ -3906,6 +3976,23 @@ fn foreground_process_command_from_argv(argv: &[String]) -> Option<String> {
         .filter_map(|argument| normalize_script_command_name(argument))
         .next()
         .or(command)
+}
+
+/// Returns the script argument of a JavaScript/TypeScript runtime, e.g.
+/// `.../node_modules/@earendil-works/pi-coding-agent/dist/cli.js`.
+fn foreground_process_script_from_argv(argv: &[String]) -> Option<String> {
+    let command = argv
+        .first()
+        .and_then(|command| normalize_path_command_name(command))?;
+
+    if !matches!(command.as_str(), "node" | "bun" | "deno") {
+        return None;
+    }
+
+    argv.iter()
+        .skip(1)
+        .find(|argument| !argument.starts_with('-'))
+        .cloned()
 }
 
 /// Command names that mean "the shell is sitting at a prompt". Everything else

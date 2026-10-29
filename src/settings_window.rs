@@ -627,6 +627,7 @@ impl SettingsWindow {
     fn render_terminal_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let terminal = TerminalSettings::get_global(cx);
         let shell_integration = terminal.shell_integration;
+        let persistent_sessions = terminal.persistent_sessions;
         let clipboard_read = terminal.clipboard_read;
         let notify_on_command_finish = terminal.notify_on_command_finish;
         let confirm_multiline_paste = terminal.confirm_multiline_paste;
@@ -725,6 +726,28 @@ impl SettingsWindow {
                     let fs = <dyn Fs>::global(cx);
                     update_settings_file(fs, cx, move |content, _| {
                         content.terminal.get_or_insert_default().shell_integration = Some(enabled);
+                    });
+                })
+                .into_any_element(),
+            ))
+            .child(settings_section(
+                i18n::t("persistent_sessions"),
+                i18n::t("persistent_sessions_description"),
+                Switch::new(
+                    "persistent-sessions",
+                    if persistent_sessions {
+                        ToggleState::Selected
+                    } else {
+                        ToggleState::Unselected
+                    },
+                )
+                .label(i18n::t("persistent_sessions"))
+                .on_click(|state, _window, cx| {
+                    let enabled = *state == ToggleState::Selected;
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content.terminal.get_or_insert_default().persistent_sessions =
+                            Some(enabled);
                     });
                 })
                 .into_any_element(),

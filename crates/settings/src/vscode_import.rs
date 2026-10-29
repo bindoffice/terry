@@ -899,6 +899,7 @@ impl VsCodeSettings {
             clipboard_read: None,
             notify_on_command_finish: None,
             confirm_multiline_paste: None,
+            persistent_sessions: None,
             background_opacity: None,
             background_blur: None,
             padding_x: None,

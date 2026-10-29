@@ -483,6 +483,18 @@ impl Project {
         cx: &mut Context<'_, Project>,
         cwd: Option<PathBuf>,
     ) -> Task<Result<Entity<Terminal>>> {
+        self.clone_terminal_with_env(terminal, cx, cwd, &collections::HashMap::default())
+    }
+
+    /// Clones a terminal with environment overrides, so a clone can carry its
+    /// own terminal token instead of the source terminal's.
+    pub fn clone_terminal_with_env(
+        &mut self,
+        terminal: &Entity<Terminal>,
+        cx: &mut Context<'_, Project>,
+        cwd: Option<PathBuf>,
+        env_overrides: &collections::HashMap<String, String>,
+    ) -> Task<Result<Entity<Terminal>>> {
         // We cannot clone the task's terminal, as it will effectively re-spawn the task, which might not be desirable.
         // For now, create a new shell instead.
         if terminal.read(cx).task().is_some() {
@@ -494,7 +506,9 @@ impl Project {
             cwd
         };
 
-        let builder = terminal.read(cx).clone_builder(cx, local_path);
+        let builder = terminal
+            .read(cx)
+            .clone_builder_with_env(cx, local_path, env_overrides);
         cx.spawn(async |project, cx| {
             let terminal = builder.await?;
             project.update(cx, |project, cx| {

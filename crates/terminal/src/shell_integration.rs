@@ -111,7 +111,7 @@ fn write_scripts(dir: &Path) -> anyhow::Result<()> {
 /// integration was already injected for this environment, as happens when
 /// `TerminalBuilder::clone_builder` re-runs `TerminalBuilder::new` with an
 /// already-prepared template.
-pub(crate) fn inject_shell_integration_env(
+pub fn inject_shell_integration_env(
     env: &mut HashMap<String, String>,
     program: &str,
 ) -> anyhow::Result<Vec<String>> {

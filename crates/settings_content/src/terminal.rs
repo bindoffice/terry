@@ -267,6 +267,12 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: true
     pub confirm_multiline_paste: Option<bool>,
+    /// Keep terminal processes alive in a background daemon so they survive
+    /// quitting Terry or closing the window. Closing a terminal detaches it
+    /// instead of ending it. Unix only for now.
+    ///
+    /// Default: false
+    pub persistent_sessions: Option<bool>,
     /// Terminal background opacity, from `0.0` (fully transparent) to `1.0`
     /// (fully opaque).
     ///

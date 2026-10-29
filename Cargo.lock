@@ -13540,6 +13540,7 @@ dependencies = [
  "db",
  "futures 0.3.32",
  "gpui",
+ "regex",
  "serde_json",
  "tokio",
  "util",
@@ -14864,6 +14865,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "terminal_daemon"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "libc",
+ "log",
+ "paths",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "terminal_size"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14966,6 +14980,7 @@ dependencies = [
  "platform_title_bar",
  "project",
  "recent_projects",
+ "regex",
  "release_channel",
  "remote_connection",
  "reqwest_client",
@@ -14979,6 +14994,7 @@ dependencies = [
  "tab_switcher",
  "task",
  "terminal",
+ "terminal_daemon",
  "terminal_view",
  "theme",
  "theme_selector",

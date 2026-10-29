@@ -65,8 +65,50 @@ pub(super) struct ZedListener {
 /// Shared tap for raw PTY output. The sink is invoked on the PTY reader thread.
 pub type OutputSink = std::sync::Arc<dyn Fn(&[u8]) + Send + Sync + 'static>;
 
+/// Sink invoked with the terminal's new `(columns, rows)` grid size. Used by
+/// terminals that mirror a session owned by another process (the terminal
+/// daemon), which have no PTY of their own to resize.
+pub type ResizeSink = std::sync::Arc<dyn Fn(u16, u16) + Send + Sync + 'static>;
+
 #[derive(Clone, Default)]
 pub(super) struct OutputTap(std::sync::Arc<parking_lot::Mutex<Option<OutputSink>>>);
+
+#[derive(Clone, Default)]
+pub(super) struct ResizeTap(std::sync::Arc<parking_lot::Mutex<Option<ResizeSink>>>);
+
+impl ResizeTap {
+    pub(super) fn set(&self, sink: Option<ResizeSink>) {
+        *self.0.lock() = sink;
+    }
+
+    pub(super) fn emit(&self, columns: u16, rows: u16) {
+        let sink = self.0.lock().clone();
+        if let Some(sink) = sink {
+            sink(columns, rows);
+        }
+    }
+}
+
+#[cfg(test)]
+mod resize_tap_tests {
+    use super::*;
+
+    #[test]
+    fn forwards_grid_sizes_until_cleared() {
+        let tap = ResizeTap::default();
+        let seen = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        tap.set(Some(std::sync::Arc::new(move |columns, rows| {
+            sink.lock().push((columns, rows));
+        })));
+
+        tap.emit(80, 24);
+        tap.set(None);
+        tap.emit(120, 40);
+
+        assert_eq!(*seen.lock(), vec![(80, 24)]);
+    }
+}
 
 impl OutputTap {
     pub(super) fn set(&self, sink: Option<OutputSink>) {

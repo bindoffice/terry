@@ -61,6 +61,7 @@ platform_title_bar.workspace = true
 project.workspace = true
 release_channel.workspace = true
 recent_projects.workspace = true
+regex.workspace = true
 reqwest_client.workspace = true
 session.workspace = true
 search.workspace = true
@@ -70,6 +71,7 @@ sysinfo.workspace = true
 task.workspace = true
 tab_switcher.workspace = true
 terminal.workspace = true
+terminal_daemon.workspace = true
 terminal_view.workspace = true
 theme.workspace = true
 theme_settings.workspace = true
@@ -260,6 +262,7 @@ members = [
     "crates/telemetry",
     "crates/telemetry_events",
     "crates/terminal",
+    "crates/terminal_daemon",
     "crates/terminal_view",
     "crates/text",
     "crates/theme",
@@ -497,6 +500,7 @@ tasks_ui = { path = "crates/tasks_ui" }
 telemetry = { path = "crates/telemetry" }
 telemetry_events = { path = "crates/telemetry_events" }
 terminal = { path = "crates/terminal" }
+terminal_daemon = { path = "crates/terminal_daemon" }
 terminal_view = { path = "crates/terminal_view" }
 text = { path = "crates/text" }
 theme = { path = "crates/theme" }

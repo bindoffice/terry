@@ -123,6 +123,15 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
                 "shell_integration_description",
                 "Automatically load prompt marks (OSC 133) and working-directory tracking (OSC 7) for zsh and fish.",
             );
+            m.insert("persistent_sessions", "Persistent Sessions");
+            m.insert(
+                "persistent_sessions_description",
+                "Keep terminals running in a background daemon after you quit Terry. Closing a terminal detaches it instead of ending it. Unix only for now.",
+            );
+            m.insert(
+                "persistent_sessions_detached_notice",
+                "This terminal keeps running in the background. Reopen it with \"Reopen Closed Terminal\", or end it with `terry daemon kill`.",
+            );
             m.insert("clipboard_read", "Allow Clipboard Read (OSC 52)");
             m.insert(
                 "clipboard_read_description",
@@ -606,6 +615,15 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert(
                 "shell_integration_description",
                 "为 zsh 和 fish 自动加载提示符标记（OSC 133）与工作目录跟踪（OSC 7）。",
+            );
+            m.insert("persistent_sessions", "持久会话");
+            m.insert(
+                "persistent_sessions_description",
+                "退出 Terry 后终端继续在后台守护进程中运行；关闭标签页会分离而不是结束进程。目前仅支持 Unix。",
+            );
+            m.insert(
+                "persistent_sessions_detached_notice",
+                "该终端已在后台继续运行。可以用「重新打开已关闭的终端」恢复，或用 `terry daemon kill` 结束它。",
             );
             m.insert("clipboard_read", "允许读取剪贴板（OSC 52）");
             m.insert(
