@@ -1688,27 +1688,28 @@ async fn run_command(
 
     window
         .update(cx, move |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let view = resolve_terminal(&panel, terminal_id, cx)?;
-                let id = view.entity_id();
-                let terminal = view.read(cx).terminal().clone();
-                terminal.update(cx, move |terminal, _| {
-                    terminal.paste(&text);
-                    if enter {
-                        terminal.input(b"\r".to_vec());
-                    }
-                });
-                Ok(json!({
-                    "status": "ok",
-                    "action": "run",
-                    "terminal_id": id.as_u64(),
-                    "enter": enter,
-                }))
-            })
+            // Read (do not update) the workspace: `resolve_terminal` reads it
+            // back, and gpui aborts on a re-entrant read inside a live update.
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let view = resolve_terminal(&panel, terminal_id, cx)?;
+            let id = view.entity_id();
+            let terminal = view.read(cx).terminal().clone();
+            terminal.update(cx, move |terminal, _| {
+                terminal.paste(&text);
+                if enter {
+                    terminal.input(b"\r".to_vec());
+                }
+            });
+            Ok(json!({
+                "status": "ok",
+                "action": "run",
+                "terminal_id": id.as_u64(),
+                "enter": enter,
+            }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -1947,22 +1948,24 @@ async fn read_screen(
 
     window
         .update(cx, move |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let view = resolve_terminal(&panel, terminal_id, cx)?;
-                let id = view.entity_id().as_u64();
-                let terminal = view.read(cx).terminal().read(cx);
-                let content = match lines {
-                    Some(lines) if lines > 0 => {
-                        terminal.last_n_non_empty_lines(lines as usize).join("\n")
-                    }
-                    _ => terminal.get_content(),
-                };
-                Ok(json!({ "terminal_id": id, "content": content }))
-            })
+            // Read rather than update the workspace: panel helpers read it back
+            // for the active pane, and gpui panics on a re-entrant read inside a
+            // live update.
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let view = resolve_terminal(&panel, terminal_id, cx)?;
+            let id = view.entity_id().as_u64();
+            let terminal = view.read(cx).terminal().read(cx);
+            let content = match lines {
+                Some(lines) if lines > 0 => {
+                    terminal.last_n_non_empty_lines(lines as usize).join("\n")
+                }
+                _ => terminal.get_content(),
+            };
+            Ok(json!({ "terminal_id": id, "content": content }))
         })
         .map_err(|error| error.to_string())?
 }
@@ -2058,16 +2061,17 @@ async fn get_context(cx: &mut AsyncApp, terminal_id: Option<u64>) -> Result<Valu
 
     window
         .update(cx, move |multi_workspace, _window, cx| {
-            let workspace = multi_workspace.workspace().clone();
-            workspace.update(cx, move |workspace, cx| {
-                let panel = workspace
-                    .panel::<TerminalListPanel>(cx)
-                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                panel
-                    .read(cx)
-                    .terminal_context(terminal_id.map(EntityId::from), cx)
-                    .ok_or_else(|| "no active terminal".to_string())
-            })
+            // See `read_screen`: panel helpers read the workspace back, so this
+            // must not run inside `workspace.update`.
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            panel
+                .read(cx)
+                .terminal_context(terminal_id.map(EntityId::from), cx)
+                .ok_or_else(|| "no active terminal".to_string())
         })
         .map_err(|error| error.to_string())?
 }
