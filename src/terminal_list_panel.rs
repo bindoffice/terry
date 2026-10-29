@@ -23,6 +23,9 @@ use zed_actions::terminal_list_panel::{
     ToggleFocus,
 };
 
+use crate::agent_detect::{self, AgentState};
+use crate::persistent_sessions;
+
 use serde::{Deserialize, Serialize};
 use settings::Settings;
 use std::collections::{HashMap, HashSet};
@@ -378,6 +381,70 @@ fn coding_agents() -> &'static [AgentCli] {
             past: None,
             fork: None,
         },
+        AgentCli {
+            id: "cline",
+            names: &["cline"],
+            bin: "cline",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "devin",
+            names: &["devin", "devin-cli"],
+            bin: "devin",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "mastracode",
+            names: &["mastracode", "mastra-code"],
+            bin: "mastracode",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "kiro",
+            names: &["kiro", "kiro-cli"],
+            bin: "kiro-cli",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "kilo",
+            names: &["kilo", "kilo-code"],
+            bin: "kilo",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "letta",
+            names: &["letta", "letta-code"],
+            bin: "letta",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "maki",
+            names: &["maki"],
+            bin: "maki",
+            resume: None,
+            past: None,
+            fork: None,
+        },
+        AgentCli {
+            id: "muse",
+            names: &["muse", "muse-code", "muse-cli"],
+            bin: "muse",
+            resume: None,
+            past: None,
+            fork: None,
+        },
     ]
 }
 
@@ -403,6 +470,55 @@ fn agent_for_basename(base: &str) -> Option<&'static AgentCli> {
     })
 }
 
+/// Recognises coding agents installed as npm packages.
+///
+/// npm-installed CLIs run as `node .../node_modules/<package>/dist/cli.js`, so
+/// the foreground process name is the runtime (`node`) rather than the agent.
+/// Matching the package entry point keeps those terminals identifiable.
+fn agent_for_package_path(path: &str) -> Option<&'static AgentCli> {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+
+    const PACKAGES: &[(&str, &str)] = &[
+        (
+            "node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+            "pi",
+        ),
+        (
+            "node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+            "pi",
+        ),
+        ("node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js", "omp"),
+        ("node_modules/@moonshot-ai/kimi-code/dist/main.mjs", "kimi"),
+        ("node_modules/@qwen-code/qwen-code/dist/index.js", "qwen"),
+        ("node_modules/@qwen-code/qwen-code/dist/index.mjs", "qwen"),
+        ("node_modules/mastracode/dist/cli", "mastracode"),
+        ("node_modules/mastracode/dist/cli.js", "mastracode"),
+        ("node_modules/@letta-ai/letta-code/letta", "letta"),
+    ];
+
+    for (suffix, id) in PACKAGES {
+        if normalized.ends_with(suffix) {
+            return agent_by_id(id);
+        }
+    }
+    None
+}
+
+/// Coding agent running in `terminal`, matching either the process name or the
+/// npm package entry point of a runtime-hosted CLI.
+fn coding_agent_for_terminal(terminal: &terminal::Terminal) -> Option<&'static AgentCli> {
+    if let Some(command) = terminal.foreground_process_command_name() {
+        let base = command_basename(&command);
+        if let Some(agent) = agent_for_basename(&base) {
+            return Some(agent);
+        }
+    }
+    terminal
+        .foreground_process_script_path()
+        .as_deref()
+        .and_then(agent_for_package_path)
+}
+
 fn invocation_bin(agent: &'static AgentCli, base: &str) -> &'static str {
     agent
         .names
@@ -414,6 +530,29 @@ fn invocation_bin(agent: &'static AgentCli, base: &str) -> &'static str {
 
 fn agent_command(template: &str, bin: &str) -> String {
     template.replace("{bin}", bin)
+}
+
+/// One-shot resume command for a session reported by an integration.
+fn agent_session_resume_command(agent_id: &str, session: &str) -> Option<String> {
+    let template = match agent_id {
+        "pi" => "{bin} --session {session}",
+        "opencode" => "{bin} --session {session}",
+        "claude" => "{bin} --resume {session}",
+        "kimi" => "{bin} --session {session}",
+        "qwen" => "{bin} --resume {session}",
+        "codex" => "{bin} resume {session}",
+        _ => return None,
+    };
+    let agent = agent_by_id(agent_id)?;
+    Some(
+        template
+            .replace("{bin}", agent.bin)
+            .replace("{session}", &shell_quote(session)),
+    )
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn agent_by_id(id: &str) -> Option<&'static AgentCli> {
@@ -451,6 +590,13 @@ fn coding_agent_from_view(
             return Some((agent, invocation_bin(agent, &base)));
         }
     }
+    if let Some(agent) = terminal
+        .foreground_process_script_path()
+        .as_deref()
+        .and_then(agent_for_package_path)
+    {
+        return Some((agent, agent.bin));
+    }
     agent_mentioned_in_text(&terminal.title(false))
         .or_else(|| agent_mentioned_in_text(&terminal.breadcrumb_text))
 }
@@ -459,13 +605,23 @@ fn coding_agent_from_view(
 /// as "working" rather than waiting for input.
 const AGENT_WORKING_WINDOW: Duration = Duration::from_secs(5);
 
+/// Delay after the last output before the screen-tail detector runs, so it sees
+/// a settled frame instead of a half-drawn one.
+const AGENT_DETECT_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// Re-scan cadence while an agent is working or blocked. Some state changes
+/// (answering a dialog, a silent thinking pause) redraw the screen without
+/// producing PTY output, so a slow poll keeps the badge honest.
+const AGENT_DETECT_POLL: Duration = Duration::from_secs(1);
+
 /// Snapshot of an agent terminal's state, rendered as a badge in the sidebar.
 #[derive(Clone)]
 struct AgentBadge {
     name: SharedString,
     working: bool,
-    /// Whether the agent produced output and then went quiet, which usually
-    /// means it is waiting for the user to answer or approve something.
+    /// Whether the agent is waiting for the user to answer or approve
+    /// something. Set from the screen-tail detector when it recognises a
+    /// blocking dialog, otherwise from the quiet-window heuristic.
     waiting: bool,
     /// Accent used for the agent's icon and name while it is working.
     color: Color,
@@ -550,6 +706,7 @@ fn agent_badge_for(
     view: &Entity<TerminalView>,
     terminal_activity: &HashMap<EntityId, std::time::Instant>,
     agent_waiting: &HashSet<EntityId>,
+    agent_states: &HashMap<EntityId, AgentState>,
     cx: &App,
 ) -> Option<AgentBadge> {
     // Only trust the foreground process here: title/breadcrumb matching is fine
@@ -559,17 +716,27 @@ fn agent_badge_for(
     let busy = agent_is_busy(view, cx);
     let view = view.read(cx);
     let terminal = view.terminal().read(cx);
-    let command = terminal.foreground_process_command_name()?;
-    let agent = agent_for_basename(&command_basename(&command))?;
-    let working = terminal_activity
-        .get(&view_id)
-        .is_some_and(|last| last.elapsed() < AGENT_WORKING_WINDOW)
-        || busy;
+    let agent = coding_agent_for_terminal(&terminal)?;
+    // Screen-tail detection is authoritative when it has an answer; the
+    // quiet-window heuristic only covers agents without rules and screens the
+    // rules do not recognise.
+    let (working, waiting) = match agent_states.get(&view_id) {
+        Some(AgentState::Working) => (true, false),
+        Some(AgentState::Blocked) => (false, true),
+        Some(AgentState::Idle) => (false, false),
+        None => {
+            let working = terminal_activity
+                .get(&view_id)
+                .is_some_and(|last| last.elapsed() < AGENT_WORKING_WINDOW)
+                || busy;
+            (working, agent_waiting.contains(&view_id))
+        }
+    };
     let (color, icon) = agent_style(agent);
     Some(AgentBadge {
         name: agent_display_name(agent),
         working,
-        waiting: agent_waiting.contains(&view_id),
+        waiting,
         color,
         icon,
     })
@@ -580,6 +747,13 @@ fn agent_badge_for(
 struct GitBadge {
     branch: SharedString,
     dirty: usize,
+}
+
+/// State reported by an in-terminal agent integration.
+#[derive(Clone)]
+struct ReportedAgentState {
+    state: AgentState,
+    message: Option<String>,
 }
 
 /// Snapshot of an agent terminal for the agent switcher.
@@ -604,10 +778,7 @@ fn notify_agents_waiting(views: &[Entity<TerminalView>], cx: &mut App) {
     let (agent_name, terminal_title) = {
         let view = first.read(cx);
         let terminal = view.terminal().read(cx);
-        let agent_name = terminal
-            .foreground_process_command_name()
-            .map(|command| command_basename(&command))
-            .and_then(|base| agent_for_basename(&base))
+        let agent_name = coding_agent_for_terminal(&terminal)
             .map(agent_display_name)
             .unwrap_or_else(|| SharedString::from(i18n::t("agent")));
         (agent_name, terminal.title(false))
@@ -701,10 +872,7 @@ fn should_park_agent_session(view: &Entity<TerminalView>, cx: &App) -> bool {
     if terminal.has_exited() {
         return false;
     }
-    if terminal
-        .foreground_process_command_name()
-        .is_some_and(|name| is_coding_agent_name(&name))
-    {
+    if coding_agent_for_terminal(&terminal).is_some() {
         return true;
     }
     text_mentions_coding_agent(&terminal.title(false))
@@ -729,6 +897,22 @@ struct PersistedTerminal {
     /// `ssh`/`tmux`), so restore can replay it instead of opening a plain shell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     launch: Option<PersistedLaunch>,
+    /// Daemon session backing this terminal when persistent sessions are on.
+    /// Reusing the id reattaches to the running process instead of starting a
+    /// new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    daemon_session: Option<String>,
+    /// Agent session reported by an integration, so restore can resume the
+    /// exact conversation instead of starting a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_session: Option<PersistedAgentSession>,
+}
+
+/// A resumable agent session reported through `report_agent_session`.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+struct PersistedAgentSession {
+    agent: String,
+    value: String,
 }
 
 /// Replayable launch information for a persisted terminal.
@@ -756,6 +940,7 @@ struct SpawnRestore {
     color_scheme: Option<String>,
     font_size: Option<f32>,
     launch: Option<PersistedLaunch>,
+    daemon_session: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -1395,6 +1580,8 @@ pub struct TerminalListPanel {
     /// Launch origin per terminal view (profile or direct command), persisted so
     /// restore can replay `ssh`/`tmux` terminals instead of opening a shell.
     terminal_launches: HashMap<EntityId, PersistedLaunch>,
+    /// Daemon session backing each terminal when persistent sessions are on.
+    terminal_daemon_sessions: HashMap<EntityId, String>,
     /// Subscription objects for each terminal view keyed by its entity id.
     /// Removed when the terminal is closed so long sessions do not accumulate
     /// dead subscriptions.
@@ -1421,6 +1608,20 @@ pub struct TerminalListPanel {
     /// Pending refresh that lets the agent badge fall back to idle once output
     /// stops, so the panel does not re-render continuously.
     agent_idle_refresh: Option<Task<()>>,
+    /// Screen-tail detection result per terminal. Absent when the terminal is
+    /// not running an agent with rules, or when no rule matched and the coarse
+    /// quiet-window heuristic should apply instead.
+    agent_states: HashMap<EntityId, AgentState>,
+    /// State reported by an in-terminal agent integration (for example the Pi
+    /// extension). Authoritative over screen detection.
+    reported_agent_states: HashMap<EntityId, ReportedAgentState>,
+    /// `TERRY_TERMINAL_TOKEN` value per terminal, so integration reports can be
+    /// attributed to the right terminal.
+    terminal_tokens: HashMap<String, EntityId>,
+    /// Resumable agent session per terminal, reported by an integration.
+    agent_session_refs: HashMap<EntityId, PersistedAgentSession>,
+    /// Debounced re-scan of the terminal bottom after output settles.
+    agent_detect_task: Option<Task<()>>,
     /// Debounced disk write after a terminal cwd change.
     cwd_persist_task: Task<()>,
     /// Debounced disk write after the command history changes.
@@ -1461,6 +1662,21 @@ impl TerminalListPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
+        // Reap daemon sessions nothing references. Runs once per process, after
+        // a delay so window restore has a chance to reattach first.
+        if persistent_sessions::is_enabled(cx) && persistent_sessions::claim_startup_prune() {
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_secs(60));
+                let referenced = persistent_sessions::referenced_sessions();
+                match persistent_sessions::prune(&referenced, 3600, false) {
+                    Ok(pruned) if !pruned.is_empty() => {
+                        log::info!("pruned {} orphaned daemon session(s)", pruned.len());
+                    }
+                    Ok(_) => {}
+                    Err(error) => log::debug!("daemon prune failed: {error}"),
+                }
+            });
+        }
         // subscribe_in so ItemAdded/ItemRemoved reconciliation can update the pane.
         let _workspace_subscription =
             cx.subscribe_in(&workspace, window, |this, _, event, window, cx| {
@@ -1573,6 +1789,7 @@ impl TerminalListPanel {
             owns_workspace_session,
             terminal_spawn_cwds: HashMap::default(),
             terminal_launches: HashMap::default(),
+            terminal_daemon_sessions: HashMap::default(),
             _terminal_subscriptions: HashMap::default(),
             terminal_activity: HashMap::default(),
             agent_waiting: HashSet::default(),
@@ -1584,6 +1801,11 @@ impl TerminalListPanel {
             _git_store_subscription,
             _recording_observation,
             agent_idle_refresh: None,
+            agent_states: HashMap::default(),
+            reported_agent_states: HashMap::default(),
+            terminal_tokens: HashMap::default(),
+            agent_session_refs: HashMap::default(),
+            agent_detect_task: None,
             cwd_persist_task: Task::ready(()),
             command_history_persist: Task::ready(()),
             restore_cwd_guard_until: None,
@@ -1718,11 +1940,22 @@ impl TerminalListPanel {
                     if this.agent_waiting.contains(&id) {
                         continue;
                     }
+                    // The screen-tail detector already classified this
+                    // terminal; the quiet-window heuristic is only a fallback.
+                    if this.agent_states.contains_key(&id) {
+                        continue;
+                    }
                     let Some(view) = this.view_by_id_any(id) else {
                         continue;
                     };
-                    if agent_badge_for(&view, &this.terminal_activity, &this.agent_waiting, cx)
-                        .is_none()
+                    if agent_badge_for(
+                        &view,
+                        &this.terminal_activity,
+                        &this.agent_waiting,
+                        &this.agent_states,
+                        cx,
+                    )
+                    .is_none()
                     {
                         continue;
                     }
@@ -1745,6 +1978,133 @@ impl TerminalListPanel {
             })
             .ok();
         }));
+    }
+
+    /// Re-scans the bottom of every agent terminal after `delay`. Replacing the
+    /// task cancels the previous timer, so bursts of output collapse into one
+    /// scan once the terminal settles.
+    fn schedule_agent_detection(&mut self, delay: Duration, cx: &mut Context<Self>) {
+        self.agent_detect_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update(cx, |this, cx| {
+                this.agent_detect_task = None;
+                this.refresh_agent_states(cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// Applies the screen-tail rules to every terminal running an agent with a
+    /// rule set, notifying once when an agent newly blocks on a question.
+    fn refresh_agent_states(&mut self, cx: &mut Context<Self>) {
+        let views: Vec<Entity<TerminalView>> = self
+            .groups
+            .iter()
+            .flat_map(|group| group.terminals.iter().cloned())
+            .chain(
+                self.detached_sessions
+                    .iter()
+                    .map(|session| session.view.clone()),
+            )
+            .collect();
+
+        let mut observed = Vec::with_capacity(views.len());
+        let mut still_streaming = false;
+        for view in views {
+            let detected = {
+                let view_ref = view.read(cx);
+                let terminal = view_ref.terminal().read(cx);
+                let Some(agent) = coding_agent_for_terminal(&terminal) else {
+                    continue;
+                };
+                if !agent_detect::supports(agent.id) {
+                    continue;
+                }
+                if self
+                    .terminal_activity
+                    .get(&view.entity_id())
+                    .is_some_and(|last| last.elapsed() < AGENT_DETECT_DEBOUNCE)
+                {
+                    still_streaming = true;
+                }
+                let screen = agent_detect::Screen {
+                    lines: terminal.last_n_non_empty_lines(agent_detect::SCREEN_LINES),
+                    title: terminal.title(false),
+                };
+                self.reported_agent_states
+                    .get(&view.entity_id())
+                    .map(|reported| reported.state)
+                    .or_else(|| agent_detect::detect(agent.id, &screen))
+            };
+            observed.push((view, detected));
+        }
+
+        let mut changed = false;
+        let mut newly_blocked = Vec::new();
+
+        // Forget terminals that are no longer running an agent we can read, so
+        // the quiet-window heuristic takes over again.
+        let observed_ids: HashSet<EntityId> =
+            observed.iter().map(|(view, _)| view.entity_id()).collect();
+        let stale: Vec<EntityId> = self
+            .agent_states
+            .keys()
+            .copied()
+            .filter(|id| !observed_ids.contains(id))
+            .collect();
+        for id in stale {
+            self.agent_states.remove(&id);
+            changed = true;
+        }
+
+        for (view, detected) in observed {
+            let id = view.entity_id();
+            match detected {
+                Some(state) => {
+                    let previous = self.agent_states.insert(id, state);
+                    // Screen rules supersede the coarse quiet-window flag for
+                    // this terminal, so a stale flag cannot fire a second
+                    // notification.
+                    self.agent_waiting.remove(&id);
+                    if previous != Some(state) {
+                        changed = true;
+                        if state == AgentState::Blocked {
+                            newly_blocked.push(view);
+                        }
+                    }
+                }
+                None => {
+                    if self.agent_states.remove(&id).is_some() {
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        if changed {
+            cx.notify();
+        }
+        if !newly_blocked.is_empty() {
+            notify_agents_waiting(&newly_blocked, cx);
+        }
+        // While the agent is still producing output the frame we just read was
+        // partial, so scan again once it settles. Otherwise keep a slow poll
+        // running while any agent is busy, because some state changes redraw
+        // without emitting output.
+        let next_scan = if still_streaming {
+            Some(AGENT_DETECT_DEBOUNCE)
+        } else if self
+            .agent_states
+            .values()
+            .any(|state| *state != AgentState::Idle)
+        {
+            Some(AGENT_DETECT_POLL)
+        } else {
+            None
+        };
+        if let Some(delay) = next_scan {
+            self.schedule_agent_detection(delay, cx);
+        }
     }
 
     /// Terminal view by id, including detached sessions.
@@ -1850,9 +2210,13 @@ impl TerminalListPanel {
         let mut entries = Vec::new();
         for group in &self.groups {
             for view in &group.terminals {
-                let Some(badge) =
-                    agent_badge_for(view, &self.terminal_activity, &self.agent_waiting, cx)
-                else {
+                let Some(badge) = agent_badge_for(
+                    view,
+                    &self.terminal_activity,
+                    &self.agent_waiting,
+                    &self.agent_states,
+                    cx,
+                ) else {
                     continue;
                 };
                 entries.push(AgentTerminalEntry {
@@ -1879,8 +2243,17 @@ impl TerminalListPanel {
             .groups
             .iter()
             .flat_map(|group| group.terminals.iter())
+            .filter(|view| {
+                agent_badge_for(
+                    view,
+                    &self.terminal_activity,
+                    &self.agent_waiting,
+                    &self.agent_states,
+                    cx,
+                )
+                .is_some_and(|badge| badge.waiting)
+            })
             .map(|view| view.entity_id())
-            .filter(|id| self.agent_waiting.contains(id))
             .collect();
         let Some(first) = ordered.first().copied() else {
             return;
@@ -2177,6 +2550,8 @@ impl TerminalListPanel {
                     color_scheme,
                     font_size,
                     launch,
+                    daemon_session: self.terminal_daemon_sessions.get(&view_id).cloned(),
+                    agent_session: self.agent_session_refs.get(&view_id).cloned(),
                 });
             }
 
@@ -2395,7 +2770,12 @@ impl TerminalListPanel {
                 color_scheme,
                 font_size,
                 launch,
+                daemon_session,
+                agent_session,
             } = p_term;
+            let init_command = agent_session
+                .as_ref()
+                .and_then(|session| agent_session_resume_command(&session.agent, &session.value));
             // Replay the original launch (named profile, `ssh`, `tmux`, ...)
             // instead of opening a plain shell. A profile that no longer exists
             // falls back to the default shell rather than failing the restore.
@@ -2411,8 +2791,9 @@ impl TerminalListPanel {
                     color_scheme,
                     font_size,
                     launch,
+                    daemon_session,
                 },
-                None,
+                init_command,
                 profile,
                 window,
                 cx,
@@ -3432,9 +3813,23 @@ impl TerminalListPanel {
         let removed = self.groups.remove(index);
         let terminal_ids: std::collections::HashSet<EntityId> =
             removed.terminals.iter().map(|tv| tv.entity_id()).collect();
+        // Deleting a group ends its processes, including daemon-backed ones;
+        // detaching here would leave sessions nobody can reach from the UI.
+        for id in &terminal_ids {
+            if let Some(session) = self.terminal_daemon_sessions.remove(id) {
+                if let Err(error) = crate::persistent_sessions::kill(&session) {
+                    log::debug!("failed to kill daemon session {session}: {error}");
+                }
+            }
+        }
         for id in &terminal_ids {
             self._terminal_subscriptions.remove(id);
             self.terminal_activity.remove(id);
+            self.agent_waiting.remove(id);
+            self.agent_states.remove(id);
+            self.reported_agent_states.remove(id);
+            self.agent_session_refs.remove(id);
+            self.terminal_tokens.retain(|_, view| view != id);
         }
 
         // Pull closed items out of panes before dropping Entities.
@@ -3568,7 +3963,150 @@ impl TerminalListPanel {
             "exit_code": terminal.last_exit_code(),
             "exited": terminal.has_exited(),
             "group": group.map(|group| group.name.to_string()),
+            "agent_state": self.agent_states.get(&id).map(|state| state.as_str()),
         }))
+    }
+
+    /// Applies a resumable session report from an in-terminal agent integration.
+    pub fn apply_reported_agent_session(
+        &mut self,
+        token: &str,
+        agent: &str,
+        session_path: Option<String>,
+        session_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, String> {
+        let Some(view_id) = self.terminal_tokens.get(token).copied() else {
+            return Err("unknown terminal token".to_string());
+        };
+        let value = session_path
+            .or(session_id)
+            .ok_or_else(|| "missing session reference".to_string())?;
+
+        self.agent_session_refs.insert(
+            view_id,
+            PersistedAgentSession {
+                agent: agent.to_string(),
+                value,
+            },
+        );
+        cx.notify();
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "terminal_id": view_id.as_u64(),
+        }))
+    }
+
+    /// Applies a state report from an in-terminal agent integration.
+    ///
+    /// The report is authoritative: it feeds the badge directly and screen
+    /// detection defers to it until the terminal closes.
+    pub fn apply_reported_agent_state(
+        &mut self,
+        token: &str,
+        state: &str,
+        message: Option<String>,
+        agent: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, String> {
+        let Some(view_id) = self.terminal_tokens.get(token).copied() else {
+            return Err("unknown terminal token".to_string());
+        };
+
+        let state = match state {
+            "working" => AgentState::Working,
+            "blocked" => AgentState::Blocked,
+            _ => AgentState::Idle,
+        };
+
+        self.reported_agent_states
+            .insert(view_id, ReportedAgentState { state, message });
+        // Badges read `agent_states`; screen detection defers to reports.
+        self.agent_states.insert(view_id, state);
+        self.agent_waiting.remove(&view_id);
+        cx.notify();
+
+        Ok(serde_json::json!({
+            "status": "ok",
+            "terminal_id": view_id.as_u64(),
+            "agent": agent,
+        }))
+    }
+
+    /// Agent terminals with their effective state, for the remote-control API.
+    ///
+    /// The state matches what the sidebar badge shows: screen-tail detection
+    /// when it has an answer, otherwise the quiet-window heuristic.
+    pub fn agent_states_json(&self, cx: &App) -> serde_json::Value {
+        let mut terminals = Vec::new();
+
+        let grouped = self.groups.iter().flat_map(|group| {
+            group
+                .terminals
+                .iter()
+                .map(move |view| (view, Some(group.name.clone())))
+        });
+        let detached = self
+            .detached_sessions
+            .iter()
+            .map(|session| (&session.view, None::<SharedString>));
+
+        for (view, group) in grouped.chain(detached) {
+            let Some(badge) = agent_badge_for(
+                view,
+                &self.terminal_activity,
+                &self.agent_waiting,
+                &self.agent_states,
+                cx,
+            ) else {
+                continue;
+            };
+            let id = view.entity_id();
+            let state = if badge.waiting {
+                "blocked"
+            } else if badge.working {
+                "working"
+            } else {
+                "idle"
+            };
+            let terminal = view.read(cx).terminal().read(cx);
+            terminals.push(serde_json::json!({
+                "terminal_id": id.as_u64(),
+                "title": sidebar_terminal_name(view, cx),
+                "group": group.map(|name| name.to_string()),
+                "agent": badge.name.to_string(),
+                "state": state,
+                "exited": terminal.has_exited(),
+                "cwd": terminal
+                    .working_directory()
+                    .map(|cwd| cwd.display().to_string()),
+            }));
+        }
+
+        serde_json::json!({
+            "active_terminal_id": self
+                .active_terminal_view(cx)
+                .map(|view| view.entity_id().as_u64()),
+            "terminals": terminals,
+        })
+    }
+
+    /// Persistent terminals keep running after their tab is closed. Tell the
+    /// user once, so a closed terminal is not mistaken for a killed one.
+    fn notice_detached_terminal(&self, terminal_id: EntityId, cx: &mut App) {
+        if !persistent_sessions::is_enabled(cx)
+            || !self.terminal_daemon_sessions.contains_key(&terminal_id)
+            || !persistent_sessions::should_notice_detach()
+        {
+            return;
+        }
+        cx.show_system_notification(gpui::SystemNotification {
+            tag: "terry-persistent-detach".into(),
+            title: i18n::t("persistent_sessions").into(),
+            body: i18n::t("persistent_sessions_detached_notice").into(),
+            actions: Vec::new(),
+        });
     }
 
     /// Closes a grouped or detached terminal without showing a confirmation
@@ -4048,6 +4586,8 @@ impl TerminalListPanel {
                 color_scheme,
                 font_size,
                 launch,
+                daemon_session: self.terminal_daemon_sessions.get(&terminal_id).cloned(),
+                agent_session: self.agent_session_refs.get(&terminal_id).cloned(),
             },
         });
     }
@@ -4076,7 +4616,12 @@ impl TerminalListPanel {
             color_scheme,
             font_size,
             launch,
+            daemon_session,
+            agent_session,
         } = closed.terminal;
+        let init_command = agent_session
+            .as_ref()
+            .and_then(|session| agent_session_resume_command(&session.agent, &session.value));
         let (profile, launch) = Self::resolve_persisted_launch(launch, cx);
         self.spawn_terminal(
             group_id,
@@ -4089,8 +4634,9 @@ impl TerminalListPanel {
                 color_scheme,
                 font_size,
                 launch,
+                daemon_session,
             },
-            None,
+            init_command,
             profile,
             window,
             cx,
@@ -4166,7 +4712,9 @@ impl TerminalListPanel {
             color_scheme: restore_color_scheme,
             font_size: restore_font_size,
             launch: restore_launch,
+            daemon_session: restore_daemon_session,
         } = restore;
+        let persistent_sessions_enabled = persistent_sessions::is_enabled(cx);
         let launch = restore_launch.or_else(|| {
             profile.as_ref().map(|profile| PersistedLaunch::Profile {
                 name: profile.name.clone(),
@@ -4188,7 +4736,20 @@ impl TerminalListPanel {
             .and_then(|profile| profile.command.clone())
             .or(init_command);
         let profile_shell = profile.as_ref().and_then(|profile| profile.shell.clone());
-        let profile_env = profile.as_ref().map(|profile| profile.env.clone());
+        // Every terminal carries a token so an in-terminal agent integration can
+        // attribute its state reports, plus the IPC endpoint it should call.
+        let terminal_token = uuid::Uuid::new_v4().to_string();
+        let profile_env = {
+            let mut env = profile
+                .as_ref()
+                .map(|profile| profile.env.clone())
+                .unwrap_or_default();
+            for (key, value) in crate::ipc::connection_env() {
+                env.insert(key, value);
+            }
+            env.insert("TERRY_TERMINAL_TOKEN".to_string(), terminal_token.clone());
+            Some(env)
+        };
         let profile_working_directory = profile
             .as_ref()
             .and_then(|profile| profile.working_directory.clone());
@@ -4226,20 +4787,101 @@ impl TerminalListPanel {
             // defaulting), not the pre-default Option — otherwise session
             // writes store null and wipe restore paths.
             let remembered_cwd = working_directory.clone();
-            let terminal = project
-                .update(cx, |project, cx| match source.as_ref() {
-                    Some(view) => {
-                        let terminal = view.read(cx).terminal().clone();
-                        project.clone_terminal(&terminal, cx, working_directory.clone())
+            let mut spawned_daemon_session: Option<String> = None;
+            let daemon_session = restore_daemon_session.clone().or_else(|| {
+                persistent_sessions_enabled.then(persistent_sessions::new_session_id)
+            });
+
+            let terminal = match daemon_session.clone() {
+                Some(daemon_session) => {
+                    let (program, args) = match profile_shell.as_ref() {
+                        Some(task::Shell::Program(program)) => (Some(program.clone()), Vec::new()),
+                        Some(task::Shell::WithArguments { program, args, .. }) => {
+                            (Some(program.clone()), args.clone())
+                        }
+                        Some(task::Shell::System) | None => (None, Vec::new()),
+                    };
+                    let env = {
+                        let program_for_env =
+                            program.clone().unwrap_or_else(|| "/bin/sh".to_string());
+                        let extra = profile_env.clone().unwrap_or_default();
+                        cx.update(|_window, cx| {
+                            persistent_sessions::spawn_env(&program_for_env, &extra, cx)
+                        })?
+                    };
+                    let spec = persistent_sessions::session_spec(
+                        daemon_session.clone(),
+                        working_directory.clone(),
+                        program,
+                        args,
+                        env,
+                    );
+                    let attached = cx
+                        .background_executor()
+                        .spawn(async move { persistent_sessions::connect_and_spawn(spec) })
+                        .await;
+
+                    match attached {
+                        Ok(attached) => {
+                            let path_style =
+                                project.update(cx, |project, cx| project.path_style(cx))?;
+                            let settings = cx
+                                .update(|_window, cx| TerminalSettings::get_global(cx).clone())?;
+                            let terminal = cx.update(|_window, cx| {
+                                let builder = terminal::TerminalBuilder::new_display_only(
+                                    settings.cursor_shape,
+                                    settings.alternate_scroll,
+                                    settings.max_scroll_history_lines,
+                                    0,
+                                    cx.background_executor(),
+                                    path_style,
+                                );
+                                cx.new(|cx| builder.subscribe(cx))
+                            })?;
+                            persistent_sessions::wire(&terminal, attached, cx);
+                            spawned_daemon_session = Some(daemon_session);
+                            terminal
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "persistent session unavailable, falling back to a local PTY: {error}"
+                            );
+                            project
+                                .update(cx, |project, cx| {
+                                    project.create_terminal_shell_with_options(
+                                        working_directory,
+                                        profile_shell,
+                                        profile_env,
+                                        cx,
+                                    )
+                                })?
+                                .await?
+                        }
                     }
-                    None => project.create_terminal_shell_with_options(
-                        working_directory,
-                        profile_shell,
-                        profile_env,
-                        cx,
-                    ),
-                })?
-                .await?;
+                }
+                None => project
+                    .update(cx, |project, cx| match source.as_ref() {
+                        Some(view) => {
+                            let terminal = view.read(cx).terminal().clone();
+                            // Give the clone its own token so agent reports are
+                            // attributed to the clone, not the source.
+                            let env = profile_env.clone().unwrap_or_default();
+                            project.clone_terminal_with_env(
+                                &terminal,
+                                cx,
+                                working_directory.clone(),
+                                &env,
+                            )
+                        }
+                        None => project.create_terminal_shell_with_options(
+                            working_directory,
+                            profile_shell,
+                            profile_env,
+                            cx,
+                        ),
+                    })?
+                    .await?,
+            };
 
             this.update_in(cx, |this, window, cx| {
                 let Some(workspace) = this.workspace.upgrade() else {
@@ -4258,6 +4900,13 @@ impl TerminalListPanel {
                         cx,
                     )
                 });
+
+                if let Some(session) = spawned_daemon_session {
+                    this.terminal_daemon_sessions
+                        .insert(terminal_view.entity_id(), session);
+                }
+                this.terminal_tokens
+                    .insert(terminal_token.clone(), terminal_view.entity_id());
 
                 // A profile's color scheme wins; otherwise a cloned terminal
                 // keeps the source terminal's colors.
@@ -4688,7 +5337,20 @@ impl TerminalListPanel {
                 this.terminal_activity.insert(view_id, now);
                 // New output means the agent is no longer waiting for input.
                 let was_waiting = this.agent_waiting.remove(&view_id);
-                if !was_working || was_waiting {
+                // A quiescent agent that starts producing output is working
+                // again. Drop a stale idle state so the badge reacts
+                // immediately instead of waiting for the detection debounce.
+                // A blocked state is kept until a scan confirms it changed, so
+                // typing into a dialog does not re-fire the notification.
+                let was_quiescent =
+                    matches!(this.agent_states.get(&view_id), Some(AgentState::Idle));
+                if was_quiescent {
+                    this.agent_states.remove(&view_id);
+                }
+                if this.agent_detect_task.is_none() {
+                    this.schedule_agent_detection(AGENT_DETECT_DEBOUNCE, cx);
+                }
+                if !was_working || was_waiting || was_quiescent {
                     cx.notify();
                 }
                 if this.agent_idle_refresh.is_none() {
@@ -5367,6 +6029,9 @@ impl TerminalListPanel {
                 color_scheme: view_ref.color_scheme().map(str::to_owned),
                 font_size: view_ref.font_size_override().map(f32::from),
                 launch,
+                // Templates create fresh terminals, never reattach to a daemon.
+                daemon_session: None,
+                agent_session: None,
             });
         }
 
@@ -5420,6 +6085,7 @@ impl TerminalListPanel {
                     color_scheme: terminal.color_scheme.clone(),
                     font_size: terminal.font_size,
                     launch: terminal.launch.clone(),
+                    daemon_session: None,
                 },
                 None,
                 None,
@@ -5507,6 +6173,7 @@ impl TerminalListPanel {
             self.terminal_launches.remove(view_id);
             self.terminal_spawn_cwds.remove(view_id);
             self.agent_waiting.remove(view_id);
+            self.agent_states.remove(view_id);
         }
         self.suppress_recently_closed = true;
         if let Some(pane) = self.display_pane_entity(cx) {
@@ -5587,6 +6254,7 @@ impl TerminalListPanel {
         self.terminal_launches.remove(&view_id);
         self.terminal_spawn_cwds.remove(&view_id);
         self.agent_waiting.remove(&view_id);
+        self.agent_states.remove(&view_id);
         if group_id == self.active_group_id {
             self.suppress_recently_closed = true;
             if let Some(pane) = self.display_pane_entity(cx) {
@@ -5631,6 +6299,7 @@ impl TerminalListPanel {
             self.terminal_launches.remove(view_id);
             self.terminal_spawn_cwds.remove(view_id);
             self.agent_waiting.remove(view_id);
+            self.agent_states.remove(view_id);
             self.tmux_mirrored.remove(view_id);
         }
         self.suppress_recently_closed = true;
@@ -6224,6 +6893,8 @@ impl TerminalListPanel {
         self.terminal_activity.remove(&id);
         self.terminal_spawn_cwds.remove(&id);
         self.terminal_launches.remove(&id);
+        self.agent_waiting.remove(&id);
+        self.agent_states.remove(&id);
         drop(session.view);
         cx.notify();
     }
@@ -6892,8 +7563,15 @@ impl TerminalListPanel {
         if !self.suppress_recently_closed {
             self.remember_closed_terminal(item_id, cx);
         }
+        self.notice_detached_terminal(item_id, cx);
         self._terminal_subscriptions.remove(&item_id);
         self.terminal_activity.remove(&item_id);
+        self.agent_waiting.remove(&item_id);
+        self.agent_states.remove(&item_id);
+        self.reported_agent_states.remove(&item_id);
+        self.agent_session_refs.remove(&item_id);
+        self.terminal_tokens.retain(|_, id| *id != item_id);
+        self.terminal_daemon_sessions.remove(&item_id);
         let mut changed = false;
         let mut emptied_group: Option<GroupId> = None;
         let mut removed_from_active_auto = false;
@@ -7106,6 +7784,7 @@ impl Render for TerminalListPanel {
                         &session.view,
                         &self.terminal_activity,
                         &self.agent_waiting,
+                        &self.agent_states,
                         cx,
                     ),
                     session.view.read(cx).notification_progress(),
@@ -7143,8 +7822,13 @@ impl Render for TerminalListPanel {
             let mut terminals = Vec::new();
             if !collapsed {
                 for tv in &group.terminals {
-                    let badge =
-                        agent_badge_for(tv, &self.terminal_activity, &self.agent_waiting, cx);
+                    let badge = agent_badge_for(
+                        tv,
+                        &self.terminal_activity,
+                        &self.agent_waiting,
+                        &self.agent_states,
+                        cx,
+                    );
                     let progress = tv.read(cx).notification_progress();
                     let cwd = tv.read(cx).terminal().read(cx).working_directory();
                     let git = self.git_badge_for(cwd.as_deref(), cx);
@@ -7791,6 +8475,58 @@ mod tests {
     use terminal::terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape};
     use util::paths::PathStyle;
     use workspace::{AppState, MultiWorkspace};
+
+    #[test]
+    fn recognizes_npm_installed_agents_by_package_path() {
+        let cases = [
+            (
+                "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+                "pi",
+            ),
+            (
+                "/Users/me/.npm/_npx/abc/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+                "pi",
+            ),
+            (
+                "/opt/homebrew/lib/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+                "omp",
+            ),
+            (
+                "/usr/lib/node_modules/@moonshot-ai/kimi-code/dist/main.mjs",
+                "kimi",
+            ),
+            (
+                "/usr/lib/node_modules/@qwen-code/qwen-code/dist/index.js",
+                "qwen",
+            ),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(
+                agent_for_package_path(path).map(|agent| agent.id),
+                Some(expected),
+                "{path}"
+            );
+        }
+
+        // Windows separators and pnpm-style nested node_modules.
+        assert_eq!(
+            agent_for_package_path(
+                r"C:\Users\me\AppData\Roaming\npm\node_modules\@earendil-works\pi-coding-agent\dist\cli.js"
+            )
+            .map(|agent| agent.id),
+            Some("pi")
+        );
+        assert_eq!(
+            agent_for_package_path(
+                "/x/node_modules/.pnpm/@earendil-works+pi-coding-agent@1.0.0/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
+            )
+            .map(|agent| agent.id),
+            Some("pi")
+        );
+
+        assert!(agent_for_package_path("/usr/lib/node_modules/other-cli/dist/cli.js").is_none());
+        assert!(agent_for_package_path("").is_none());
+    }
 
     #[test]
     fn layout_presets_generate_expected_axes() {

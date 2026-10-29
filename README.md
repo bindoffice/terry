@@ -33,8 +33,9 @@ Group shells, browse files, and keep an AI agent beside you — built for people
 - **tmux sessions** — attach to (or create) a local tmux session from the picker; the remote equivalent goes through `ssh … tmux new -A -s <name>`. Choose the native option to mirror the session through tmux *control mode*: every tmux window becomes a Terry group and every pane a native split, with input, layout changes, window names and reconnects kept in sync. Without native mode the session runs inside a single terminal.
 - **Terminal color schemes** — a bundled library (Dracula, Nord, Solarized, Gruvbox, One Dark, Tokyo Night, Catppuccin, Rosé Pine, …) that changes only terminal colors; pick one per terminal, per profile, or with `terminal.color_scheme`. Import Alacritty `.toml`, iTerm2 `.itermcolors`, or Terry JSON files from the Terminal menu
 - **Session restore** — groups, split layouts, working directories, titles, per-profile color schemes, per-terminal font zoom, and profile/SSH/tmux launches are restored on restart
+- **Persistent sessions (opt-in)** — with `terminal.persistent_sessions` enabled, terminals are owned by a background daemon: they keep running after you quit Terry or close the window, and reattach with their scrollback when you come back. Closing a single tab detaches it (you are told once); reopen it with "Reopen Closed Terminal" or end it with `terry daemon kill`. Unix only for now
 - **Hints** — `Ctrl+Shift+E` lists visible URLs, paths, git hashes, UUIDs, IPs, and custom regex matches; choose one with the keyboard to open, copy, paste, or select. Add custom rules under `terminal.hints`, for example `{ "regex": "#\\d+", "action": "copy" }`
-- **AI Agent** — Chat with LLMs in a side panel; run commands and tools with configurable profiles
+- **AI Agent** — Chat with LLMs in a side panel; run commands and tools with configurable profiles. The side panel also marks running coding agents as working, waiting for input, or idle, detected from the bottom of the terminal screen (Claude, Codex, Gemini, OpenCode, Cursor, Qwen, Copilot, Grok, Kimi, Amp, Hermes, Qoder, Antigravity, and more)
 - **MCP** — Connect Model Context Protocol servers to extend agent capabilities
 - **Files panel** — Browse the project tree alongside your terminals
 - **Editor** — Open text from the files panel, or with New File / Open File; files share tabs and splits with terminals. Vim mode is on by default, with in-file search and go to line. Markdown can be previewed, and images open in a viewer
@@ -63,11 +64,16 @@ A running Terry instance listens on a local IPC socket (token-protected; connect
 ```sh
 terry new-tab --cwd ~/src          # open a new tab in the active window
 terry send-text "cargo test"       # paste text into the active terminal
+terry send-text --terminal 7 "hi"  # paste text into a specific terminal (no Enter)
 terry run "cargo test"             # paste text and press Enter
 terry session save "Work"          # save the active group as a session template
 terry session load "Work"          # create a new group from that template
 terry session list                 # list saved templates
 terry session delete "Work"        # delete a template
+terry agents                       # list agent terminals and their state (working/blocked/idle)
+terry wait --state blocked         # block until an agent needs input
+terry wait --match-output "FAILED" # block until recent terminal output contains FAILED
+terry events                       # subscribe to agent state changes (SSE, Ctrl-C to stop)
 terry kitten list                  # list installed kitten/plugin executables
 terry kitten run hello --arg       # run a kitten (or: terry kitten hello --arg)
 terry kitten path                  # show plugin search directories
@@ -97,9 +103,10 @@ The same bearer-protected loopback server also accepts JSON requests:
 - `/api/focus_session` — focus a terminal by `terminal_id` / `session_id`
 - `/api/focus_group` — switch to a group by `group_id`
 - `/api/send_keys` — send text or a keystroke such as `ctrl-c`
+- `/api/send_text` — paste text into `terminal_id` (defaults to the active terminal) without executing it
 - `/api/run` — paste text and optionally press Enter (`"enter": false` to skip)
-- `/api/read_screen` — read a terminal's content as plain text
-- `/api/get_context` — active terminal title, cwd, group, and command
+- `/api/read_screen` — read a terminal's content as plain text (`lines` limits it to the last N non-empty lines)
+- `/api/get_context` — active terminal title, cwd, group, command, and detected agent state
 - `/api/close_session` — close a terminal without prompting (or the active one when no id is given)
 - `/api/detach_session`, `/api/reattach_session`, `/api/list_detached` — keep a terminal alive outside a group and attach it again later
 - `/api/rename_session` — set or clear a terminal title (`"title": null` clears it)
@@ -111,6 +118,10 @@ The same bearer-protected loopback server also accepts JSON requests:
 - `/api/scroll` — `top`, `bottom`, `page_up`, `page_down`, `line_up`, or `line_down`
 - `/api/set_font_size`, `/api/set_color_scheme` — per-terminal display overrides (`null` clears them)
 - `/api/notify` — post a desktop notification
+- `/api/list_agent_states` — agent terminals with their state (`working`/`blocked`/`idle`), title, cwd, and exit status
+- `/api/wait_agent_state` — block until an agent reaches a state (`state` or `states`, optional `timeout_ms`; returns 408 on timeout)
+- `/api/wait_for_output` — block until recent terminal output matches `match` (substring) or `regex`; `tail_lines` bounds the search (`0` = whole buffer)
+- `/api/events` — SSE stream of `snapshot`, `agent_state`, `terminal_added`, and `terminal_removed` events
 - `/api/new_tab`, `/api/send_text`, `/api/focus`, `/api/new_window`
 
 ## Command output

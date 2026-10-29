@@ -38,21 +38,44 @@ pub fn run_cli_subcommand(args: &[String]) -> Option<i32> {
                 2
             }
         }),
-        Some("send-text") => Some(match parse_text_args(&args[1..], "send-text") {
-            Ok(text) => post_command("/api/send_text", &json!({ "text": text }).to_string()),
+        Some("send-text") => Some(match parse_targeted_text_args(&args[1..], "send-text") {
+            Ok((terminal_id, text)) => post_command(
+                "/api/send_text",
+                &json!({ "terminal_id": terminal_id, "text": text }).to_string(),
+            ),
             Err(error) => {
                 eprintln!("{error}");
                 2
             }
         }),
-        Some("run") => Some(match parse_text_args(&args[1..], "run") {
-            Ok(text) => post_command("/api/run", &json!({ "text": text }).to_string()),
+        Some("run") => Some(match parse_targeted_text_args(&args[1..], "run") {
+            Ok((terminal_id, text)) => post_command(
+                "/api/run",
+                &json!({ "terminal_id": terminal_id, "text": text }).to_string(),
+            ),
             Err(error) => {
                 eprintln!("{error}");
                 2
             }
         }),
         Some("session") => Some(run_session_cli(&args[1..])),
+        Some("daemon") => Some(run_daemon_cli(&args[1..])),
+        Some("agent-integration") => Some(run_agent_integration_cli(&args[1..])),
+        Some("daemon-serve") => Some(run_daemon_serve(&args[1..])),
+        Some("agents") => Some(post_command("/api/list_agent_states", "{}")),
+        Some("wait") => Some(run_wait_cli(&args[1..], false)),
+        Some("wait-output") => Some(run_wait_cli(&args[1..], true)),
+        Some("events") => Some(stream_events()),
+        Some("context") => Some(match parse_context_args(&args[1..]) {
+            Ok(terminal_id) => post_command(
+                "/api/get_context",
+                &json!({ "terminal_id": terminal_id }).to_string(),
+            ),
+            Err(error) => {
+                eprintln!("{error}");
+                2
+            }
+        }),
         Some("kitten" | "plugin") => Some(crate::kittens::run_cli_subcommand(&args[1..])),
         Some("help" | "--help" | "-h") => {
             print_cli_usage();
@@ -86,17 +109,270 @@ fn parse_new_tab_args(args: &[String]) -> Result<Option<PathBuf>, String> {
     Ok(cwd)
 }
 
-fn parse_text_args(args: &[String], command: &str) -> Result<String, String> {
-    let args = match args.first().map(String::as_str) {
-        Some("--") => &args[1..],
-        _ => args,
-    };
-    if args.is_empty() {
+fn parse_targeted_text_args(
+    args: &[String],
+    command: &str,
+) -> Result<(Option<u64>, String), String> {
+    let mut terminal_id = None;
+    let mut text = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            text.extend(args[index + 1..].iter().cloned());
+            break;
+        }
+        if arg == "--terminal" {
+            index += 1;
+            let value = args
+                .get(index)
+                .ok_or_else(|| "--terminal 需要一个数字终端 id".to_string())?;
+            terminal_id = Some(
+                value
+                    .parse::<u64>()
+                    .map_err(|_| "--terminal 需要一个数字终端 id".to_string())?,
+            );
+        } else if let Some(value) = arg.strip_prefix("--terminal=") {
+            terminal_id = Some(
+                value
+                    .parse::<u64>()
+                    .map_err(|_| "--terminal 需要一个数字终端 id".to_string())?,
+            );
+        } else {
+            text.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    if text.is_empty() {
         return Err(format!(
             "{command} 需要文本参数，例如 terry {command} \"ls -la\""
         ));
     }
-    Ok(args.join(" "))
+    Ok((terminal_id, text.join(" ")))
+}
+
+fn parse_context_args(args: &[String]) -> Result<Option<u64>, String> {
+    match args {
+        [] => Ok(None),
+        [flag, value] if flag == "--terminal" => value
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|_| "--terminal 需要一个数字终端 id".to_string()),
+        [arg] => arg
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|_| format!("context 未知参数: {arg}")),
+        _ => Err("context 用法: terry context [--terminal ID]".to_string()),
+    }
+}
+
+/// `terry agent-integration install|uninstall|list [AGENT]`.
+fn run_agent_integration_cli(args: &[String]) -> i32 {
+    let Some(command) = args.first().map(String::as_str) else {
+        eprintln!("用法: terry agent-integration install|uninstall|list [AGENT]");
+        return 2;
+    };
+
+    match command {
+        "list" => {
+            println!("{}", crate::agent_integrations::SUPPORTED.join("\n"));
+            0
+        }
+        "install" | "uninstall" => {
+            let Some(agent) = args.get(1).map(String::as_str) else {
+                eprintln!(
+                    "{command} 需要一个 agent 名称（{}）",
+                    crate::agent_integrations::SUPPORTED.join(", ")
+                );
+                return 2;
+            };
+            let result = if command == "install" {
+                crate::agent_integrations::install(agent)
+            } else {
+                crate::agent_integrations::uninstall(agent)
+            };
+            match result {
+                Ok(path) => {
+                    println!("{command}ed {}", path.display());
+                    if command == "install" {
+                        let snippet = match agent {
+                            "claude" => Some((
+                                "~/.claude/settings.json",
+                                crate::agent_integrations::claude_settings_snippet(&path),
+                            )),
+                            "kimi" => Some((
+                                "~/.kimi-code/config.toml",
+                                crate::agent_integrations::kimi_settings_snippet(&path),
+                            )),
+                            "qwen" => Some((
+                                "~/.qwen/settings.json",
+                                crate::agent_integrations::qwen_settings_snippet(&path),
+                            )),
+                            "codex" => Some((
+                                "~/.codex/hooks.json",
+                                crate::agent_integrations::codex_hooks_snippet(&path),
+                            )),
+                            _ => None,
+                        };
+                        if let Some((file, snippet)) = snippet {
+                            println!("\n把下面的内容合并到 {file}：\n{snippet}");
+                        }
+                        if agent == "codex" {
+                            println!(
+                                "\n并在 ~/.codex/config.toml 里启用 hooks：\n{}",
+                                crate::agent_integrations::codex_config_snippet()
+                            );
+                        }
+                        println!("重启 {agent} 后生效。");
+                    }
+                    0
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    1
+                }
+            }
+        }
+        other => {
+            eprintln!("未知子命令: {other}");
+            2
+        }
+    }
+}
+
+/// `terry daemon list|kill|serve`.
+fn run_daemon_cli(args: &[String]) -> i32 {
+    let Some(command) = args.first().map(String::as_str) else {
+        eprintln!(
+            "用法: terry daemon list | kill SESSION | prune [--dry-run] [--min-idle-secs N] | serve [--socket PATH]"
+        );
+        return 2;
+    };
+
+    match command {
+        "list" => {
+            let sessions = match connect_daemon() {
+                Ok(mut control) => match control.list() {
+                    Ok(sessions) => sessions,
+                    Err(error) => {
+                        eprintln!("terry daemon: {error}");
+                        return 1;
+                    }
+                },
+                Err(message) => {
+                    eprintln!("{message}");
+                    return 1;
+                }
+            };
+            match serde_json::to_string_pretty(&sessions) {
+                Ok(json) => {
+                    println!("{json}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("terry daemon: {error}");
+                    1
+                }
+            }
+        }
+        "kill" => {
+            let Some(session) = args.get(1) else {
+                eprintln!("kill 需要一个 session id（用 `terry daemon list` 查看）");
+                return 2;
+            };
+            let mut control = match connect_daemon() {
+                Ok(control) => control,
+                Err(message) => {
+                    eprintln!("{message}");
+                    return 1;
+                }
+            };
+            match control.kill(session) {
+                Ok(()) => {
+                    println!("killed {session}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("terry daemon: {error}");
+                    1
+                }
+            }
+        }
+        "serve" => run_daemon_serve(&args[1..]),
+        "prune" => {
+            let dry_run = args.iter().any(|arg| arg == "--dry-run");
+            let min_idle_secs = args
+                .iter()
+                .position(|arg| arg == "--min-idle-secs")
+                .and_then(|index| args.get(index + 1))
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(3600);
+            let referenced = crate::persistent_sessions::referenced_sessions();
+            match crate::persistent_sessions::prune(&referenced, min_idle_secs, dry_run) {
+                Ok(pruned) if pruned.is_empty() => {
+                    println!("没有可清理的会话");
+                    0
+                }
+                Ok(pruned) => {
+                    for session in pruned {
+                        println!(
+                            "{} {session}",
+                            if dry_run { "would kill" } else { "killed" }
+                        );
+                    }
+                    0
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    1
+                }
+            }
+        }
+        other => {
+            eprintln!("未知 daemon 子命令: {other}");
+            eprintln!(
+                "用法: terry daemon list | kill SESSION | prune [--dry-run] [--min-idle-secs N] | serve [--socket PATH]"
+            );
+            2
+        }
+    }
+}
+
+fn connect_daemon() -> Result<terminal_daemon::Control, String> {
+    let socket = terminal_daemon::socket_path();
+    terminal_daemon::Control::connect(&socket).map_err(|error| {
+        format!(
+            "无法连接终端守护进程（{}）：{error}\n开启「设置 → 终端 → 持久会话」后会自动启动。",
+            socket.display()
+        )
+    })
+}
+
+/// Runs the terminal daemon in this process. Hidden: the GUI starts it
+/// automatically when persistent sessions are enabled.
+fn run_daemon_serve(args: &[String]) -> i32 {
+    let mut socket = terminal_daemon::socket_path();
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--socket" {
+            if let Some(value) = args.get(index + 1) {
+                socket = PathBuf::from(value);
+                index += 1;
+            }
+        } else if let Some(value) = args[index].strip_prefix("--socket=") {
+            socket = PathBuf::from(value);
+        }
+        index += 1;
+    }
+
+    match terminal_daemon::serve(&socket) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("terry daemon: {error}");
+            1
+        }
+    }
 }
 
 fn run_session_cli(args: &[String]) -> i32 {
@@ -132,6 +408,234 @@ fn run_session_cli(args: &[String]) -> i32 {
     post_command(path, &json!({ "name": name }).to_string())
 }
 
+/// Waits for an agent state, or for terminal output matching a substring or
+/// regex.
+///
+/// `require_matcher` is used by the `wait-output` alias, which must not fall
+/// back to waiting on agent state.
+fn run_wait_cli(args: &[String], require_matcher: bool) -> i32 {
+    let mut state = "blocked".to_string();
+    let mut state_given = false;
+    let mut terminal_id: Option<u64> = None;
+    let mut timeout_seconds: Option<u64> = None;
+    let mut substring: Option<String> = None;
+    let mut regex: Option<String> = None;
+    let mut tail_lines: Option<u64> = None;
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--state" => match next_cli_value(args, &mut index, "--state") {
+                Some(value) => {
+                    state = value.to_ascii_lowercase();
+                    state_given = true;
+                }
+                None => return 2,
+            },
+            "--match-output" | "--match" => {
+                match next_cli_value(args, &mut index, "--match-output") {
+                    Some(value) => substring = Some(value.to_string()),
+                    None => return 2,
+                }
+            }
+            "--match-regex" | "--regex" => {
+                match next_cli_value(args, &mut index, "--match-regex") {
+                    Some(value) => regex = Some(value.to_string()),
+                    None => return 2,
+                }
+            }
+            "--terminal" => {
+                match next_cli_value(args, &mut index, "--terminal")
+                    .and_then(|value| value.parse::<u64>().ok())
+                {
+                    Some(value) => terminal_id = Some(value),
+                    None => {
+                        eprintln!("--terminal 需要一个数字终端 id");
+                        return 2;
+                    }
+                }
+            }
+            "--timeout" => {
+                match next_cli_value(args, &mut index, "--timeout")
+                    .and_then(|value| value.parse::<u64>().ok())
+                {
+                    Some(value) => timeout_seconds = Some(value),
+                    None => {
+                        eprintln!("--timeout 需要秒数（0 表示不限时）");
+                        return 2;
+                    }
+                }
+            }
+            "--tail" => {
+                match next_cli_value(args, &mut index, "--tail")
+                    .and_then(|value| value.parse::<u64>().ok())
+                {
+                    Some(value) => tail_lines = Some(value),
+                    None => {
+                        eprintln!("--tail 需要行数（0 表示整个缓冲区）");
+                        return 2;
+                    }
+                }
+            }
+            other => {
+                eprintln!("wait 未知参数: {other}");
+                return 2;
+            }
+        }
+        index += 1;
+    }
+
+    if substring.is_some() && regex.is_some() {
+        eprintln!("--match-output 与 --match-regex 只能选一个");
+        return 2;
+    }
+
+    let has_matcher = substring.is_some() || regex.is_some();
+    if require_matcher && !has_matcher {
+        eprintln!("wait-output 需要 --match-output 或 --match-regex");
+        return 2;
+    }
+    if has_matcher && state_given {
+        eprintln!("--state 不能与 --match-output/--match-regex 同时使用");
+        return 2;
+    }
+
+    let timeout_ms = timeout_seconds.map(|seconds| seconds.saturating_mul(1000));
+    if has_matcher {
+        return post_wait(
+            "/api/wait_for_output",
+            json!({
+                "terminal_id": terminal_id,
+                "match": substring,
+                "regex": regex,
+                "timeout_ms": timeout_ms,
+                "tail_lines": tail_lines,
+            }),
+            timeout_ms,
+        );
+    }
+
+    post_wait(
+        "/api/wait_agent_state",
+        json!({
+            "state": state,
+            "terminal_id": terminal_id,
+            "timeout_ms": timeout_ms,
+        }),
+        timeout_ms,
+    )
+}
+
+/// Returns the value following a CLI flag, advancing `index` past it.
+fn next_cli_value<'a>(args: &'a [String], index: &mut usize, name: &str) -> Option<&'a str> {
+    *index += 1;
+    match args.get(*index) {
+        Some(value) => Some(value.as_str()),
+        None => {
+            eprintln!("{name} 需要一个值");
+            None
+        }
+    }
+}
+
+/// Posts a request whose server-side handler may block for a while.
+fn post_wait(path: &str, body: Value, timeout_ms: Option<u64>) -> i32 {
+    let Some(info) = read_ipc_info() else {
+        eprintln!(
+            "Terry 未运行或 IPC 未启用（无法读取 {}）",
+            ipc_info_path().display()
+        );
+        return 1;
+    };
+
+    // The client must outlive the server-side wait, which polls the GUI.
+    let server_timeout_ms = timeout_ms.unwrap_or(120_000);
+    let read_timeout = if server_timeout_ms == 0 {
+        Duration::from_secs(86_400)
+    } else {
+        Duration::from_millis(server_timeout_ms) + Duration::from_secs(10)
+    };
+
+    match http_post_with_timeout(
+        info.port,
+        path,
+        &info.token,
+        &body.to_string(),
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        read_timeout,
+    ) {
+        Ok((status, response)) => {
+            println!("{}", response.trim());
+            if (200..300).contains(&status) { 0 } else { 1 }
+        }
+        Err(error) => {
+            eprintln!("请求失败: {error}");
+            1
+        }
+    }
+}
+
+/// Streams `/api/events` (server-sent events) until interrupted.
+fn stream_events() -> i32 {
+    let Some(info) = read_ipc_info() else {
+        eprintln!(
+            "Terry 未运行或 IPC 未启用（无法读取 {}）",
+            ipc_info_path().display()
+        );
+        return 1;
+    };
+
+    let address = SocketAddr::from(([127, 0, 0, 1], info.port));
+    let mut stream = match TcpStream::connect_timeout(&address, Duration::from_secs(5)) {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("无法连接 Terry IPC: {error}");
+            return 1;
+        }
+    };
+
+    let request = format!(
+        "GET /api/events HTTP/1.1\r\n\
+         Host: 127.0.0.1:{}\r\n\
+         Authorization: Bearer {}\r\n\
+         Accept: text/event-stream\r\n\
+         Connection: close\r\n\
+         \r\n",
+        info.port, info.token
+    );
+    if let Err(error) = stream.write_all(request.as_bytes()) {
+        eprintln!("无法发送请求: {error}");
+        return 1;
+    }
+    let _ = stream.flush();
+
+    let reader = std::io::BufReader::new(stream);
+    let mut first_line = true;
+    for line in std::io::BufRead::lines(reader) {
+        let Ok(line) = line else {
+            break;
+        };
+        let line = line.trim_end_matches('\r');
+
+        if first_line {
+            first_line = false;
+            if !line.contains(" 200 ") {
+                eprintln!("events 请求失败: {line}");
+                return 1;
+            }
+            continue;
+        }
+
+        // Keep SSE fields and comments; drop headers and chunk framing.
+        if line.starts_with("event:") || line.starts_with("data:") || line.starts_with(':') {
+            println!("{line}");
+            let _ = std::io::stdout().flush();
+        }
+    }
+    0
+}
+
 fn print_cli_usage() {
     println!("用法: terry [子命令]");
     println!();
@@ -139,13 +643,32 @@ fn print_cli_usage() {
     println!();
     println!("子命令:");
     println!("  new-tab [--cwd PATH]  在已运行的 Terry 实例中打开一个新的终端标签页");
-    println!("  send-text TEXT        向当前活动的终端粘贴文本（不执行）");
-    println!("  run TEXT              向当前活动的终端粘贴文本并回车执行");
+    println!("  send-text [--terminal ID] TEXT");
+    println!("                        向指定终端（默认活动终端）粘贴文本（不执行）");
+    println!("  run [--terminal ID] TEXT");
+    println!("                        向指定终端粘贴文本并回车执行");
     println!("  send-text -- TEXT     以 -- 分隔，原样发送后续文本");
     println!("  session list          列出已保存的 session 模板");
     println!("  session save NAME     把当前分组保存为 session 模板");
     println!("  session load NAME     从模板创建一个新的分组");
     println!("  session delete NAME   删除 session 模板");
+    println!("  agents                列出正在运行的 agent 终端及其状态（JSON）");
+    println!(
+        "  wait [--state S | --match-output TEXT | --match-regex PAT] [--terminal ID] [--timeout 秒] [--tail 行]"
+    );
+    println!(
+        "                        阻塞直到 agent 进入指定状态或终端最近的输出匹配（默认 --state blocked）"
+    );
+    println!(
+        "  wait-output           等同于 wait --match-output/--match-regex（--tail 0 表示整个缓冲区）"
+    );
+    println!("  events                订阅 agent 状态变化（SSE，Ctrl-C 退出）");
+    println!("  daemon list           列出持久会话（JSON）");
+    println!("  daemon kill SESSION   结束一个持久会话及其进程");
+    println!("  daemon prune [--dry-run]  清理不再被任何会话文件引用的孤儿会话");
+    println!("  agent-integration install|uninstall|list [AGENT]");
+    println!("                        安装/卸载 agent 状态上报集成（目前支持 pi）");
+    println!("  context [--terminal ID] 输出终端的标题、cwd、命令与 agent 状态（JSON）");
     println!("  kitten list           列出可用的 kitten 插件");
     println!("  kitten run NAME       运行 kitten 插件（也可直接 kitten NAME）");
     println!("  kitten path           显示 kitten 搜索目录");
@@ -439,7 +962,9 @@ pub fn init(mut request_rx: futures::channel::mpsc::UnboundedReceiver<IpcRequest
             let IpcRequest { kind, reply } = request;
             let outcome = match kind {
                 IpcRequestKind::NewTab { cwd } => new_tab(cx, cwd).await,
-                IpcRequestKind::SendText { text } => send_text(cx, &text).await,
+                IpcRequestKind::SendText { terminal_id, text } => {
+                    send_text(cx, terminal_id, &text).await
+                }
                 IpcRequestKind::Focus => focus(cx).await,
                 IpcRequestKind::FocusTerminal { terminal_id } => {
                     focus_terminal(cx, terminal_id).await
@@ -448,7 +973,9 @@ pub fn init(mut request_rx: futures::channel::mpsc::UnboundedReceiver<IpcRequest
                 IpcRequestKind::SendKeys { terminal_id, keys } => {
                     send_keys(cx, terminal_id, &keys).await
                 }
-                IpcRequestKind::ReadScreen { terminal_id } => read_screen(cx, terminal_id).await,
+                IpcRequestKind::ReadScreen { terminal_id, lines } => {
+                    read_screen(cx, terminal_id, lines).await
+                }
                 IpcRequestKind::GetContext { terminal_id } => get_context(cx, terminal_id).await,
                 IpcRequestKind::Notify { title, message } => notify(cx, title, &message).await,
                 IpcRequestKind::CloseSession { terminal_id } => {
@@ -503,6 +1030,19 @@ pub fn init(mut request_rx: futures::channel::mpsc::UnboundedReceiver<IpcRequest
                 IpcRequestKind::DeleteSessionTemplate { name } => {
                     delete_session_template(cx, name).await
                 }
+                IpcRequestKind::ListAgentStates => list_agent_states(cx).await,
+                IpcRequestKind::ReportAgentState {
+                    token,
+                    state,
+                    message,
+                    agent,
+                } => report_agent_state(cx, token, state, message, agent).await,
+                IpcRequestKind::ReportAgentSession {
+                    token,
+                    agent,
+                    session_path,
+                    session_id,
+                } => report_agent_session(cx, token, agent, session_path, session_id).await,
             };
             reply.send(outcome).ok();
         }
@@ -634,7 +1174,11 @@ async fn new_tab(cx: &mut AsyncApp, cwd: Option<PathBuf>) -> Result<Value, Strin
     }))
 }
 
-async fn send_text(cx: &mut AsyncApp, text: &str) -> Result<Value, String> {
+async fn send_text(
+    cx: &mut AsyncApp,
+    terminal_id: Option<u64>,
+    text: &str,
+) -> Result<Value, String> {
     let window = workspace_window(cx)
         .await?
         .ok_or_else(|| "no Terry window is open".to_string())?;
@@ -646,15 +1190,17 @@ async fn send_text(cx: &mut AsyncApp, text: &str) -> Result<Value, String> {
                 let panel = workspace
                     .panel::<TerminalListPanel>(cx)
                     .ok_or_else(|| "terminal panel is not initialized".to_string())?;
-                let view = panel
-                    .read(cx)
-                    .active_terminal_view(cx)
-                    .ok_or_else(|| "no active terminal".to_string())?;
+                let view = resolve_terminal(&panel, terminal_id, cx)?;
+                let id = view.entity_id().as_u64();
                 view.update(cx, |view, cx| {
                     view.terminal()
                         .update(cx, |terminal, _cx| terminal.paste(text));
                 });
-                Ok(json!({ "status": "ok", "action": "send_text" }))
+                Ok(json!({
+                    "status": "ok",
+                    "action": "send_text",
+                    "terminal_id": id,
+                }))
             })
         })
         .map_err(|error| error.to_string())?
@@ -1390,7 +1936,11 @@ async fn send_keys(
         .map_err(|error| error.to_string())?
 }
 
-async fn read_screen(cx: &mut AsyncApp, terminal_id: Option<u64>) -> Result<Value, String> {
+async fn read_screen(
+    cx: &mut AsyncApp,
+    terminal_id: Option<u64>,
+    lines: Option<u32>,
+) -> Result<Value, String> {
     let window = workspace_window(cx)
         .await?
         .ok_or_else(|| "no Terry window is open".to_string())?;
@@ -1404,8 +1954,98 @@ async fn read_screen(cx: &mut AsyncApp, terminal_id: Option<u64>) -> Result<Valu
                     .ok_or_else(|| "terminal panel is not initialized".to_string())?;
                 let view = resolve_terminal(&panel, terminal_id, cx)?;
                 let id = view.entity_id().as_u64();
-                let content = view.read(cx).terminal().read(cx).get_content();
+                let terminal = view.read(cx).terminal().read(cx);
+                let content = match lines {
+                    Some(lines) if lines > 0 => {
+                        terminal.last_n_non_empty_lines(lines as usize).join("\n")
+                    }
+                    _ => terminal.get_content(),
+                };
                 Ok(json!({ "terminal_id": id, "content": content }))
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn report_agent_state(
+    cx: &mut AsyncApp,
+    token: String,
+    state: String,
+    message: Option<String>,
+    agent: Option<String>,
+) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                panel.update(cx, |panel, cx| {
+                    panel.apply_reported_agent_state(&token, &state, message, agent.as_deref(), cx)
+                })
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+async fn report_agent_session(
+    cx: &mut AsyncApp,
+    token: String,
+    agent: String,
+    session_path: Option<String>,
+    session_id: Option<String>,
+) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                panel.update(cx, |panel, cx| {
+                    panel.apply_reported_agent_session(&token, &agent, session_path, session_id, cx)
+                })
+            })
+        })
+        .map_err(|error| error.to_string())?
+}
+
+/// Environment that lets an in-terminal integration reach Terry's IPC.
+pub(crate) fn connection_env() -> Vec<(String, String)> {
+    match read_ipc_info() {
+        Some(info) => vec![
+            (
+                "TERRY_IPC_URL".to_string(),
+                format!("http://127.0.0.1:{}", info.port),
+            ),
+            ("TERRY_IPC_TOKEN".to_string(), info.token),
+        ],
+        None => Vec::new(),
+    }
+}
+
+async fn list_agent_states(cx: &mut AsyncApp) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, _window, cx| {
+            let workspace = multi_workspace.workspace().clone();
+            workspace.update(cx, move |workspace, cx| {
+                let panel = workspace
+                    .panel::<TerminalListPanel>(cx)
+                    .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+                Ok(panel.read(cx).agent_states_json(cx))
             })
         })
         .map_err(|error| error.to_string())?

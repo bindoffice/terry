@@ -3,20 +3,36 @@ use axum::{
     extract::{Request, State},
     http::{StatusCode, header},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
-    routing::post,
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
+    routing::{get, post},
 };
-use futures::channel::{mpsc, oneshot};
+use futures::{
+    Stream,
+    channel::{mpsc, oneshot},
+    stream,
+};
 use serde_json::{Value, json};
-use std::{net::TcpListener, path::PathBuf};
+use std::{
+    collections::{HashMap, VecDeque},
+    convert::Infallible,
+    net::TcpListener,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 /// The work an IPC request asks the GUI to perform.
 #[derive(Debug)]
 pub enum IpcRequestKind {
     /// Open a new terminal tab, optionally in `cwd`.
     NewTab { cwd: Option<PathBuf> },
-    /// Paste text into the active terminal.
-    SendText { text: String },
+    /// Paste text into a terminal. `terminal_id` defaults to the active one.
+    SendText {
+        terminal_id: Option<u64>,
+        text: String,
+    },
     /// Bring the running workspace window to the front (used when a second
     /// `terry` launch finds an existing instance).
     Focus,
@@ -30,8 +46,12 @@ pub enum IpcRequestKind {
         terminal_id: Option<u64>,
         keys: String,
     },
-    /// Read the terminal's content as plain text.
-    ReadScreen { terminal_id: Option<u64> },
+    /// Read the terminal's content as plain text. `lines` limits the result to
+    /// the last N non-empty lines; `None` returns the whole buffer.
+    ReadScreen {
+        terminal_id: Option<u64>,
+        lines: Option<u32>,
+    },
     /// Report the active (or requested) terminal's title, cwd, and command.
     GetContext { terminal_id: Option<u64> },
     /// Post an OS notification.
@@ -104,6 +124,22 @@ pub enum IpcRequestKind {
     LoadSessionTemplate { name: String },
     /// Delete a saved session template.
     DeleteSessionTemplate { name: String },
+    /// List terminals running a coding agent with their effective state.
+    ListAgentStates,
+    /// An agent (via its integration hook) reports its own state.
+    ReportAgentState {
+        token: String,
+        state: String,
+        message: Option<String>,
+        agent: Option<String>,
+    },
+    /// An agent reports the session it can be resumed from.
+    ReportAgentSession {
+        token: String,
+        agent: String,
+        session_path: Option<String>,
+        session_id: Option<String>,
+    },
 }
 
 /// A request forwarded from the HTTP server to the GUI event loop. The HTTP
@@ -173,6 +209,12 @@ pub fn start_ipc_server(
             post(delete_session_template),
         )
         .route("/api/create_new_terminal", post(create_new_terminal))
+        .route("/api/list_agent_states", post(list_agent_states))
+        .route("/api/report_agent_state", post(report_agent_state))
+        .route("/api/report_agent_session", post(report_agent_session))
+        .route("/api/wait_agent_state", post(wait_agent_state))
+        .route("/api/wait_for_output", post(wait_for_output))
+        .route("/api/events", get(events))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer_auth,
@@ -243,6 +285,7 @@ async fn send_text(State(state): State<IpcState>, body: String) -> Response {
             dispatch(
                 state,
                 IpcRequestKind::SendText {
+                    terminal_id: parse_terminal_id(&payload),
                     text: text.to_string(),
                 },
             )
@@ -343,6 +386,10 @@ async fn read_screen(State(state): State<IpcState>, body: String) -> Response {
         state,
         IpcRequestKind::ReadScreen {
             terminal_id: parse_terminal_id(&payload),
+            lines: payload
+                .get("lines")
+                .and_then(parse_u64_value)
+                .map(|lines| lines.min(u32::MAX as u64) as u32),
         },
     )
     .await
@@ -750,6 +797,478 @@ async fn delete_session_template(State(state): State<IpcState>, body: String) ->
     .await
 }
 
+// -------------------------------------------------------------------------
+// Agent state: list, wait, events
+// -------------------------------------------------------------------------
+
+/// How often `wait_agent_state` re-reads the terminal list.
+const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How often the event stream re-reads the terminal list.
+const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Default `wait_agent_state` timeout. `0` disables the timeout.
+const DEFAULT_WAIT_TIMEOUT_MS: u64 = 120_000;
+
+/// States accepted by `wait_agent_state`. `any`/`change` match any state that
+/// differs from the one seen on the first poll.
+const WAITABLE_STATES: &[&str] = &["idle", "working", "blocked", "any", "change"];
+
+async fn list_agent_states(State(state): State<IpcState>) -> Response {
+    dispatch(state, IpcRequestKind::ListAgentStates).await
+}
+
+/// Agent integrations report the session they can be resumed from here.
+async fn report_agent_session(State(state): State<IpcState>, body: String) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+
+    let Some(token) = payload.get("token").and_then(Value::as_str) else {
+        return bad_request("missing \"token\" field".to_string());
+    };
+    let Some(agent) = payload.get("agent").and_then(Value::as_str) else {
+        return bad_request("missing \"agent\" field".to_string());
+    };
+    let session_path = payload
+        .get("session_path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let session_id = payload
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if session_path.is_none() && session_id.is_none() {
+        return bad_request("missing \"session_path\" or \"session_id\"".to_string());
+    }
+
+    dispatch(
+        state,
+        IpcRequestKind::ReportAgentSession {
+            token: token.to_string(),
+            agent: agent.to_string(),
+            session_path,
+            session_id,
+        },
+    )
+    .await
+}
+
+/// Agent integrations (e.g. the Pi extension) report lifecycle state here.
+///
+/// `token` comes from `TERRY_TERMINAL_TOKEN`, which Terry injects into the
+/// terminal's environment, so a report is attributed to the right terminal.
+async fn report_agent_state(State(state): State<IpcState>, body: String) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+
+    let Some(token) = payload.get("token").and_then(Value::as_str) else {
+        return bad_request("missing \"token\" field".to_string());
+    };
+    let Some(agent_state) = payload.get("state").and_then(Value::as_str) else {
+        return bad_request("missing \"state\" field".to_string());
+    };
+    if !matches!(agent_state, "working" | "blocked" | "idle") {
+        return bad_request("state must be working, blocked, or idle".to_string());
+    }
+
+    dispatch(
+        state,
+        IpcRequestKind::ReportAgentState {
+            token: token.to_string(),
+            state: agent_state.to_string(),
+            message: payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            agent: payload
+                .get("agent")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        },
+    )
+    .await
+}
+
+/// Blocks until a terminal's agent reaches one of the requested states.
+///
+/// The wait is implemented as a poll loop on the server thread: every poll is a
+/// separate request through the IPC channel, so a long wait never stalls the
+/// GUI's request loop.
+async fn wait_agent_state(State(state): State<IpcState>, body: String) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+
+    let terminal_id = parse_terminal_id(&payload);
+    let wanted = match parse_wanted_states(&payload) {
+        Ok(wanted) => wanted,
+        Err(message) => return bad_request(message),
+    };
+    let timeout_ms = payload
+        .get("timeout_ms")
+        .and_then(parse_u64_value)
+        .unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
+    let deadline = if timeout_ms == 0 {
+        None
+    } else {
+        Some(Instant::now() + Duration::from_millis(timeout_ms))
+    };
+
+    let started = Instant::now();
+    let mut initial_state: Option<String> = None;
+
+    loop {
+        let snapshot = match request_value(&state, IpcRequestKind::ListAgentStates).await {
+            Ok(snapshot) => snapshot,
+            Err(message) => return bad_request(message),
+        };
+
+        let Some(terminal) = find_terminal(&snapshot, terminal_id) else {
+            let message = match terminal_id {
+                Some(_) => "no agent terminal matches the requested id",
+                None => "the active terminal is not running a coding agent",
+            };
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": message,
+                    "terminal_id": terminal_id,
+                })),
+            )
+                .into_response();
+        };
+
+        let current = terminal
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let exited = terminal
+            .get("exited")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let id = terminal.get("terminal_id").cloned().unwrap_or(Value::Null);
+
+        let initial = initial_state.get_or_insert_with(|| current.clone());
+        let matched = wanted.iter().any(|want| match want.as_str() {
+            "any" | "change" => initial != &current,
+            other => other == current,
+        });
+
+        if matched || exited {
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "terminal_id": id,
+                    "state": current,
+                    "exited": exited,
+                    "matched": matched,
+                    "waited_ms": started.elapsed().as_millis() as u64,
+                })),
+            )
+                .into_response();
+        }
+
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return (
+                StatusCode::REQUEST_TIMEOUT,
+                Json(json!({
+                    "error": format!("timed out waiting for {}", wanted.join(" or ")),
+                    "terminal_id": id,
+                    "state": current,
+                    "timed_out": true,
+                    "waited_ms": started.elapsed().as_millis() as u64,
+                })),
+            )
+                .into_response();
+        }
+
+        tokio::time::sleep(WAIT_POLL_INTERVAL).await;
+    }
+}
+
+/// How often `wait_for_output` re-reads the terminal.
+const OUTPUT_POLL_INTERVAL: Duration = Duration::from_millis(150);
+
+/// How many bottom lines `wait_for_output` reads by default. Matching only the
+/// tail avoids matching output that has already scrolled far away.
+const DEFAULT_OUTPUT_TAIL_LINES: u64 = 50;
+
+/// Matches `wait_for_output` against the terminal text.
+enum OutputMatcher {
+    Substring(String),
+    Regex(regex::Regex),
+}
+
+impl OutputMatcher {
+    fn find<'a>(&self, text: &'a str) -> Option<&'a str> {
+        match self {
+            Self::Substring(needle) => text.lines().find(|line| line.contains(needle.as_str())),
+            Self::Regex(regex) => text.lines().find(|line| regex.is_match(line)),
+        }
+    }
+}
+
+fn parse_output_matcher(payload: &Value) -> Result<OutputMatcher, String> {
+    if let Some(pattern) = payload.get("regex").and_then(Value::as_str) {
+        return regex::Regex::new(pattern)
+            .map(OutputMatcher::Regex)
+            .map_err(|error| format!("invalid regex: {error}"));
+    }
+    if let Some(needle) = payload.get("match").and_then(Value::as_str) {
+        if needle.is_empty() {
+            return Err("\"match\" must not be empty".to_string());
+        }
+        return Ok(OutputMatcher::Substring(needle.to_string()));
+    }
+    Err("missing \"match\" (substring) or \"regex\" field".to_string())
+}
+
+/// Blocks until the terminal's recent output matches a substring or regex.
+async fn wait_for_output(State(state): State<IpcState>, body: String) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+
+    let terminal_id = parse_terminal_id(&payload);
+    let matcher = match parse_output_matcher(&payload) {
+        Ok(matcher) => matcher,
+        Err(message) => return bad_request(message),
+    };
+    let tail_lines = payload
+        .get("tail_lines")
+        .and_then(parse_u64_value)
+        .unwrap_or(DEFAULT_OUTPUT_TAIL_LINES);
+    let timeout_ms = payload
+        .get("timeout_ms")
+        .and_then(parse_u64_value)
+        .unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
+    let deadline = if timeout_ms == 0 {
+        None
+    } else {
+        Some(Instant::now() + Duration::from_millis(timeout_ms))
+    };
+
+    let started = Instant::now();
+
+    loop {
+        let snapshot = match request_value(
+            &state,
+            IpcRequestKind::ReadScreen {
+                terminal_id,
+                lines: (tail_lines > 0).then_some(tail_lines.min(u32::MAX as u64) as u32),
+            },
+        )
+        .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(message) => return bad_request(message),
+        };
+
+        let id = snapshot.get("terminal_id").cloned().unwrap_or(Value::Null);
+        let content = snapshot
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        if let Some(line) = matcher.find(content) {
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "terminal_id": id,
+                    "matched": true,
+                    "line": line,
+                    "waited_ms": started.elapsed().as_millis() as u64,
+                })),
+            )
+                .into_response();
+        }
+
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return (
+                StatusCode::REQUEST_TIMEOUT,
+                Json(json!({
+                    "error": "timed out waiting for output",
+                    "terminal_id": id,
+                    "timed_out": true,
+                    "waited_ms": started.elapsed().as_millis() as u64,
+                })),
+            )
+                .into_response();
+        }
+
+        tokio::time::sleep(OUTPUT_POLL_INTERVAL).await;
+    }
+}
+
+fn parse_wanted_states(payload: &Value) -> Result<Vec<String>, String> {
+    let mut wanted = Vec::new();
+    match payload.get("states") {
+        Some(Value::Array(items)) => {
+            for item in items {
+                let Some(state) = item.as_str() else {
+                    return Err("\"states\" must be an array of strings".to_string());
+                };
+                wanted.push(state.to_ascii_lowercase());
+            }
+        }
+        Some(_) => return Err("\"states\" must be an array of strings".to_string()),
+        None => {
+            if let Some(state) = payload.get("state").and_then(Value::as_str) {
+                wanted.push(state.to_ascii_lowercase());
+            }
+        }
+    }
+
+    if wanted.is_empty() {
+        wanted.push("blocked".to_string());
+    }
+    for state in &wanted {
+        if !WAITABLE_STATES.contains(&state.as_str()) {
+            return Err(format!(
+                "unknown agent state {state:?}; expected one of {WAITABLE_STATES:?}"
+            ));
+        }
+    }
+    Ok(wanted)
+}
+
+/// Finds the requested terminal, defaulting to the workspace's active one.
+fn find_terminal<'a>(snapshot: &'a Value, terminal_id: Option<u64>) -> Option<&'a Value> {
+    let terminals = snapshot.get("terminals")?.as_array()?;
+    let id = terminal_id.or_else(|| snapshot.get("active_terminal_id").and_then(Value::as_u64))?;
+    terminals
+        .iter()
+        .find(|terminal| terminal.get("terminal_id").and_then(Value::as_u64) == Some(id))
+}
+
+/// Sends one request through the IPC channel and awaits its reply, without
+/// turning failures into an HTTP response.
+async fn request_value(state: &IpcState, kind: IpcRequestKind) -> Result<Value, String> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    state
+        .requests
+        .unbounded_send(IpcRequest {
+            kind,
+            reply: reply_tx,
+        })
+        .map_err(|_| "terry ipc channel is closed".to_string())?;
+    match reply_rx.await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(message)) => Err(message),
+        Err(_) => Err("terry did not reply to the ipc request".to_string()),
+    }
+}
+
+struct EventStreamState {
+    state: IpcState,
+    previous: Option<Value>,
+    pending: VecDeque<(String, String)>,
+}
+
+/// Server-sent events for agent state changes.
+///
+/// The first event is a `snapshot` of every agent terminal; after that,
+/// `agent_state` fires when a terminal's state, title or exit status changes,
+/// and `terminal_added` / `terminal_removed` cover lifecycle changes.
+async fn events(
+    State(state): State<IpcState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let initial = EventStreamState {
+        state,
+        previous: None,
+        pending: VecDeque::new(),
+    };
+
+    let stream = stream::unfold(initial, |mut stream_state| async move {
+        loop {
+            if let Some((name, data)) = stream_state.pending.pop_front() {
+                let event = Event::default().event(name).data(data);
+                return Some((Ok::<_, Infallible>(event), stream_state));
+            }
+
+            if let Ok(snapshot) =
+                request_value(&stream_state.state, IpcRequestKind::ListAgentStates).await
+            {
+                stream_state.pending = diff_agent_events(stream_state.previous.as_ref(), &snapshot);
+                stream_state.previous = Some(snapshot);
+            }
+
+            if stream_state.pending.is_empty() {
+                tokio::time::sleep(EVENT_POLL_INTERVAL).await;
+            }
+        }
+    });
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    )
+}
+
+fn terminals_by_id(value: &Value) -> HashMap<u64, &Value> {
+    value
+        .get("terminals")
+        .and_then(Value::as_array)
+        .map(|terminals| {
+            terminals
+                .iter()
+                .filter_map(|terminal| {
+                    terminal
+                        .get("terminal_id")
+                        .and_then(Value::as_u64)
+                        .map(|id| (id, terminal))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn diff_agent_events(previous: Option<&Value>, current: &Value) -> VecDeque<(String, String)> {
+    let mut events = VecDeque::new();
+    let Some(previous) = previous else {
+        events.push_back(("snapshot".to_string(), current.to_string()));
+        return events;
+    };
+
+    let previous_terminals = terminals_by_id(previous);
+    let current_terminals = terminals_by_id(current);
+
+    for (id, terminal) in &current_terminals {
+        match previous_terminals.get(id) {
+            None => events.push_back(("terminal_added".to_string(), terminal.to_string())),
+            Some(old) => {
+                let changed = ["state", "exited", "title"]
+                    .iter()
+                    .any(|key| old.get(*key) != terminal.get(*key));
+                if changed {
+                    events.push_back(("agent_state".to_string(), terminal.to_string()));
+                }
+            }
+        }
+    }
+
+    for id in previous_terminals.keys() {
+        if !current_terminals.contains_key(id) {
+            events.push_back((
+                "terminal_removed".to_string(),
+                json!({ "terminal_id": id }).to_string(),
+            ));
+        }
+    }
+
+    events
+}
+
 fn parse_terminal_id(payload: &Value) -> Option<u64> {
     payload
         .get("terminal_id")
@@ -1101,6 +1620,504 @@ mod tests {
 
         let ((status, _), _) = tokio::join!(http, app_side);
         assert_eq!(status, 200);
+    }
+
+    fn agent_snapshot(terminals: &[(u64, &str, &str)]) -> Value {
+        let terminals: Vec<Value> = terminals
+            .iter()
+            .map(|(id, state, title)| {
+                json!({
+                    "terminal_id": id,
+                    "title": title,
+                    "group": "main",
+                    "agent": "Claude",
+                    "state": state,
+                    "exited": false,
+                })
+            })
+            .collect();
+        json!({ "active_terminal_id": 1, "terminals": terminals })
+    }
+
+    #[tokio::test]
+    async fn list_agent_states_is_forwarded() {
+        let TestServer {
+            port,
+            token,
+            requests,
+        } = spawn_server();
+        let mut requests = requests;
+
+        let http = post(port, "/api/list_agent_states", Some(&token), "{}");
+        let app_side = async {
+            let request = tokio::time::timeout(Duration::from_secs(5), requests.next())
+                .await
+                .expect("ipc request never arrived")
+                .expect("ipc channel closed");
+            assert!(matches!(request.kind, IpcRequestKind::ListAgentStates));
+            request
+                .reply
+                .send(Ok(agent_snapshot(&[(1, "blocked", "claude")])))
+                .ok();
+        };
+
+        let ((status, body), _) = tokio::join!(http, app_side);
+        assert_eq!(status, 200);
+        assert!(body.contains("\"blocked\""), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn wait_agent_state_returns_when_the_state_matches() {
+        let TestServer {
+            port,
+            token,
+            requests,
+        } = spawn_server();
+        let mut requests = requests;
+
+        let http = post(
+            port,
+            "/api/wait_agent_state",
+            Some(&token),
+            r#"{"state":"blocked","timeout_ms":5000}"#,
+        );
+        let app_side = async {
+            for call in 0..3 {
+                let request = tokio::time::timeout(Duration::from_secs(5), requests.next())
+                    .await
+                    .expect("ipc request never arrived")
+                    .expect("ipc channel closed");
+                assert!(matches!(request.kind, IpcRequestKind::ListAgentStates));
+                let state = if call < 2 { "working" } else { "blocked" };
+                request
+                    .reply
+                    .send(Ok(agent_snapshot(&[(1, state, "claude")])))
+                    .ok();
+            }
+        };
+
+        let ((status, body), _) = tokio::join!(http, app_side);
+        assert_eq!(status, 200);
+        assert!(body.contains("\"matched\":true"), "body: {body}");
+        assert!(body.contains("\"state\":\"blocked\""), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn wait_agent_state_times_out() {
+        let TestServer {
+            port,
+            token,
+            requests,
+        } = spawn_server();
+        let mut requests = requests;
+
+        let http = post(
+            port,
+            "/api/wait_agent_state",
+            Some(&token),
+            r#"{"state":"blocked","timeout_ms":150}"#,
+        );
+        let app_side = async {
+            for _ in 0..10 {
+                let Ok(Some(request)) =
+                    tokio::time::timeout(Duration::from_millis(500), requests.next()).await
+                else {
+                    break;
+                };
+                request
+                    .reply
+                    .send(Ok(agent_snapshot(&[(1, "working", "claude")])))
+                    .ok();
+            }
+        };
+
+        let ((status, body), _) = tokio::join!(http, app_side);
+        assert_eq!(status, 408);
+        assert!(body.contains("timed_out"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn wait_agent_state_rejects_unknown_states() {
+        let server = spawn_server();
+        let (status, body) = post(
+            server.port,
+            "/api/wait_agent_state",
+            Some(&server.token),
+            r#"{"state":"sleeping"}"#,
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(body.contains("unknown agent state"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn wait_agent_state_reports_a_missing_terminal() {
+        let TestServer {
+            port,
+            token,
+            requests,
+        } = spawn_server();
+        let mut requests = requests;
+
+        let http = post(
+            port,
+            "/api/wait_agent_state",
+            Some(&token),
+            r#"{"terminal_id":99}"#,
+        );
+        let app_side = async {
+            let request = tokio::time::timeout(Duration::from_secs(5), requests.next())
+                .await
+                .expect("ipc request never arrived")
+                .expect("ipc channel closed");
+            request
+                .reply
+                .send(Ok(agent_snapshot(&[(1, "idle", "claude")])))
+                .ok();
+        };
+
+        let ((status, _), _) = tokio::join!(http, app_side);
+        assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn event_diff_reports_state_changes_and_lifecycle() {
+        let first = agent_snapshot(&[(1, "working", "claude")]);
+        let mut events = diff_agent_events(None, &first);
+        assert_eq!(
+            events.pop_front().map(|(name, _)| name),
+            Some("snapshot".to_string())
+        );
+
+        let second = agent_snapshot(&[(1, "blocked", "claude"), (2, "idle", "codex")]);
+        let events = diff_agent_events(Some(&first), &second);
+        let names: Vec<&str> = events.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(names.contains(&"agent_state"), "names: {names:?}");
+        assert!(names.contains(&"terminal_added"), "names: {names:?}");
+
+        let third = agent_snapshot(&[(1, "blocked", "claude")]);
+        let events = diff_agent_events(Some(&second), &third);
+        let names: Vec<&str> = events.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["terminal_removed"]);
+    }
+
+    #[tokio::test]
+    async fn send_text_forwards_terminal_id() {
+        let TestServer {
+            port,
+            token,
+            requests,
+        } = spawn_server();
+        let mut requests = requests;
+
+        let http = post(
+            port,
+            "/api/send_text",
+            Some(&token),
+            r#"{"terminal_id":7,"text":"hi"}"#,
+        );
+        let app_side = async {
+            let request = tokio::time::timeout(Duration::from_secs(5), requests.next())
+                .await
+                .expect("ipc request never arrived")
+                .expect("ipc channel closed");
+            match request.kind {
+                IpcRequestKind::SendText { terminal_id, text } => {
+                    assert_eq!(terminal_id, Some(7));
+                    assert_eq!(text, "hi");
+                }
+                other => panic!("expected SendText, got {other:?}"),
+            }
+            request.reply.send(Ok(json!({ "status": "ok" }))).ok();
+        };
+
+        let ((status, _), _) = tokio::join!(http, app_side);
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn read_screen_forwards_line_limit() {
+        let TestServer {
+            port,
+            token,
+            requests,
+        } = spawn_server();
+        let mut requests = requests;
+
+        let http = post(port, "/api/read_screen", Some(&token), r#"{"lines":20}"#);
+        let app_side = async {
+            let request = tokio::time::timeout(Duration::from_secs(5), requests.next())
+                .await
+                .expect("ipc request never arrived")
+                .expect("ipc channel closed");
+            match request.kind {
+                IpcRequestKind::ReadScreen { terminal_id, lines } => {
+                    assert_eq!(terminal_id, None);
+                    assert_eq!(lines, Some(20));
+                }
+                other => panic!("expected ReadScreen, got {other:?}"),
+            }
+            request
+                .reply
+                .send(Ok(json!({ "terminal_id": 1, "content": "" })))
+                .ok();
+        };
+
+        let ((status, _), _) = tokio::join!(http, app_side);
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn wait_for_output_matches_a_substring() {
+        let TestServer {
+            port,
+            token,
+            requests,
+        } = spawn_server();
+        let mut requests = requests;
+
+        let http = post(
+            port,
+            "/api/wait_for_output",
+            Some(&token),
+            r#"{"match":"BUILD OK","timeout_ms":5000}"#,
+        );
+        let app_side = async {
+            for content in ["compiling", "compiling\nBUILD OK"] {
+                let request = tokio::time::timeout(Duration::from_secs(5), requests.next())
+                    .await
+                    .expect("ipc request never arrived")
+                    .expect("ipc channel closed");
+                match request.kind {
+                    IpcRequestKind::ReadScreen { terminal_id, lines } => {
+                        assert_eq!(terminal_id, None);
+                        assert_eq!(lines, Some(DEFAULT_OUTPUT_TAIL_LINES as u32));
+                    }
+                    other => panic!("expected ReadScreen, got {other:?}"),
+                }
+                request
+                    .reply
+                    .send(Ok(json!({ "terminal_id": 1, "content": content })))
+                    .ok();
+            }
+        };
+
+        let ((status, body), _) = tokio::join!(http, app_side);
+        assert_eq!(status, 200);
+        assert!(body.contains("\"matched\":true"), "body: {body}");
+        assert!(body.contains("BUILD OK"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn wait_for_output_matches_a_regex() {
+        let TestServer {
+            port,
+            token,
+            requests,
+        } = spawn_server();
+        let mut requests = requests;
+
+        let http = post(
+            port,
+            "/api/wait_for_output",
+            Some(&token),
+            r#"{"regex":"BUILD (OK|FAILED)","terminal_id":3,"tail_lines":0}"#,
+        );
+        let app_side = async {
+            let request = tokio::time::timeout(Duration::from_secs(5), requests.next())
+                .await
+                .expect("ipc request never arrived")
+                .expect("ipc channel closed");
+            match request.kind {
+                IpcRequestKind::ReadScreen { terminal_id, lines } => {
+                    assert_eq!(terminal_id, Some(3));
+                    // `tail_lines: 0` means the whole buffer.
+                    assert_eq!(lines, None);
+                }
+                other => panic!("expected ReadScreen, got {other:?}"),
+            }
+            request
+                .reply
+                .send(Ok(json!({ "terminal_id": 3, "content": "BUILD FAILED" })))
+                .ok();
+        };
+
+        let ((status, body), _) = tokio::join!(http, app_side);
+        assert_eq!(status, 200);
+        assert!(body.contains("\"matched\":true"), "body: {body}");
+        assert!(body.contains("BUILD FAILED"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn wait_for_output_times_out() {
+        let TestServer {
+            port,
+            token,
+            requests,
+        } = spawn_server();
+        let mut requests = requests;
+
+        let http = post(
+            port,
+            "/api/wait_for_output",
+            Some(&token),
+            r#"{"match":"never","timeout_ms":150}"#,
+        );
+        let app_side = async {
+            for _ in 0..10 {
+                let Ok(Some(request)) =
+                    tokio::time::timeout(Duration::from_millis(500), requests.next()).await
+                else {
+                    break;
+                };
+                request
+                    .reply
+                    .send(Ok(json!({ "terminal_id": 1, "content": "still running" })))
+                    .ok();
+            }
+        };
+
+        let ((status, body), _) = tokio::join!(http, app_side);
+        assert_eq!(status, 408);
+        assert!(body.contains("timed_out"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn wait_for_output_requires_a_matcher() {
+        let server = spawn_server();
+        let (status, body) = post(
+            server.port,
+            "/api/wait_for_output",
+            Some(&server.token),
+            "{}",
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(body.contains("missing"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn wait_for_output_rejects_an_invalid_regex() {
+        let server = spawn_server();
+        let (status, body) = post(
+            server.port,
+            "/api/wait_for_output",
+            Some(&server.token),
+            r#"{"regex":"("}"#,
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(body.contains("invalid regex"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn report_agent_state_forwards_state_and_token() {
+        let TestServer {
+            port,
+            token,
+            requests,
+        } = spawn_server();
+        let mut requests = requests;
+
+        let http = post(
+            port,
+            "/api/report_agent_state",
+            Some(&token),
+            r#"{"token":"term-1","state":"blocked","message":"approve?","agent":"pi"}"#,
+        );
+        let app_side = async {
+            let request = tokio::time::timeout(Duration::from_secs(5), requests.next())
+                .await
+                .expect("ipc request never arrived")
+                .expect("ipc channel closed");
+            match request.kind {
+                IpcRequestKind::ReportAgentState {
+                    token,
+                    state,
+                    message,
+                    agent,
+                } => {
+                    assert_eq!(token, "term-1");
+                    assert_eq!(state, "blocked");
+                    assert_eq!(message.as_deref(), Some("approve?"));
+                    assert_eq!(agent.as_deref(), Some("pi"));
+                }
+                other => panic!("expected ReportAgentState, got {other:?}"),
+            }
+            request.reply.send(Ok(json!({ "status": "ok" }))).ok();
+        };
+
+        let ((status, _), _) = tokio::join!(http, app_side);
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn report_agent_state_rejects_unknown_states() {
+        let server = spawn_server();
+        let (status, body) = post(
+            server.port,
+            "/api/report_agent_state",
+            Some(&server.token),
+            r#"{"token":"t","state":"sleeping"}"#,
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(body.contains("working, blocked, or idle"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn report_agent_session_forwards_the_reference() {
+        let TestServer {
+            port,
+            token,
+            requests,
+        } = spawn_server();
+        let mut requests = requests;
+
+        let http = post(
+            port,
+            "/api/report_agent_session",
+            Some(&token),
+            r#"{"token":"t","agent":"pi","session_path":"/tmp/s.json"}"#,
+        );
+        let app_side = async {
+            let request = tokio::time::timeout(Duration::from_secs(5), requests.next())
+                .await
+                .expect("ipc request never arrived")
+                .expect("ipc channel closed");
+            match request.kind {
+                IpcRequestKind::ReportAgentSession {
+                    token,
+                    agent,
+                    session_path,
+                    session_id,
+                } => {
+                    assert_eq!(token, "t");
+                    assert_eq!(agent, "pi");
+                    assert_eq!(session_path.as_deref(), Some("/tmp/s.json"));
+                    assert_eq!(session_id, None);
+                }
+                other => panic!("expected ReportAgentSession, got {other:?}"),
+            }
+            request.reply.send(Ok(json!({ "status": "ok" }))).ok();
+        };
+
+        let ((status, _), _) = tokio::join!(http, app_side);
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn report_agent_session_requires_a_reference() {
+        let server = spawn_server();
+        let (status, body) = post(
+            server.port,
+            "/api/report_agent_session",
+            Some(&server.token),
+            r#"{"token":"t","agent":"pi"}"#,
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(body.contains("session_path"), "body: {body}");
     }
 
     #[tokio::test]

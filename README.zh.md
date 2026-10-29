@@ -33,8 +33,9 @@
 - **tmux 会话** — 选择器可直接 attach 或新建本地 tmux 会话；远端等价于 `ssh … tmux new -A -s <名称>`。选择「原生分屏」后会通过 tmux **control mode**（`tmux -CC`）把每个 tmux window 映射成 Terry 分组、每个 pane 映射成原生分屏，输入、布局变化、窗口重命名与断线重连都会同步；不选原生分屏时会话仍运行在单个终端里
 - **终端配色方案** — 内置配色库（Dracula、Nord、Solarized、Gruvbox、One Dark、Tokyo Night、Catppuccin、Rosé Pine 等），只改变终端颜色；可按终端、按 Profile 或用 `terminal.color_scheme` 选择。可从「终端」菜单导入 Alacritty `.toml`、iTerm2 `.itermcolors` 或 Terry JSON
 - **会话恢复** — 重启后恢复分组、分屏布局、工作目录、标题、Profile 配色、每终端字号缩放，以及 Profile / SSH / tmux 启动方式
+- **持久会话（可选）** — 开启 `terminal.persistent_sessions` 后，终端由后台 daemon 持有：退出 Terry 或关闭窗口后进程继续运行，重新打开时自动重连并回放 scrollback。关闭单个标签页会分离（首次会提示），可用「重新打开已关闭的终端」恢复，或运行 `terry daemon kill` 结束。目前仅支持 Unix
 - **Hints** — `Ctrl+Shift+E` 列出可见的 URL、路径、git hash、UUID、IP 与自定义正则匹配；可键盘选择打开、复制、粘贴或选中。自定义规则写在 `terminal.hints`，例如 `{ "regex": "#\\d+", "action": "copy" }`
-- **AI Agent** — 侧边栏与大模型对话，通过可配置的 Profile 调用命令与工具
+- **AI Agent** — 侧边栏与大模型对话，通过可配置的 Profile 调用命令与工具；侧边栏还会标记运行中的 coding agent 是「工作中 / 等待输入 / 空闲」（基于终端底部屏幕内容识别，支持 Claude、Codex、Gemini、OpenCode、Cursor、Qwen、Copilot、Grok、Kimi、Amp、Hermes、Qoder、Antigravity 等）
 - **MCP** — 接入 Model Context Protocol 服务器，扩展 Agent 能力
 - **文件面板** — 在终端旁浏览项目目录树
 - **编辑器** — 从文件面板，或通过「新建文件 / 打开文件」打开文本，与终端共用标签页和分屏。默认开启 Vim 模式，支持文件内搜索和跳转到行；Markdown 可预览，图片可直接查看
@@ -63,11 +64,16 @@ Terry 解析 **OSC 133** 提示符标记（含 VS Code 的 **OSC 633** 变体）
 ```sh
 terry new-tab --cwd ~/src          # 在当前窗口新建标签页
 terry send-text "cargo test"       # 向活动终端粘贴文本
+terry send-text --terminal 7 "hi"  # 向指定终端粘贴文本（不执行）
 terry run "cargo test"             # 粘贴文本并回车执行
 terry session save "Work"          # 把当前分组保存为 session 模板
 terry session load "Work"          # 从模板创建一个新分组
 terry session list                 # 列出已保存模板
 terry session delete "Work"        # 删除模板
+terry agents                       # 列出 agent 终端及其状态（working/blocked/idle）
+terry wait --state blocked         # 阻塞直到某个 agent 需要输入
+terry wait --match-output "FAILED" # 阻塞直到终端最近的输出包含 FAILED
+terry events                       # 订阅 agent 状态变化（SSE，Ctrl-C 退出）
 terry kitten list                  # 列出已安装的 kitten/插件
 terry kitten run hello --arg       # 运行 kitten（也可直接 terry kitten hello --arg）
 terry kitten path                  # 显示插件搜索目录
@@ -87,9 +93,10 @@ Kitten 是放在 `$TERRY_KITTEN_PATH`、Terry 配置目录下 `kittens/` 或数�
 - `/api/focus_session` — 通过 `terminal_id` / `session_id` 聚焦终端
 - `/api/focus_group` — 通过 `group_id` 切换分组
 - `/api/send_keys` — 发送文本或 `ctrl-c` 等按键
+- `/api/send_text` — 向 `terminal_id`（默认活动终端）粘贴文本，不执行
 - `/api/run` — 粘贴文本并可选回车执行（`"enter": false` 关闭回车）
-- `/api/read_screen` — 以纯文本读取终端内容
-- `/api/get_context` — 活动终端的标题、cwd、分组与命令
+- `/api/read_screen` — 以纯文本读取终端内容（`lines` 限制为最近 N 行非空内容）
+- `/api/get_context` — 活动终端的标题、cwd、分组与命令，以及检测到的 agent 状态
 - `/api/close_session` — 不弹确认直接关闭终端（不传 id 时关闭活动终端）
 - `/api/detach_session`、`/api/reattach_session`、`/api/list_detached` — 将终端分离出分组、保持运行并重新挂载
 - `/api/rename_session` — 设置或清除终端标题（`"title": null` 清除）
@@ -101,6 +108,10 @@ Kitten 是放在 `$TERRY_KITTEN_PATH`、Terry 配置目录下 `kittens/` 或数�
 - `/api/scroll` — `top`、`bottom`、`page_up`、`page_down`、`line_up` 或 `line_down`
 - `/api/set_font_size`、`/api/set_color_scheme` — 单终端显示覆盖（`null` 清除）
 - `/api/notify` — 发送系统通知
+- `/api/list_agent_states` — 正在运行的 agent 终端及其状态（`working`/`blocked`/`idle`）、标题、cwd 与是否退出
+- `/api/wait_agent_state` — 阻塞直到 agent 进入指定状态（`state` 或 `states`、可选 `timeout_ms`；超时返回 408）
+- `/api/wait_for_output` — 阻塞直到终端最近的输出匹配 `match`（子串）或 `regex`（正则）；`tail_lines` 控制搜索范围，`0` 为整个缓冲区
+- `/api/events` — SSE 事件流：`snapshot`、`agent_state`、`terminal_added`、`terminal_removed`
 - `/api/new_tab`、`/api/send_text`、`/api/focus`、`/api/new_window`
 
 ## 命令输出

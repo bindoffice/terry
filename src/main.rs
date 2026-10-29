@@ -1,5 +1,7 @@
 #![recursion_limit = "512"]
 
+mod agent_detect;
+mod agent_integrations;
 mod agent_switcher;
 mod app_icon;
 mod app_menus;
@@ -12,6 +14,7 @@ mod keymap_settings;
 mod kittens;
 mod llm_provider_settings;
 mod move_to_window;
+mod persistent_sessions;
 mod process_inspector;
 mod quake_terminal;
 mod remote_hosts;

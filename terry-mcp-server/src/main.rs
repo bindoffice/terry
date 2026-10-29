@@ -117,7 +117,7 @@ async fn main() -> Result<()> {
                         "description": "Paste text into the active terminal without executing it",
                         "inputSchema": {
                             "type": "object",
-                            "properties": { "text": { "type": "string" } },
+                            "properties": { "session_id": { "type": "string" }, "text": { "type": "string" } },
                             "required": ["text"]
                         }
                     },
@@ -167,7 +167,7 @@ async fn main() -> Result<()> {
                     },
                     {
                         "name": "get_context",
-                        "description": "Get the active terminal's title, cwd, group, and running command",
+                        "description": "Get the active terminal's title, cwd, group, running command, and detected agent state (working/blocked/idle)",
                         "inputSchema": {
                             "type": "object",
                             "properties": { "session_id": { "type": "string" } }
@@ -184,6 +184,40 @@ async fn main() -> Result<()> {
                             },
                             "required": ["message"]
                         }
+                    },
+                    {
+                        "name": "list_agent_states",
+                        "description": "List terminals running a coding agent with their state (working/blocked/idle) and whether they exited",
+                        "inputSchema": { "type": "object", "properties": {} }
+                    },
+                    {
+                        "name": "wait_agent_state",
+                        "description": "Block until an agent terminal reaches a state (default: blocked). Use this to wait until another agent genuinely needs input instead of polling.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "session_id": { "type": "string" },
+                                "state": {
+                                    "type": "string",
+                                    "enum": ["blocked", "idle", "working", "any"]
+                                },
+                                "timeout_ms": { "type": "number" }
+                            }
+                        }
+                    },
+                    {
+                        "name": "wait_for_output",
+                        "description": "Block until a terminal's recent output matches a substring or regex, e.g. wait for a test run to print FAILED.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "session_id": { "type": "string" },
+                                "match": { "type": "string", "description": "Substring to look for" },
+                                "regex": { "type": "string", "description": "Regex to look for (takes precedence over match)" },
+                                "tail_lines": { "type": "number", "description": "How many bottom lines to search (0 = whole buffer, default 50)" },
+                                "timeout_ms": { "type": "number" }
+                            }
+                        }
                     }
                 ]
             });
@@ -194,7 +228,9 @@ async fn main() -> Result<()> {
                 "new_tab" | "create_new_terminal" => Some("new_tab"),
                 "send_text" => Some("send_text"),
                 "list_sessions" | "focus_session" | "send_keys" | "read_screen" | "get_context"
-                | "notify" => Some(tool_name),
+                | "notify" | "list_agent_states" | "wait_agent_state" | "wait_for_output" => {
+                    Some(tool_name)
+                }
                 _ => None,
             };
 
