@@ -3,6 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
+use std::net::Shutdown;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -126,9 +127,14 @@ impl Session {
     fn kill(&self) {
         let pty = self.pty.lock().expect("pty mutex poisoned").take();
         if let Some(pty) = pty {
-            let pid = pty.child().id() as i32;
-            unsafe {
-                libc::kill(pid, libc::SIGHUP);
+            // The reader thread reaps the child when it exits. Signalling an
+            // already-reaped pid could hit a recycled process, so only ask a
+            // live session to hang up.
+            if !self.has_exited() {
+                let pid = pty.child().id() as i32;
+                unsafe {
+                    libc::kill(pid, libc::SIGHUP);
+                }
             }
             // `Pty::drop` waits for the child. Keep that off the caller's
             // thread so a child that ignores SIGHUP cannot block the daemon.
@@ -483,6 +489,11 @@ fn attach_connection(
                     }
                     SessionEvent::Exited(code) => {
                         let _ = write_json(&mut event_writer, &Reply::Exited { code });
+                        // The session is gone, so nothing else will ever be sent.
+                        // Shut the connection down so the client's blocking
+                        // reader sees EOF and ends, instead of waiting forever
+                        // for frames that will never arrive.
+                        let _ = event_writer.shutdown(Shutdown::Both);
                         break;
                     }
                 }

@@ -3464,10 +3464,22 @@ impl Terminal {
     ///
     /// The child process belongs to the daemon, so this emulator never receives
     /// an `ExitStatus` of its own; the reported code is the authoritative one.
+    ///
+    /// Runs the parts of the local PTY exit path that still apply here, so a
+    /// daemon-backed terminal behaves the same way: modes the exited program
+    /// left enabled are reset, any init-command handshake ends, and typing
+    /// `exit`/Ctrl+D closes the tab instead of leaving a dead terminal behind.
     pub fn mark_exited(&mut self, code: i32, cx: &mut Context<Self>) {
+        if self.has_exited() {
+            return;
+        }
         self.reported_exit_code = Some(code);
         self.last_exit_code = Some(code as i64);
-        cx.emit(Event::Wakeup);
+        self.term.lock().reset_modes();
+        self.complete_init_command_startup_handshake();
+        // The daemon reports `128 + signal` when the shell was killed, so only a
+        // zero code counts as a clean exit here.
+        self.close_after_interactive_exit(code == 0, cx);
     }
 
     /// Force-refreshes the foreground process cwd. Prefer this when spawning a
@@ -3692,24 +3704,15 @@ impl Terminal {
             self.child_exited = Some(e);
         }
         self.complete_init_command_startup_handshake();
-        let task = match &mut self.task {
-            Some(task) => task,
-            None => {
-                // For interactive shells (no task), we need to differentiate:
-                // 1. User-initiated exits (typed "exit", Ctrl+D, etc.) - always close,
-                //    even if the shell exits with a non-zero code (e.g. after `false`).
-                // 2. Shell spawn failures (bad $SHELL) - don't close, so the user sees
-                //    the error. Spawn failures never receive keyboard input.
-                let should_close = if self.keyboard_input_sent {
-                    true
-                } else {
-                    self.child_exited.is_none_or(|e| e.code() == Some(0))
-                };
-                if should_close {
-                    cx.emit(Event::CloseTerminal);
-                }
-                return;
-            }
+        let Some(task) = &mut self.task else {
+            // For interactive shells (no task), we need to differentiate:
+            // 1. User-initiated exits (typed "exit", Ctrl+D, etc.) - always close,
+            //    even if the shell exits with a non-zero code (e.g. after `false`).
+            // 2. Shell spawn failures (bad $SHELL) - don't close, so the user sees
+            //    the error. Spawn failures never receive keyboard input.
+            let clean_exit = self.child_exited.is_none_or(|e| e.code() == Some(0));
+            self.close_after_interactive_exit(clean_exit, cx);
+            return;
         };
         if task.status != TaskStatus::Running {
             return;
@@ -3751,6 +3754,17 @@ impl Terminal {
                     cx.emit(Event::CloseTerminal);
                 }
             }
+        }
+    }
+
+    /// Closes the tab for an interactive shell that has exited, unless the
+    /// shell never received keyboard input and died abnormally (a shell that
+    /// failed to start), in which case staying open keeps the error visible.
+    ///
+    /// `clean_exit` is false for a non-zero code and for death by signal.
+    fn close_after_interactive_exit(&mut self, clean_exit: bool, cx: &mut Context<Self>) {
+        if self.keyboard_input_sent || clean_exit {
+            cx.emit(Event::CloseTerminal);
         }
     }
 
@@ -5208,6 +5222,120 @@ mod tests {
         assert!(
             completion_rx.recv().await.is_ok(),
             "expected terminal completion after sleep exits"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_daemon_exit_closes_the_terminal(cx: &mut TestAppContext) {
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        let (event_tx, event_rx) = async_channel::unbounded::<Event>();
+        cx.update(|cx| {
+            cx.subscribe(&terminal, move |_, event, _| {
+                event_tx.send_blocking(event.clone()).ok();
+            })
+        })
+        .detach();
+
+        // A daemon-owned shell that exits cleanly (typed `exit`/Ctrl+D) must
+        // close its tab, matching the in-process PTY path.
+        terminal.update(cx, |terminal, cx| terminal.mark_exited(0, cx));
+        assert!(terminal.update(cx, |terminal, _| terminal.has_exited()));
+
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        assert!(
+            events.contains(&Event::CloseTerminal),
+            "a clean daemon exit should close the tab, got {events:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_daemon_exit_keeps_an_untyped_failure_visible(cx: &mut TestAppContext) {
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        let (event_tx, event_rx) = async_channel::unbounded::<Event>();
+        cx.update(|cx| {
+            cx.subscribe(&terminal, move |_, event, _| {
+                event_tx.send_blocking(event.clone()).ok();
+            })
+        })
+        .detach();
+
+        // A shell that dies without any keyboard input stays on screen so its
+        // error output is readable, just like a local PTY.
+        terminal.update(cx, |terminal, cx| terminal.mark_exited(3, cx));
+
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        assert!(
+            !events.contains(&Event::CloseTerminal),
+            "an untyped failure should keep the tab open, got {events:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_daemon_exit_after_keyboard_input_closes_even_with_nonzero_code(
+        cx: &mut TestAppContext,
+    ) {
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        let (event_tx, event_rx) = async_channel::unbounded::<Event>();
+        cx.update(|cx| {
+            cx.subscribe(&terminal, move |_, event, _| {
+                event_tx.send_blocking(event.clone()).ok();
+            })
+        })
+        .detach();
+
+        // The user typed `exit` (and the shell, say, exited with an error): the
+        // tab still closes, like a local PTY would.
+        terminal.update(cx, |terminal, cx| {
+            terminal.input(b"exit\r".to_vec());
+            terminal.mark_exited(3, cx);
+        });
+
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        assert!(
+            events.contains(&Event::CloseTerminal),
+            "a user-initiated exit should close the tab, got {events:?}"
         );
     }
 

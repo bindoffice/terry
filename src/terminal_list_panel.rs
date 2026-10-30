@@ -4107,8 +4107,17 @@ impl TerminalListPanel {
     fn notice_detached_terminal(&self, terminal_id: EntityId, cx: &mut App) {
         if !persistent_sessions::is_enabled(cx)
             || !self.terminal_daemon_sessions.contains_key(&terminal_id)
-            || !persistent_sessions::should_notice_detach()
         {
+            return;
+        }
+        // Closing a terminal whose shell already exited (typed `exit`, Ctrl+D)
+        // ends its session rather than detaching it, so there is nothing left
+        // running to announce. Checking this first also keeps the one-time
+        // notice for a live terminal that really is detached.
+        let still_running = self
+            .terminal_view_by_id(terminal_id)
+            .is_some_and(|view| !view.read(cx).terminal().read(cx).has_exited());
+        if !still_running || !persistent_sessions::should_notice_detach() {
             return;
         }
         cx.show_system_notification(gpui::SystemNotification {

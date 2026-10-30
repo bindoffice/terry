@@ -177,6 +177,32 @@ fn killing_a_session_reports_exit() {
 }
 
 #[test]
+fn exiting_a_session_reports_exit_then_closes_the_connection() {
+    let socket = start_daemon();
+    let mut control = Control::connect(&socket).expect("control");
+
+    let session = control
+        .spawn(&spec("exiting", "echo BYE; exit 3"))
+        .expect("spawn");
+    let (mut reader, _writer) = attach(&socket, &session);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut exit_code = None;
+    loop {
+        assert!(Instant::now() < deadline, "no exit event");
+        match reader.read_event() {
+            Ok(Some(Event::Output(_))) => continue,
+            Ok(Some(Event::Exited(code))) => exit_code = Some(code),
+            // The daemon ends the attach connection once the session is gone,
+            // so a client waiting for more frames does not hang forever.
+            Ok(None) => break,
+            Err(error) => panic!("attach connection stayed open after exit: {error}"),
+        }
+    }
+    assert_eq!(exit_code, Some(3), "expected the reported exit code");
+}
+
+#[test]
 fn resizing_a_session_is_accepted() {
     let socket = start_daemon();
     let mut control = Control::connect(&socket).expect("control");
