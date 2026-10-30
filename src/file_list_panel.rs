@@ -10,8 +10,8 @@ use gpui::{
 use ui::{
     ContextMenu, IconButton, IconName, Label, LabelSize, Tooltip, prelude::*, right_click_menu,
 };
-use workspace::Workspace;
 use workspace::OpenOptions;
+use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent, PanelSizeState, PanelStatusButton};
 use zed_actions::file_list_panel::{ShowFinder, ShowList, ToggleFocus};
 
@@ -38,9 +38,9 @@ fn show_file_panel(
 ) {
     workspace.open_panel::<FileListPanel>(window, cx);
     let current = workspace.panel_size_state::<FileListPanel>(cx);
-    let restore = workspace.panel::<FileListPanel>(cx).and_then(|panel| {
-        panel.update(cx, |panel, cx| panel.switch_view_mode(mode, current, cx))
-    });
+    let restore = workspace
+        .panel::<FileListPanel>(cx)
+        .and_then(|panel| panel.update(cx, |panel, cx| panel.switch_view_mode(mode, current, cx)));
     if let Some(size_state) = restore {
         workspace.set_panel_size_state::<FileListPanel>(size_state, window, cx);
         cx.notify();
@@ -128,7 +128,14 @@ impl FileListPanel {
             }
             cx.notify();
         });
-        let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        // Start in the home directory: the process cwd is `/` when the app is
+        // launched from Finder or an app bundle, which is a poor starting point
+        // and disagrees with the terminal, which already falls back to home. A
+        // workspace with a project replaces this with the project root in
+        // `initialize_current_dir`.
+        let current_dir = dirs::home_dir()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("/"));
         let mut panel = Self {
             workspace: workspace.downgrade(),
             focus_handle,
@@ -158,17 +165,13 @@ impl FileListPanel {
     fn start_auto_refresh(&mut self, cx: &mut Context<Self>) {
         self._refresh_task = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_secs(2))
-                    .await;
+                cx.background_executor().timer(Duration::from_secs(2)).await;
                 let Ok(dir) = this.update(cx, |this, _cx| this.current_dir.clone()) else {
                     break;
                 };
                 let dir_for_read = dir.clone();
                 let entries = cx
-                    .background_spawn(async move {
-                        FileListPanel::collect_entries(&dir_for_read)
-                    })
+                    .background_spawn(async move { FileListPanel::collect_entries(&dir_for_read) })
                     .await;
                 let Ok(()) = this.update(cx, |this, cx| {
                     if this.current_dir == dir && this.entries != entries {
@@ -195,8 +198,8 @@ impl FileListPanel {
         });
     }
 
-    /// Prefer the project root over the process cwd (which is often `/` for a
-    /// packaged app). Skipped once the panel has started following a terminal.
+    /// Prefer the project root over the home-directory default. Skipped once the
+    /// panel has started following a terminal.
     fn initialize_current_dir(&mut self, cx: &mut Context<Self>) {
         if self.entries_dir.is_some() || self.followed_item.is_some() {
             return;
@@ -205,13 +208,10 @@ impl FileListPanel {
             return;
         };
         let project = workspace.read(cx).project().clone();
-        let root = project
-            .read(cx)
-            .visible_worktrees(cx)
-            .find_map(|worktree| {
-                let path = worktree.read(cx).abs_path().to_path_buf();
-                path.is_dir().then_some(path)
-            });
+        let root = project.read(cx).visible_worktrees(cx).find_map(|worktree| {
+            let path = worktree.read(cx).abs_path().to_path_buf();
+            path.is_dir().then_some(path)
+        });
         if let Some(root) = root {
             self.current_dir = root;
             cx.notify();
@@ -308,17 +308,15 @@ impl FileListPanel {
         // remote terminals reporting OSC 7.
         if self.followed_item != Some(item_id) {
             let terminal = terminal_view.read(cx).terminal().clone();
-            self._terminal_subscription = Some(cx.subscribe(
-                &terminal,
-                move |this, _terminal, event, cx| {
+            self._terminal_subscription =
+                Some(cx.subscribe(&terminal, move |this, _terminal, event, cx| {
                     if matches!(
                         event,
                         terminal::Event::CwdChanged | terminal::Event::TitleChanged
                     ) {
                         this.update_from_active_item(false, cx);
                     }
-                },
-            ));
+                }));
         }
 
         let cwd = terminal_view
@@ -504,12 +502,7 @@ impl FileListPanel {
         parent.join(format!("{base} {}", uuid::Uuid::new_v4()))
     }
 
-    fn create_new_file_in(
-        &mut self,
-        parent: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn create_new_file_in(&mut self, parent: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let path = Self::unique_child_path(&parent, "untitled");
         if std::fs::File::create(&path).is_ok() {
             self.invalidate_entries();
@@ -645,11 +638,13 @@ impl FileListPanel {
 
                 let delete_panel = panel.clone();
                 let delete_path = entry.path.clone();
-                menu = menu.separator().entry(i18n::t("delete"), None, move |window, cx| {
-                    delete_panel.update(cx, |this, cx| {
-                        this.delete_entry(delete_path.clone(), window, cx);
+                menu = menu
+                    .separator()
+                    .entry(i18n::t("delete"), None, move |window, cx| {
+                        delete_panel.update(cx, |this, cx| {
+                            this.delete_entry(delete_path.clone(), window, cx);
+                        });
                     });
-                });
             }
 
             menu
@@ -758,15 +753,12 @@ impl Render for FileListPanel {
                     ),
             )
             .child(
-                div()
-                    .px_2()
-                    .pb_1()
-                    .child(
-                        Label::new(dir_label)
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted)
-                            .truncate(),
-                    ),
+                div().px_2().pb_1().child(
+                    Label::new(dir_label)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted)
+                        .truncate(),
+                ),
             )
             .child(match self.view_mode {
                 FileViewMode::List => render_file_rows(entries, theme, cx),
@@ -890,9 +882,10 @@ fn render_finder_grid(
                         .hover(|style| style.bg(colors.element_hover))
                         .child(ui::Icon::new(icon).size(IconSize::XLarge).color(icon_color))
                         .child(
-                            div().w(px(96.)).text_center().child(
-                                Label::new(label).size(LabelSize::XSmall).truncate(),
-                            ),
+                            div()
+                                .w(px(96.))
+                                .text_center()
+                                .child(Label::new(label).size(LabelSize::XSmall).truncate()),
                         )
                         .on_click(on_click)
                 })
@@ -929,7 +922,12 @@ impl Panel for FileListPanel {
         matches!(position, DockPosition::Left)
     }
 
-    fn set_position(&mut self, position: DockPosition, _window: &mut Window, _cx: &mut Context<Self>) {
+    fn set_position(
+        &mut self,
+        position: DockPosition,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
         self.position = position;
     }
 
