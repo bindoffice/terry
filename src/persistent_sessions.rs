@@ -8,13 +8,34 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use collections::HashMap;
 use gpui::App;
 use settings::Settings as _;
 use terminal::terminal_settings::TerminalSettings;
-use terminal_daemon::{AttachedReader, AttachedWriter, Control, Event, SessionSpec, attach};
+use terminal_daemon::{
+    AttachedReader, AttachedWriter, Control, Event, ReplayTail, SessionSpec, attach,
+};
+
+/// Most replay bytes fed back into the emulator when reattaching.
+///
+/// The daemon keeps up to 8 MiB so a session survives a restart, but the
+/// emulator only keeps `max_scroll_history_lines` (10k by default), so parsing
+/// far more than that is wasted work. That work runs on the foreground, where a
+/// full buffer froze the window for seconds in a debug build, so keep only the
+/// tail the user is actually looking at. Raise this if a deeper scrollback is
+/// configured.
+const MAX_REPLAY_BYTES: usize = 1024 * 1024;
+
+/// Bytes parsed per foreground update while draining output.
+const FEED_SLICE_BYTES: usize = 16 * 1024;
+
+/// How long we keep feeding before yielding to the foreground.
+const FEED_BUDGET: Duration = Duration::from_millis(8);
+
+/// Pause between feed bursts so the frame is painted and input is handled.
+const FEED_PAUSE: Duration = Duration::from_millis(1);
 
 /// One daemon connection, shared by every window and workspace.
 fn daemon_slot() -> &'static Mutex<Option<Control>> {
@@ -287,6 +308,9 @@ pub fn wire(
     cx: &mut gpui::AsyncWindowContext,
 ) {
     let AttachedSession { mut reader, writer } = attached;
+    // Reattaching replays the daemon's buffer. The emulator cannot keep all of
+    // it, so drop the oldest bytes instead of parsing them for nothing.
+    let replay_skip = reader.replayed_bytes().saturating_sub(MAX_REPLAY_BYTES);
 
     terminal.update(cx, |terminal, _cx| {
         let input = writer.clone();
@@ -318,6 +342,7 @@ pub fn wire(
     let terminal = terminal.clone();
     cx.spawn(async move |cx| {
         use futures::StreamExt as _;
+        let executor = cx.background_executor().clone();
         // A command that prints a lot reaches us as one daemon frame per line:
         // the PTY is line-buffered, so each write there becomes a read here.
         // Every `write_output` repaints the terminal and refreshes the sidebar
@@ -326,16 +351,17 @@ pub fn wire(
         // instead; the in-process PTY path coalesces the same way (it batches
         // events on a 4ms timer before touching the UI).
         let mut pending: Vec<u8> = Vec::new();
+        let mut replay = ReplayTail::new(replay_skip);
         let mut exit_code = None;
         while let Some(event) = receiver.next().await {
             match event {
-                Event::Output(bytes) => pending.extend_from_slice(&bytes),
+                Event::Output(bytes) => pending.extend_from_slice(replay.feed(&bytes)),
                 Event::Exited(code) => exit_code = Some(code),
             }
 
             while let Ok(event) = receiver.try_recv() {
                 match event {
-                    Event::Output(bytes) => pending.extend_from_slice(&bytes),
+                    Event::Output(bytes) => pending.extend_from_slice(replay.feed(&bytes)),
                     Event::Exited(code) => {
                         exit_code = Some(code);
                         break;
@@ -344,7 +370,27 @@ pub fn wire(
             }
 
             if !pending.is_empty() {
-                terminal.update(cx, |terminal, cx| terminal.write_output(&pending, cx));
+                // Feeding a multi-megabyte replay to the emulator in one go
+                // blocks the foreground for the whole parse (seconds in a debug
+                // build). Parse it in bounded slices and yield between them so
+                // the frame is painted and keystrokes are handled meanwhile.
+                let mut offset = 0;
+                let mut last_pause = Instant::now();
+                while offset < pending.len() {
+                    let mut end = (offset + FEED_SLICE_BYTES).min(pending.len());
+                    // `write_output` converts LF to CRLF with per-call state, so
+                    // keep a CRLF pair in the same slice.
+                    if end < pending.len() && pending[end - 1] == b'\r' && pending[end] == b'\n' {
+                        end += 1;
+                    }
+                    let chunk = &pending[offset..end];
+                    terminal.update(cx, |terminal, cx| terminal.write_output(chunk, cx));
+                    offset = end;
+                    if offset < pending.len() && last_pause.elapsed() >= FEED_BUDGET {
+                        executor.timer(FEED_PAUSE).await;
+                        last_pause = Instant::now();
+                    }
+                }
                 pending.clear();
             }
             if let Some(code) = exit_code.take() {

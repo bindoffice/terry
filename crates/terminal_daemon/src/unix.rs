@@ -639,11 +639,18 @@ impl AttachedWriter {
 pub struct AttachedReader {
     reader: BufReader<UnixStream>,
     session: String,
+    replayed_bytes: usize,
 }
 
 impl AttachedReader {
     pub fn session(&self) -> &str {
         &self.session
+    }
+
+    /// Bytes of replay the daemon sent before live output. Used to drop the
+    /// oldest part when the emulator cannot keep that much scrollback.
+    pub fn replayed_bytes(&self) -> usize {
+        self.replayed_bytes
     }
 
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
@@ -694,9 +701,17 @@ pub fn attach(
             continue;
         }
         match serde_json::from_slice::<Reply>(&payload)? {
-            Reply::Attached { session, .. } => {
+            Reply::Attached {
+                session,
+                replayed_bytes,
+                ..
+            } => {
                 return Ok((
-                    AttachedReader { reader, session },
+                    AttachedReader {
+                        reader,
+                        session,
+                        replayed_bytes,
+                    },
                     AttachedWriter {
                         writer: Mutex::new(writer),
                     },

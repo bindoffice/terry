@@ -60,11 +60,16 @@ impl AttachedWriter {
 
 pub struct AttachedReader {
     session: String,
+    replayed_bytes: usize,
 }
 
 impl AttachedReader {
     pub fn session(&self) -> &str {
         &self.session
+    }
+
+    pub fn replayed_bytes(&self) -> usize {
+        self.replayed_bytes
     }
 
     pub fn set_read_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {

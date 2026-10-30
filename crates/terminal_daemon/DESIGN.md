@@ -168,7 +168,7 @@ let terminal = if persistent && !is_task && !is_tmux_mirror {
 ## 7. 渲染与 scrollback
 
 - display-only 终端初始为空；attach 后先收到 replay 缓冲（最多 8 MiB），据此重建屏幕与 scrollback。
-- 8 MiB 回放是单次连续写入，实测在几十毫秒量级；如果体感不好，可下调到 2 MiB 或改成「daemon 侧保存快照 + 尾部字节」。
+- 回放不再一次性喂给模拟器：客户端只保留最后 1 MiB（切在行首，避免截断转义序列），再按 16 KiB 分片、每约 8 ms 让出前台一次。这样 debug 构建下也不会出现几秒的冻结；1 MiB 约等于默认 10k 行 scrollback，如果配置了更深的 scrollback，调大 `src/persistent_sessions.rs` 的 `MAX_REPLAY_BYTES`。
 - kitty graphics / sixel / OSC 52 / OSC 8 都是原始字节，回放会原样重放，不需要特殊处理。
 - 初始尺寸用 80×24，首次布局后由 `set_resize_sink` 纠正；TUI 程序可能会多刷一帧，可接受。
 
