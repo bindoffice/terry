@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use settings::Settings;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -4848,7 +4848,12 @@ impl TerminalListPanel {
                                 );
                                 cx.new(|cx| builder.subscribe(cx))
                             })?;
-                            persistent_sessions::wire(&terminal, attached, cx);
+                            persistent_sessions::wire(
+                                &terminal,
+                                attached,
+                                working_directory.clone(),
+                                cx,
+                            );
                             spawned_daemon_session = Some(daemon_session);
                             terminal
                         }
@@ -5272,12 +5277,19 @@ impl TerminalListPanel {
             }
             if !matches!(
                 event,
-                terminal::Event::TitleChanged | terminal::Event::BreadcrumbsChanged
+                terminal::Event::TitleChanged
+                    | terminal::Event::BreadcrumbsChanged
+                    | terminal::Event::CwdChanged
             ) {
                 return;
             }
-            if matches!(event, terminal::Event::TitleChanged) {
-                // The sidebar uses the terminal title as its label.
+            if matches!(
+                event,
+                terminal::Event::TitleChanged | terminal::Event::CwdChanged
+            ) {
+                // The sidebar uses the terminal title and working directory as
+                // its label. Display-only terminals (daemon-backed sessions)
+                // report directory changes through `CwdChanged` only.
                 cx.notify();
             }
             // TitleChanged is emitted right after the background refresh
@@ -8493,28 +8505,36 @@ impl Panel for TerminalListPanel {
 /// name (`dir — zsh`).
 fn sidebar_terminal_name(tv: &Entity<TerminalView>, cx: &App) -> SharedString {
     let view = tv.read(cx);
-    if let Some(custom) = view.custom_title().filter(|title| !title.trim().is_empty()) {
+    let terminal = view.terminal().read(cx);
+    let title = terminal.title(true);
+    let working_directory = terminal.working_directory();
+    sidebar_label(view.custom_title(), working_directory.as_deref(), &title)
+}
+
+/// Pure part of [`sidebar_terminal_name`], split out so the label precedence
+/// can be tested without a workspace.
+fn sidebar_label(
+    custom_title: Option<&str>,
+    working_directory: Option<&Path>,
+    terminal_title: &str,
+) -> SharedString {
+    if let Some(custom) = custom_title.filter(|title| !title.trim().is_empty()) {
         return custom.to_string().into();
     }
 
-    let terminal = view.terminal().read(cx);
-    if let Some(name) = terminal
-        .working_directory()
-        .and_then(|cwd| {
-            cwd.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
+    if let Some(name) = working_directory
+        .and_then(|cwd| cwd.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.is_empty())
     {
         return name.into();
     }
 
-    let title = terminal.title(true);
-    title
+    terminal_title
         .split_once(" — ")
-        .or_else(|| title.split_once(" - "))
+        .or_else(|| terminal_title.split_once(" - "))
         .map(|(left, _)| left)
-        .unwrap_or(&title)
+        .unwrap_or(terminal_title)
         .to_string()
         .into()
 }
@@ -9465,5 +9485,130 @@ mod tests {
             .collect();
         referenced.sort_unstable();
         assert_eq!(referenced, vec![0, 1, 2]);
+    }
+
+    /// Custom titles win, then the working directory, then a title stripped of
+    /// its ` — <program>` suffix. Regression coverage for the sidebar label.
+    #[test]
+    fn sidebar_label_prefers_custom_title_then_directory() {
+        let cwd = Path::new("/work/terry");
+
+        assert_eq!(
+            sidebar_label(Some("api"), Some(cwd), "terry — zsh"),
+            SharedString::from("api")
+        );
+        // A whitespace-only custom title is ignored.
+        assert_eq!(
+            sidebar_label(Some("   "), Some(cwd), "terry — zsh"),
+            SharedString::from("terry")
+        );
+        // The directory wins over the dynamic title.
+        assert_eq!(
+            sidebar_label(None, Some(cwd), "somewhere-else — zsh"),
+            SharedString::from("terry")
+        );
+        // Neither a custom title nor a directory: strip the program suffix.
+        assert_eq!(
+            sidebar_label(None, None, "src — zsh"),
+            SharedString::from("src")
+        );
+        assert_eq!(
+            sidebar_label(None, None, "src - fish"),
+            SharedString::from("src")
+        );
+        assert_eq!(
+            sidebar_label(None, None, "plain title"),
+            SharedString::from("plain title")
+        );
+        // A display-only terminal with no cwd report still shows its fallback.
+        assert_eq!(
+            sidebar_label(None, None, "Terminal"),
+            SharedString::from("Terminal")
+        );
+        // The root directory has no basename; fall through to the title.
+        assert_eq!(
+            sidebar_label(None, Some(Path::new("/")), "root — zsh"),
+            SharedString::from("root")
+        );
+    }
+
+    /// A daemon-backed terminal is display-only, so its sidebar label must
+    /// follow the directory the shell reports via OSC 7 (and the panel must
+    /// re-render on that event). It used to stay "Terminal" forever.
+    #[gpui::test]
+    async fn sidebar_name_follows_display_only_cwd(cx: &mut TestAppContext) {
+        ensure_test_data_dir();
+
+        let params = cx.update(AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let project = Project::test(params.fs.clone(), [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+
+        let panel = window_handle
+            .update(cx, |mw, window, cx| {
+                let workspace = mw.workspace().clone();
+                let project = workspace.read(cx).project().clone();
+                let display_pane = workspace.read(cx).active_pane().clone();
+                let panel = cx.new(|cx| {
+                    TerminalListPanel::new(
+                        workspace.clone(),
+                        display_pane,
+                        project,
+                        None,
+                        window,
+                        cx,
+                    )
+                });
+                workspace.update(cx, |workspace, cx| {
+                    workspace.add_panel(panel.clone(), window, cx);
+                });
+                panel
+            })
+            .unwrap();
+
+        seed_group(&panel, &workspace, &project, &window_handle, cx);
+        let view = panel.read_with(cx, |panel, _| panel.groups[0].terminals[0].clone());
+        assert_eq!(
+            panel.read_with(cx, |_, cx| sidebar_terminal_name(&view, cx)),
+            SharedString::from("Terminal"),
+            "without a cwd report a display-only terminal still has no name"
+        );
+
+        let terminal = view.read_with(cx, |view, cx| view.terminal().clone());
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]7;file:///work/terry\x07", cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel
+                .terminal_spawn_cwds
+                .get(&view.entity_id())
+                .cloned()
+                .flatten()),
+            Some(PathBuf::from("/work/terry")),
+            "the panel should remember the directory reported by OSC 7"
+        );
+        assert_eq!(
+            panel.read_with(cx, |_, cx| sidebar_terminal_name(&view, cx)),
+            SharedString::from("terry"),
+            "the sidebar label should track the shell's directory"
+        );
+
+        // `cd` again: the name follows without any other activity.
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]7;file:///work/other\x07", cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |_, cx| sidebar_terminal_name(&view, cx)),
+            SharedString::from("other")
+        );
     }
 }

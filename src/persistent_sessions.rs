@@ -305,6 +305,7 @@ pub fn next_event(reader: &mut AttachedReader) -> Option<Event> {
 pub fn wire(
     terminal: &gpui::Entity<terminal::Terminal>,
     attached: AttachedSession,
+    initial_cwd: Option<PathBuf>,
     cx: &mut gpui::AsyncWindowContext,
 ) {
     let AttachedSession { mut reader, writer } = attached;
@@ -312,7 +313,10 @@ pub fn wire(
     // it, so drop the oldest bytes instead of parsing them for nothing.
     let replay_skip = reader.replayed_bytes().saturating_sub(MAX_REPLAY_BYTES);
 
-    terminal.update(cx, |terminal, _cx| {
+    terminal.update(cx, |terminal, cx| {
+        // A display-only terminal cannot inspect the daemon's process, so label
+        // it with the spawn directory until the shell reports one via OSC 7.
+        terminal.set_initial_working_directory(initial_cwd, cx);
         let input = writer.clone();
         terminal.set_input_sink(Some(Arc::new(move |bytes: &[u8]| {
             let _ = input.input(bytes);
