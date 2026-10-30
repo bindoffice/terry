@@ -96,6 +96,7 @@ Kitten 是放在 `$TERRY_KITTEN_PATH`、Terry 配置目录下 `kittens/` 或数�
 - `/api/send_text` — 向 `terminal_id`（默认活动终端）粘贴文本，不执行
 - `/api/run` — 粘贴文本并可选回车执行（`"enter": false` 关闭回车）
 - `/api/read_screen` — 以纯文本读取终端内容（`lines` 限制为最近 N 行非空内容）
+- `/api/screen` — 以带样式的单元格读取可见屏幕：颜色、粗体/斜体/下划线等属性、光标位置与形状、视口尺寸
 - `/api/get_context` — 活动终端的标题、cwd、分组与命令，以及检测到的 agent 状态
 - `/api/close_session` — 不弹确认直接关闭终端（不传 id 时关闭活动终端）
 - `/api/detach_session`、`/api/reattach_session`、`/api/list_detached` — 将终端分离出分组、保持运行并重新挂载
@@ -113,6 +114,55 @@ Kitten 是放在 `$TERRY_KITTEN_PATH`、Terry 配置目录下 `kittens/` 或数�
 - `/api/wait_for_output` — 阻塞直到终端最近的输出匹配 `match`（子串）或 `regex`（正则）；`tail_lines` 控制搜索范围，`0` 为整个缓冲区
 - `/api/events` — SSE 事件流：`snapshot`、`agent_state`、`terminal_added`、`terminal_removed`
 - `/api/new_tab`、`/api/send_text`、`/api/focus`、`/api/new_window`
+
+### 远程控制（手机 / 平板）
+
+上面的自动化 API 只监听回环地址，令牌每次启动都会更换，所以本机之外访问不到。要让手机或平板控制这个实例，开启第二个监听器：
+
+```json
+{
+  "terminal": {
+    "remote_control": {
+      "enabled": true,
+      "bind": "0.0.0.0",
+      "port": 47823
+    }
+  }
+}
+```
+
+「设置 → 终端 → 远程控制」会列出可用的地址和访问令牌，把它们填进客户端即可。令牌保存在数据目录的 `remote-token`（权限 `0600`，首次使用时自动生成），重启后不变，因此只需配对一次；点「重新生成令牌」会让所有已配对设备立即失效。
+
+这个端点是**明文 HTTP + Bearer 令牌**，等价于远程命令执行，请只通过私有网络访问：
+
+- **Tailscale / WireGuard**（推荐）：手机加入同一个 tailnet，然后直接访问 `http://<这台机器的 tailnet IP>:47823`。设置页会列出探测到的地址。
+- **只走本机 + `tailscale serve`**：把 `bind` 保持为 `127.0.0.1`，再运行 `tailscale serve --bg http://127.0.0.1:47823`，由 Tailscale 提供 TLS 和 `*.ts.net` 域名。
+- 不要把端口直接映射到公网。
+
+自检（把 `<地址>` 和 `<令牌>` 换成设置页显示的值）：
+
+```sh
+curl -s -X POST http://<地址>:47823/api/list_sessions \
+  -H 'Authorization: Bearer <令牌>' -d '{}'
+```
+
+`/api/screen` 返回一帧可直接重绘的视口：
+
+```json
+{
+  "terminal_id": 3, "rows": 24, "cols": 80,
+  "alternate_screen": false, "display_offset": 0,
+  "default_fg": "#d4d4d4", "default_bg": "#1e1e1e",
+  "cursor": { "row": 4, "col": 10, "shape": "block", "visible": true },
+  "lines": [
+    [ { "col": 0, "text": "❯ ls", "fg": "#50fa7b", "attrs": ["bold"] } ]
+  ]
+}
+```
+
+每个 `lines` 元素对应一行，里面是按起始列（`col`）定位的样式片段；空白且无样式的单元格会省略，`fg`/`bg` 缺省表示使用 `default_fg`/`default_bg`，反显（inverse）已在服务端交换完成。宽字符（CJK/emoji）占两列，尾随的空位单元格会被跳过。
+
+原本的回环监听器不受影响，`terry` CLI、kitten 与 MCP server 的行为保持不变。
 
 ## 命令输出
 

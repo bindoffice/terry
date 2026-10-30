@@ -17,7 +17,10 @@ use serde_json::{Value, json};
 use session::ipc_server::{IpcRequest, IpcRequestKind};
 use settings::Settings;
 use terminal::terminal_settings::TerminalSettings;
+use terminal::{Color, CursorShape, ScreenCell, ScreenSnapshot};
 use terminal_view::TerminalView;
+use terminal_view::terminal_element::convert_color;
+use theme::ActiveTheme as _;
 use workspace::{AppState, MultiWorkspace, OpenOptions};
 
 use crate::terminal_list_panel::TerminalListPanel;
@@ -976,6 +979,7 @@ pub fn init(mut request_rx: futures::channel::mpsc::UnboundedReceiver<IpcRequest
                 IpcRequestKind::ReadScreen { terminal_id, lines } => {
                     read_screen(cx, terminal_id, lines).await
                 }
+                IpcRequestKind::Screen { terminal_id } => screen(cx, terminal_id).await,
                 IpcRequestKind::GetContext { terminal_id } => get_context(cx, terminal_id).await,
                 IpcRequestKind::Notify { title, message } => notify(cx, title, &message).await,
                 IpcRequestKind::CloseSession { terminal_id } => {
@@ -1946,6 +1950,264 @@ async fn read_screen(
         .map_err(|error| error.to_string())?
 }
 
+/// Reads the visible screen with per-cell styling and the cursor position, so a
+/// client can repaint the terminal exactly as the app draws it.
+async fn screen(cx: &mut AsyncApp, terminal_id: Option<u64>) -> Result<Value, String> {
+    let window = workspace_window(cx)
+        .await?
+        .ok_or_else(|| "no Terry window is open".to_string())?;
+
+    window
+        .update(cx, move |multi_workspace, _window, cx| {
+            // See `read_screen`: panel helpers read the workspace back, so this
+            // must not run inside `workspace.update`.
+            let panel = multi_workspace
+                .workspace()
+                .read(cx)
+                .panel::<TerminalListPanel>(cx)
+                .ok_or_else(|| "terminal panel is not initialized".to_string())?;
+            let view = resolve_terminal(&panel, terminal_id, cx)?;
+            let id = view.entity_id().as_u64();
+            let snapshot = view.read(cx).terminal().read(cx).screen_snapshot();
+
+            Ok(screen_payload(id, &snapshot, cx))
+        })
+        .map_err(|error| error.to_string())?
+}
+
+/// A cell ready for encoding: colors already resolved, no theme needed.
+struct StyledCell {
+    row: usize,
+    column: usize,
+    text: String,
+    foreground: Option<String>,
+    background: Option<String>,
+    attributes: Vec<&'static str>,
+}
+
+/// A run of adjacent viewport cells that share one style.
+struct ScreenRun {
+    row: usize,
+    column: usize,
+    /// Column just past the run, used to merge adjacent cells.
+    end_column: usize,
+    text: String,
+    /// `None` when the run uses the terminal's default color.
+    foreground: Option<String>,
+    background: Option<String>,
+    attributes: Vec<&'static str>,
+}
+
+impl ScreenRun {
+    fn into_json(self) -> Value {
+        let mut run = serde_json::Map::new();
+        run.insert("col".into(), json!(self.column));
+        run.insert("text".into(), json!(self.text));
+        if let Some(foreground) = self.foreground {
+            run.insert("fg".into(), json!(foreground));
+        }
+        if let Some(background) = self.background {
+            run.insert("bg".into(), json!(background));
+        }
+        if !self.attributes.is_empty() {
+            run.insert("attrs".into(), json!(self.attributes));
+        }
+        Value::Object(run)
+    }
+}
+
+/// Serializes a screen snapshot.
+///
+/// Each line is a list of styled runs; every run carries the column it starts
+/// at, so clients can position it on a monospace grid (and stay aligned across
+/// wide characters, which occupy two cells). Blank cells with the default
+/// background are dropped, and colors matching the defaults are reported as
+/// absent, which keeps the payload small.
+fn screen_payload(id: u64, snapshot: &ScreenSnapshot, cx: &App) -> Value {
+    let theme = cx.theme();
+    let default_foreground = hex_color(convert_color(
+        &Color::Named(terminal::NamedColor::Foreground),
+        theme,
+    ));
+    let default_background = hex_color(convert_color(
+        &Color::Named(terminal::NamedColor::Background),
+        theme,
+    ));
+
+    let cells = snapshot
+        .cells
+        .iter()
+        // A wide character owns its leading cell; the trailing half carries no
+        // text of its own.
+        .filter(|cell| !cell.wide_char_spacer)
+        .map(|cell| {
+            let (foreground, background) =
+                run_colors(cell, theme, &default_foreground, &default_background);
+            StyledCell {
+                row: cell.row,
+                column: cell.column,
+                text: cell.text.clone(),
+                foreground,
+                background,
+                attributes: cell_attributes(cell),
+            }
+        });
+
+    let lines = encode_lines(snapshot.rows, cells);
+
+    let cursor = snapshot.cursor.map(|cursor| {
+        json!({
+            "row": cursor.row,
+            "col": cursor.column,
+            "shape": cursor_shape_name(cursor.shape),
+            "visible": cursor.visible,
+        })
+    });
+
+    json!({
+        "terminal_id": id,
+        "rows": snapshot.rows,
+        "cols": snapshot.columns,
+        "alternate_screen": snapshot.alternate_screen,
+        "display_offset": snapshot.display_offset,
+        "default_fg": default_foreground,
+        "default_bg": default_background,
+        "cursor": cursor,
+        "lines": lines,
+    })
+}
+
+/// Groups styled cells into one run list per row.
+///
+/// Adjacent cells with the same style merge into one run; spaces that are
+/// unstyled on the default background are dropped. Every run records the
+/// column it starts at, so dropped cells never shift the rest of the row.
+fn encode_lines(rows: usize, cells: impl IntoIterator<Item = StyledCell>) -> Vec<Vec<Value>> {
+    let mut lines: Vec<Vec<Value>> = vec![Vec::new(); rows];
+    let mut current: Option<ScreenRun> = None;
+
+    for cell in cells {
+        // Spaces with no styling and no background carry no information.
+        if cell.text.trim_end().is_empty()
+            && cell.background.is_none()
+            && cell.attributes.is_empty()
+        {
+            continue;
+        }
+
+        match &mut current {
+            Some(run)
+                if run.row == cell.row
+                    && run.end_column == cell.column
+                    && run.foreground == cell.foreground
+                    && run.background == cell.background
+                    && run.attributes == cell.attributes =>
+            {
+                run.text.push_str(&cell.text);
+                run.end_column = cell.column + 1;
+            }
+            _ => {
+                if let Some(run) = current.take() {
+                    push_run(&mut lines, run);
+                }
+                current = Some(ScreenRun {
+                    row: cell.row,
+                    column: cell.column,
+                    end_column: cell.column + 1,
+                    text: cell.text,
+                    foreground: cell.foreground,
+                    background: cell.background,
+                    attributes: cell.attributes,
+                });
+            }
+        }
+    }
+
+    if let Some(run) = current.take() {
+        push_run(&mut lines, run);
+    }
+
+    lines
+}
+
+fn push_run(lines: &mut [Vec<Value>], run: ScreenRun) {
+    if let Some(line) = lines.get_mut(run.row) {
+        line.push(run.into_json());
+    }
+}
+
+/// Resolves a cell's colors against the theme.
+///
+/// Returns `None` for a color that matches the terminal default, since clients
+/// fall back to `default_fg` / `default_bg`. Reverse video is applied here so
+/// clients do not have to know about it.
+fn run_colors(
+    cell: &ScreenCell,
+    theme: &theme::Theme,
+    default_foreground: &str,
+    default_background: &str,
+) -> (Option<String>, Option<String>) {
+    let mut foreground = hex_color(convert_color(&cell.foreground, theme));
+    let mut background = hex_color(convert_color(&cell.background, theme));
+
+    if cell.inverse {
+        std::mem::swap(&mut foreground, &mut background);
+    }
+
+    (
+        (foreground != default_foreground).then_some(foreground),
+        (background != default_background).then_some(background),
+    )
+}
+
+fn cell_attributes(cell: &ScreenCell) -> Vec<&'static str> {
+    let mut attributes = Vec::new();
+    if cell.bold {
+        attributes.push("bold");
+    }
+    if cell.italic {
+        attributes.push("italic");
+    }
+    if cell.underline {
+        attributes.push("underline");
+    }
+    if cell.undercurl {
+        attributes.push("undercurl");
+    }
+    if cell.strikeout {
+        attributes.push("strikeout");
+    }
+    if cell.dim {
+        attributes.push("dim");
+    }
+    attributes
+}
+
+fn cursor_shape_name(shape: CursorShape) -> &'static str {
+    match shape {
+        CursorShape::Block => "block",
+        CursorShape::Underline => "underline",
+        CursorShape::Bar => "bar",
+        CursorShape::HollowBlock => "hollow",
+        CursorShape::Hidden => "hidden",
+    }
+}
+
+/// Formats a theme color as `#rrggbb`.
+fn hex_color(color: gpui::Hsla) -> String {
+    let rgba = color.to_rgb();
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        color_channel(rgba.r),
+        color_channel(rgba.g),
+        color_channel(rgba.b)
+    )
+}
+
+fn color_channel(value: f32) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
 async fn report_agent_state(
     cx: &mut AsyncApp,
     token: String,
@@ -2136,5 +2398,146 @@ mod tests {
         assert!(message.contains("已有 Terry 实例在运行"), "{message}");
         assert!(message.contains("--new-instance"), "{message}");
         assert!(!message.contains("IPC"), "{message}");
+    }
+
+    use super::{StyledCell, cell_attributes, cursor_shape_name, encode_lines, hex_color};
+    use gpui::Hsla;
+    use terminal::{Color, CursorShape, NamedColor, ScreenCell};
+
+    fn styled_cell(row: usize, column: usize, text: &str) -> StyledCell {
+        StyledCell {
+            row,
+            column,
+            text: text.to_string(),
+            foreground: None,
+            background: None,
+            attributes: Vec::new(),
+        }
+    }
+
+    fn screen_cell() -> ScreenCell {
+        ScreenCell {
+            row: 0,
+            column: 0,
+            text: "a".to_string(),
+            foreground: Color::Named(NamedColor::Foreground),
+            background: Color::Named(NamedColor::Background),
+            bold: false,
+            italic: false,
+            underline: false,
+            undercurl: false,
+            strikeout: false,
+            dim: false,
+            inverse: false,
+            wide_char_spacer: false,
+        }
+    }
+
+    #[test]
+    fn adjacent_cells_with_the_same_style_become_one_run() {
+        let lines = encode_lines(
+            1,
+            [
+                styled_cell(0, 0, "a"),
+                styled_cell(0, 1, "b"),
+                styled_cell(0, 2, "c"),
+            ],
+        );
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].len(), 1);
+        assert_eq!(lines[0][0]["text"], "abc");
+        assert_eq!(lines[0][0]["col"], 0);
+        assert!(lines[0][0].get("fg").is_none());
+    }
+
+    #[test]
+    fn a_style_change_starts_a_new_run() {
+        let mut red = styled_cell(0, 1, "b");
+        red.foreground = Some("#ff0000".to_string());
+
+        let lines = encode_lines(1, [styled_cell(0, 0, "a"), red]);
+
+        assert_eq!(lines[0].len(), 2);
+        assert_eq!(lines[0][0]["text"], "a");
+        assert_eq!(lines[0][1]["col"], 1);
+        assert_eq!(lines[0][1]["fg"], "#ff0000");
+    }
+
+    #[test]
+    fn blank_unstyled_cells_are_dropped_but_keep_columns_aligned() {
+        let mut blank_on_red = styled_cell(0, 1, " ");
+        blank_on_red.background = Some("#ff0000".to_string());
+
+        let lines = encode_lines(
+            1,
+            [
+                styled_cell(0, 0, "a"),
+                blank_on_red,
+                // A plain space at column 2 is invisible and dropped.
+                styled_cell(0, 2, " "),
+                styled_cell(0, 3, "b"),
+            ],
+        );
+
+        assert_eq!(lines[0].len(), 3, "{:?}", lines[0]);
+        assert_eq!(lines[0][1]["col"], 1);
+        assert_eq!(lines[0][1]["bg"], "#ff0000");
+        assert_eq!(lines[0][2]["col"], 3);
+    }
+
+    #[test]
+    fn every_row_is_present_even_when_empty() {
+        let lines = encode_lines(3, [styled_cell(1, 0, "x")]);
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].is_empty());
+        assert_eq!(lines[1][0]["text"], "x");
+        assert!(lines[2].is_empty());
+    }
+
+    #[test]
+    fn attributes_follow_the_cell_flags() {
+        let mut cell = screen_cell();
+        assert!(cell_attributes(&cell).is_empty());
+
+        cell.bold = true;
+        cell.underline = true;
+        cell.strikeout = true;
+        assert_eq!(
+            cell_attributes(&cell),
+            vec!["bold", "underline", "strikeout"]
+        );
+    }
+
+    #[test]
+    fn cursor_shapes_have_stable_names() {
+        assert_eq!(cursor_shape_name(CursorShape::Block), "block");
+        assert_eq!(cursor_shape_name(CursorShape::Bar), "bar");
+        assert_eq!(cursor_shape_name(CursorShape::Underline), "underline");
+        assert_eq!(cursor_shape_name(CursorShape::HollowBlock), "hollow");
+        assert_eq!(cursor_shape_name(CursorShape::Hidden), "hidden");
+    }
+
+    #[test]
+    fn colors_are_formatted_as_rrggbb() {
+        assert_eq!(
+            hex_color(Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 0.0,
+                a: 1.0
+            }),
+            "#000000"
+        );
+        assert_eq!(
+            hex_color(Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 1.0,
+                a: 1.0
+            }),
+            "#ffffff"
+        );
     }
 }

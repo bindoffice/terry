@@ -37,8 +37,9 @@ use windows::Win32::{Foundation::HANDLE, System::Threading::GetProcessId};
 
 use crate::{
     Cell, Color, Content, Cursor, CursorShape, Hyperlink, HyperlinkData, IndexedCell, IndexedImage,
-    Modes, Point, PtyEvent, Range, RenderableCells, Scroll, Search, Selection, SelectionRange,
-    SelectionSide, SelectionType, TerminalBackendEvent, TerminalBounds, ViMotion,
+    Modes, Point, PtyEvent, Range, RenderableCells, ScreenCell, ScreenCursor, ScreenSnapshot,
+    Scroll, Search, Selection, SelectionRange, SelectionSide, SelectionType, TerminalBackendEvent,
+    TerminalBounds, ViMotion,
     pty_info::ProcessIdGetter,
     terminal_settings::{
         AlternateScroll, CursorShape as SettingsCursorShape, SmartSelectionAction,
@@ -1169,6 +1170,82 @@ pub(super) fn make_content(term: &mut Term<ZedListener>, last_content: &Content)
         scrolled_to_top: content.display_offset == term.history_size(),
         scrolled_to_bottom: content.display_offset == 0,
         bottom_row_occupied,
+    }
+}
+
+/// Builds a viewport snapshot for out-of-process clients.
+///
+/// Unlike [`make_content`], this reads the live grid and keeps every cell,
+/// blank ones included, so a client can rebuild an exact grid.
+pub(super) fn make_screen_snapshot(term: &Term<ZedListener>) -> ScreenSnapshot {
+    let content = term.renderable_content();
+    let rows = term.screen_lines();
+    let columns = term.grid().columns();
+
+    let mut cells = Vec::with_capacity(content.display_iter.size_hint().0);
+
+    // `display_iter` walks the visible grid top to bottom, but line numbers are
+    // absolute and go negative while scrolled back, so the viewport row comes
+    // from the order the lines are yielded in.
+    let mut current_line: Option<Line> = None;
+    let mut row = 0;
+    let mut first_line: Option<Line> = None;
+
+    for indexed in content.display_iter {
+        if current_line != Some(indexed.point.line) {
+            if current_line.is_some() {
+                row += 1;
+            }
+            current_line = Some(indexed.point.line);
+            first_line.get_or_insert(indexed.point.line);
+        }
+
+        let cell = &indexed.cell;
+        let mut text = String::new();
+        text.push(cell.c);
+        if let Some(zerowidth) = cell.zerowidth() {
+            text.extend(zerowidth.iter().copied());
+        }
+
+        cells.push(ScreenCell {
+            row,
+            column: indexed.point.column.0,
+            text,
+            foreground: cell.fg,
+            background: cell.bg,
+            bold: cell.flags.contains(Flags::BOLD),
+            italic: cell.flags.contains(Flags::ITALIC),
+            underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+            undercurl: cell.flags.contains(Flags::UNDERCURL),
+            strikeout: cell.flags.contains(Flags::STRIKEOUT),
+            dim: cell.flags.contains(Flags::DIM),
+            inverse: cell.flags.contains(Flags::INVERSE),
+            wide_char_spacer: cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
+        });
+    }
+
+    let cursor = first_line.and_then(|first_line| {
+        let cursor = content.cursor;
+        let cursor_row = cursor.point.line.0 - first_line.0;
+        (0..rows as i32)
+            .contains(&cursor_row)
+            .then(|| ScreenCursor {
+                row: cursor_row as usize,
+                column: cursor.point.column.0,
+                shape: terminal_cursor_shape_from_alacritty(cursor.shape),
+                visible: content.mode.contains(TermMode::SHOW_CURSOR),
+            })
+    });
+
+    ScreenSnapshot {
+        rows,
+        columns,
+        cursor,
+        alternate_screen: content.mode.contains(TermMode::ALT_SCREEN),
+        display_offset: content.display_offset,
+        cells,
     }
 }
 

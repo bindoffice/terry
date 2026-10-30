@@ -17,6 +17,7 @@ mod move_to_window;
 mod persistent_sessions;
 mod process_inspector;
 mod quake_terminal;
+mod remote_control;
 mod remote_hosts;
 mod resource_usage;
 mod scrollback_export;
@@ -141,7 +142,8 @@ fn main() {
     // channel because the gpui AsyncApp is not Send.
     let (ipc_requests_tx, ipc_requests_rx) =
         futures::channel::mpsc::unbounded::<session::ipc_server::IpcRequest>();
-    let (ipc_port, ipc_token) = session::ipc_server::start_ipc_server(ipc_requests_tx).unwrap();
+    let (ipc_port, ipc_token) =
+        session::ipc_server::start_ipc_server(ipc_requests_tx.clone()).unwrap();
     let ipc_info = serde_json::json!({
         "port": ipc_port,
         "token": ipc_token,
@@ -319,6 +321,9 @@ fn main() {
 
         // Apply IPC requests (new-tab / send-text) arriving from CLI clients.
         ipc::init(ipc_requests_rx, cx);
+        // Paired devices (phone, tablet) talk to the same request channel over
+        // a separate, network-reachable listener.
+        remote_control::init(cx, ipc_requests_tx);
 
         theme_settings::init(LoadThemes::All(Box::new(Assets)), cx);
         // The default keymap binds cmd+= / cmd+- / cmd+0 to these actions, but

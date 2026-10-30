@@ -914,6 +914,7 @@ impl VsCodeSettings {
             color_scheme: None,
             default_profile: None,
             profiles: None,
+            remote_control: None,
             cursor_shape: self.read_enum("terminal.integrated.cursorStyle", |s| match s {
                 "block" => Some(CursorShapeContent::Block),
                 "line" => Some(CursorShapeContent::Bar),

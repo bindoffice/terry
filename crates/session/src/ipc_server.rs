@@ -52,6 +52,9 @@ pub enum IpcRequestKind {
         terminal_id: Option<u64>,
         lines: Option<u32>,
     },
+    /// Read the visible screen with per-cell styling and the cursor position,
+    /// so a client can repaint the terminal as the app draws it.
+    Screen { terminal_id: Option<u64> },
     /// Report the active (or requested) terminal's title, cwd, and command.
     GetContext { terminal_id: Option<u64> },
     /// Post an OS notification.
@@ -171,7 +174,65 @@ pub fn start_ipc_server(
         requests,
     };
 
-    // Every route below requires the bearer token persisted in ipc.json.
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+
+    serve(listener, build_router(state), None);
+
+    Ok((port, token))
+}
+
+/// A remote-control listener bound to a fixed address and port.
+///
+/// Dropping the handle, or calling [`RemoteServer::shutdown`], stops the
+/// listener; connections that are already open are not interrupted.
+pub struct RemoteServer {
+    port: u16,
+    shutdown: Option<oneshot::Sender<()>>,
+}
+
+impl RemoteServer {
+    /// The port the listener actually bound to.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn shutdown(mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+    }
+}
+
+/// Starts a second listener, reachable from other devices, for companion apps
+/// such as a phone or tablet client.
+///
+/// It serves the same routes and feeds the same request channel as the loopback
+/// server, but authenticates with a long-lived token so a paired device keeps
+/// working across restarts. Pass port `0` to let the OS choose one (handy in
+/// tests).
+pub fn start_remote_server(
+    requests: mpsc::UnboundedSender<IpcRequest>,
+    bind: &str,
+    port: u16,
+    token: String,
+) -> Result<RemoteServer, String> {
+    let state = IpcState { token, requests };
+    let listener = TcpListener::bind((bind, port))
+        .map_err(|error| format!("failed to listen on {bind}:{port}: {error}"))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    serve(listener, build_router(state), Some(shutdown_rx));
+
+    Ok(RemoteServer {
+        port,
+        shutdown: Some(shutdown_tx),
+    })
+}
+
+/// Every route below requires the bearer token carried by `state`.
+fn build_router(state: IpcState) -> Router {
     let protected = Router::new()
         .route("/api/new_tab", post(new_tab))
         .route("/api/send_text", post(send_text))
@@ -180,6 +241,7 @@ pub fn start_ipc_server(
         .route("/api/focus_session", post(focus_session))
         .route("/api/send_keys", post(send_keys))
         .route("/api/read_screen", post(read_screen))
+        .route("/api/screen", post(screen))
         .route("/api/get_context", post(get_context))
         .route("/api/notify", post(notify))
         .route("/api/close_session", post(close_session))
@@ -220,26 +282,46 @@ pub fn start_ipc_server(
             require_bearer_auth,
         ));
 
-    let app = protected
+    protected
         .route("/api/health", post(|| async { "OK" }))
-        .with_state(state);
+        .with_state(state)
+}
 
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-
+/// Serves `app` on `listener` from a dedicated thread + tokio runtime.
+///
+/// When `shutdown` is given, it is awaited as the server's graceful-shutdown
+/// signal, so dropping the matching sender stops the listener.
+fn serve(listener: TcpListener, app: Router, shutdown: Option<oneshot::Receiver<()>>) {
     listener.set_nonblocking(true).unwrap();
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            let tokio_listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            if let Err(error) = axum::serve(tokio_listener, app).await {
+            let listener = match tokio::net::TcpListener::from_std(listener) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    eprintln!("terry ipc server: {error}");
+                    return;
+                }
+            };
+
+            let server = axum::serve(listener, app);
+            let result = match shutdown {
+                Some(shutdown) => {
+                    server
+                        .with_graceful_shutdown(async move {
+                            let _ = shutdown.await;
+                        })
+                        .await
+                }
+                None => server.await,
+            };
+
+            if let Err(error) = result {
                 eprintln!("terry ipc server stopped: {error}");
             }
         });
     });
-
-    Ok((port, token))
 }
 
 async fn require_bearer_auth(
@@ -390,6 +472,20 @@ async fn read_screen(State(state): State<IpcState>, body: String) -> Response {
                 .get("lines")
                 .and_then(parse_u64_value)
                 .map(|lines| lines.min(u32::MAX as u64) as u32),
+        },
+    )
+    .await
+}
+
+async fn screen(State(state): State<IpcState>, body: String) -> Response {
+    let payload = match parse_body(&body) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+    dispatch(
+        state,
+        IpcRequestKind::Screen {
+            terminal_id: parse_terminal_id(&payload),
         },
     )
     .await
@@ -1371,6 +1467,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_server_authenticates_with_its_own_token() {
+        let (tx, mut requests) = mpsc::unbounded();
+        let server = start_remote_server(tx, "127.0.0.1", 0, "paired-token".to_string())
+            .expect("remote server starts");
+        let port = server.port();
+
+        // Reachability check for clients: health stays public.
+        let (status, _) = post(port, "/api/health", None, "").await;
+        assert_eq!(status, 200);
+
+        let (status, _) = post(port, "/api/new_tab", Some("wrong-token"), "{}").await;
+        assert_eq!(status, 401);
+
+        let http = post(port, "/api/new_tab", Some("paired-token"), "{}");
+        let app_side = async {
+            let request = tokio::time::timeout(Duration::from_secs(5), requests.next())
+                .await
+                .expect("ipc request never arrived")
+                .expect("ipc channel closed");
+            assert!(matches!(request.kind, IpcRequestKind::NewTab { .. }));
+            request.reply.send(Ok(json!({ "status": "ok" }))).ok();
+        };
+
+        let ((status, _), _) = tokio::join!(http, app_side);
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn remote_server_shutdown_stops_the_listener() {
+        let (tx, _requests) = mpsc::unbounded();
+        let server = start_remote_server(tx, "127.0.0.1", 0, "paired-token".to_string())
+            .expect("remote server starts");
+        let port = server.port();
+
+        server.shutdown();
+
+        // The listener socket is released, so a new bind on the same port works.
+        for _ in 0..50 {
+            if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("port {port} is still bound after shutdown");
+    }
+
+    #[tokio::test]
     async fn new_tab_is_forwarded_to_the_app() {
         let TestServer {
             port,
@@ -1860,6 +2003,37 @@ mod tests {
             request
                 .reply
                 .send(Ok(json!({ "terminal_id": 1, "content": "" })))
+                .ok();
+        };
+
+        let ((status, _), _) = tokio::join!(http, app_side);
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn screen_forwards_terminal_id() {
+        let TestServer {
+            port,
+            token,
+            requests,
+        } = spawn_server();
+        let mut requests = requests;
+
+        let http = post(port, "/api/screen", Some(&token), r#"{"terminal_id":4}"#);
+        let app_side = async {
+            let request = tokio::time::timeout(Duration::from_secs(5), requests.next())
+                .await
+                .expect("ipc request never arrived")
+                .expect("ipc channel closed");
+            match request.kind {
+                IpcRequestKind::Screen { terminal_id } => {
+                    assert_eq!(terminal_id, Some(4));
+                }
+                other => panic!("expected Screen, got {other:?}"),
+            }
+            request
+                .reply
+                .send(Ok(json!({ "rows": 24, "cols": 80, "lines": [] })))
                 .ok();
         };
 

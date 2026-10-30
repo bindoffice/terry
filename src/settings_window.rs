@@ -1,8 +1,8 @@
 use fs::Fs;
 use gpui::{
-    Action, AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement,
-    ParentElement, Render, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, div,
-    img, px,
+    Action, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle,
+    Focusable, IntoElement, ParentElement, Render, SharedString, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, div, img, px,
 };
 use platform_title_bar::PlatformTitleBar;
 use settings::{Settings, SettingsStore, UiLanguage, update_settings_file};
@@ -1002,6 +1002,119 @@ impl SettingsWindow {
                     )
                     .into_any_element(),
             ))
+            .child(self.render_remote_control_section(cx))
+            .into_any_element()
+    }
+
+    /// Remote-control endpoint: the switch plus the pairing details a client
+    /// needs (endpoint URLs and the shared bearer token).
+    fn render_remote_control_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let status = crate::remote_control::status(cx);
+
+        let mut details = v_flex().gap_2();
+
+        if let Some(error) = status.error.clone() {
+            details = details.child(
+                Label::new(format!("{}: {error}", i18n::t("remote_control_error")))
+                    .size(LabelSize::Small)
+                    .color(Color::Error),
+            );
+        }
+
+        if status.enabled {
+            details = details.child(
+                Label::new(i18n::t("remote_control_pairing_hint"))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            );
+
+            for url in status.urls.iter().cloned() {
+                let copy_target = url.clone();
+                details = details.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(Label::new(url.clone()).size(LabelSize::Small))
+                        .child(
+                            Button::new(
+                                SharedString::from(format!("copy-remote-url-{url}")),
+                                i18n::t("copy"),
+                            )
+                            .style(ButtonStyle::Outlined)
+                            .size(ButtonSize::Compact)
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    copy_target.clone(),
+                                ));
+                            }),
+                        ),
+                );
+            }
+
+            if !status.token.is_empty() {
+                let token = status.token.clone();
+                details = details.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            Label::new(format!(
+                                "{}: {}",
+                                i18n::t("remote_control_token"),
+                                status.token
+                            ))
+                            .size(LabelSize::Small),
+                        )
+                        .child(
+                            Button::new("copy-remote-token", i18n::t("copy"))
+                                .style(ButtonStyle::Outlined)
+                                .size(ButtonSize::Compact)
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(token.clone()));
+                                }),
+                        )
+                        .child(
+                            Button::new("rotate-remote-token", i18n::t("remote_control_rotate"))
+                                .style(ButtonStyle::Outlined)
+                                .size(ButtonSize::Compact)
+                                .on_click(|_, _, cx| {
+                                    crate::remote_control::rotate_token(cx);
+                                }),
+                        ),
+                );
+            }
+        }
+
+        v_flex()
+            .gap_2()
+            .child(settings_section(
+                i18n::t("remote_control"),
+                i18n::t("remote_control_description"),
+                Switch::new(
+                    "remote-control",
+                    if status.enabled {
+                        ToggleState::Selected
+                    } else {
+                        ToggleState::Unselected
+                    },
+                )
+                .label(i18n::t("remote_control"))
+                .on_click(|state, _window, cx| {
+                    let enabled = *state == ToggleState::Selected;
+                    let fs = <dyn Fs>::global(cx);
+                    update_settings_file(fs, cx, move |content, _| {
+                        content
+                            .terminal
+                            .get_or_insert_default()
+                            .remote_control
+                            .get_or_insert_default()
+                            .enabled = Some(enabled);
+                    });
+                    crate::remote_control::set_enabled(cx, enabled);
+                })
+                .into_any_element(),
+            ))
+            .child(details)
             .into_any_element()
     }
 

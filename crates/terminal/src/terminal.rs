@@ -79,8 +79,8 @@ use crate::alacritty::{
     display_offset, display_only_term_config, find_all_visible_links, find_from_terminal_point,
     full_content_range, last_command_input_text, last_command_output_range,
     last_command_output_text, last_non_empty_lines, last_prompt_mark as last_term_prompt_mark,
-    make_content, new_term, open_pty, prompt_marks as term_prompt_marks, pty_options,
-    pty_term_config, resize, screen_lines, scroll_display, scroll_to_point,
+    make_content, make_screen_snapshot, new_term, open_pty, prompt_marks as term_prompt_marks,
+    pty_options, pty_term_config, resize, screen_lines, scroll_display, scroll_to_point,
     scroll_to_point_aligned, search_matches, selection_text, set_default_cursor_style,
     set_selection as set_term_selection, set_text_options, shrink_to_used, smart_selection_range,
     spawn_event_loop, synchronized_updates, toggle_vi_mode as toggle_term_vi_mode, total_lines,
@@ -595,6 +595,57 @@ pub struct HoveredWord {
     pub word: String,
     pub word_match: Range,
     pub id: usize,
+}
+
+/// One cell of the visible screen, with enough styling for an out-of-process
+/// client to repaint it (the terminal's own renderer uses the same data).
+///
+/// Colors are unresolved ANSI values; callers that draw outside the app (for
+/// example the `/api/screen` IPC endpoint) resolve them against the theme.
+#[derive(Clone, Debug)]
+pub struct ScreenCell {
+    /// Row inside the viewport, `0` at the top, independent of scrollback.
+    pub row: usize,
+    /// Column inside the viewport.
+    pub column: usize,
+    /// The cell's text: its character plus any zero-width combiners.
+    pub text: String,
+    pub foreground: Color,
+    pub background: Color,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub undercurl: bool,
+    pub strikeout: bool,
+    pub dim: bool,
+    pub inverse: bool,
+    /// This cell only holds the trailing half of a wide character.
+    pub wide_char_spacer: bool,
+}
+
+/// A snapshot of the visible screen, for clients that repaint the terminal
+/// outside the app.
+#[derive(Clone, Debug)]
+pub struct ScreenSnapshot {
+    pub rows: usize,
+    pub columns: usize,
+    /// Viewport-relative cursor, `None` when it is not on screen (for example
+    /// while the viewport is scrolled back into the history).
+    pub cursor: Option<ScreenCursor>,
+    pub alternate_screen: bool,
+    /// How far the viewport is scrolled back into the scrollback history.
+    pub display_offset: usize,
+    /// Cells in row-major order, one entry per grid cell.
+    pub cells: Vec<ScreenCell>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScreenCursor {
+    pub row: usize,
+    pub column: usize,
+    pub shape: CursorShape,
+    /// Whether the terminal asked for the cursor to be drawn (`DECTCEM`).
+    pub visible: bool,
 }
 
 impl Default for Content {
@@ -2776,6 +2827,14 @@ impl Terminal {
         let term = self.term.lock_unfair();
         let content = term.renderable_content();
         f(RenderableCells::new(content.display_iter))
+    }
+
+    /// Snapshot of the visible screen (styled cells, cursor, size) for clients
+    /// that repaint the terminal outside the app, such as the `/api/screen`
+    /// IPC endpoint.
+    pub fn screen_snapshot(&self) -> ScreenSnapshot {
+        let term = self.term.lock_unfair();
+        make_screen_snapshot(&term)
     }
 
     pub fn get_content(&self) -> String {
@@ -6120,6 +6179,65 @@ mod tests {
 
         let clipboard_text = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
         assert_eq!(clipboard_text.as_deref(), Some("original"));
+    }
+
+    #[gpui::test]
+    async fn screen_snapshot_reports_styled_cells_and_cursor(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only_with_bounds(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+                // 20 columns × 10 lines.
+                TerminalBounds::new(
+                    px(10.0),
+                    px(10.0),
+                    bounds(point(px(0.0), px(0.0)), size(px(200.0), px(100.0))),
+                ),
+            )
+            .subscribe(cx)
+        });
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b[1;31mhello", cx);
+        });
+        cx.run_until_parked();
+
+        let snapshot = terminal.update(cx, |terminal, _cx| terminal.screen_snapshot());
+
+        assert_eq!(snapshot.columns, 20);
+        assert_eq!(snapshot.rows, 10);
+        assert!(!snapshot.alternate_screen);
+        assert_eq!(snapshot.display_offset, 0);
+
+        let first_row: String = snapshot
+            .cells
+            .iter()
+            .filter(|cell| cell.row == 0)
+            .map(|cell| cell.text.as_str())
+            .collect();
+        assert!(first_row.starts_with("hello"), "row 0: {first_row:?}");
+
+        let bold_cell = &snapshot.cells[0];
+        assert_eq!(bold_cell.text, "h");
+        assert!(bold_cell.bold, "SGR 1 must be reported");
+        assert!(
+            bold_cell.foreground != snapshot.cells[10].foreground,
+            "SGR 31 must change the foreground away from the default"
+        );
+        assert!(!snapshot.cells[10].bold);
+
+        let cursor = snapshot.cursor.expect("the cursor is on screen");
+        assert_eq!(cursor.row, 0);
+        assert_eq!(cursor.column, 5);
     }
 
     #[gpui::test]

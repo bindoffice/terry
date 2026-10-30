@@ -106,6 +106,7 @@ The same bearer-protected loopback server also accepts JSON requests:
 - `/api/send_text` — paste text into `terminal_id` (defaults to the active terminal) without executing it
 - `/api/run` — paste text and optionally press Enter (`"enter": false` to skip)
 - `/api/read_screen` — read a terminal's content as plain text (`lines` limits it to the last N non-empty lines)
+- `/api/screen` — read the visible screen as styled cells: colors, bold/italic/underline attributes, cursor position and shape, and the grid size
 - `/api/get_context` — active terminal title, cwd, group, command, and detected agent state
 - `/api/close_session` — close a terminal without prompting (or the active one when no id is given)
 - `/api/detach_session`, `/api/reattach_session`, `/api/list_detached` — keep a terminal alive outside a group and attach it again later
@@ -123,6 +124,71 @@ The same bearer-protected loopback server also accepts JSON requests:
 - `/api/wait_for_output` — block until recent terminal output matches `match` (substring) or `regex`; `tail_lines` bounds the search (`0` = whole buffer)
 - `/api/events` — SSE stream of `snapshot`, `agent_state`, `terminal_added`, and `terminal_removed` events
 - `/api/new_tab`, `/api/send_text`, `/api/focus`, `/api/new_window`
+
+### Remote control (phone / tablet)
+
+The automation API above binds loopback only and mints a new token on every
+launch, so nothing outside this machine can use it. To let a phone or tablet
+drive this instance, turn on the second listener:
+
+```json
+{
+  "terminal": {
+    "remote_control": {
+      "enabled": true,
+      "bind": "0.0.0.0",
+      "port": 47823
+    }
+  }
+}
+```
+
+Settings → Terminal → Remote Control then lists the addresses and the access
+token to enter in the client. The token lives in the data directory as
+`remote-token` (mode `0600`, created on first use) and survives restarts, so you
+pair once; “Regenerate Token” invalidates every paired device at once.
+
+The endpoint is **plain HTTP with a bearer token**, which amounts to remote
+command execution, so only expose it on a private network:
+
+- **Tailscale / WireGuard** (recommended): join the phone to the same tailnet and
+  use `http://<this machine's tailnet IP>:47823`. The settings page lists the
+  addresses it can discover.
+- **Loopback plus `tailscale serve`**: keep `bind` at `127.0.0.1` and run
+  `tailscale serve --bg http://127.0.0.1:47823`, letting Tailscale terminate TLS
+  on a `*.ts.net` name.
+- Never forward the port to the public internet.
+
+Smoke test (replace `<address>` and `<token>` with the values from settings):
+
+```sh
+curl -s -X POST http://<address>:47823/api/list_sessions \
+  -H 'Authorization: Bearer <token>' -d '{}'
+```
+
+`/api/screen` returns one frame of the viewport that a client can repaint
+directly:
+
+```json
+{
+  "terminal_id": 3, "rows": 24, "cols": 80,
+  "alternate_screen": false, "display_offset": 0,
+  "default_fg": "#d4d4d4", "default_bg": "#1e1e1e",
+  "cursor": { "row": 4, "col": 10, "shape": "block", "visible": true },
+  "lines": [
+    [ { "col": 0, "text": "❯ ls", "fg": "#50fa7b", "attrs": ["bold"] } ]
+  ]
+}
+```
+
+Each `lines` entry is one row made of styled runs positioned by their start
+column (`col`); blank cells with no styling are dropped, a missing `fg`/`bg`
+means `default_fg`/`default_bg`, and reverse video is already swapped by the
+server. Wide characters (CJK, emoji) occupy two columns and their trailing
+spacer cells are skipped.
+
+The original loopback listener is unaffected: the `terry` CLI, kittens, and the
+MCP server keep working exactly as before.
 
 ## Command output
 

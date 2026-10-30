@@ -132,6 +132,18 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
                 "persistent_sessions_detached_notice",
                 "This terminal keeps running in the background. Reopen it with \"Reopen Closed Terminal\", or end it with `terry daemon kill`.",
             );
+            m.insert("remote_control", "Remote Control");
+            m.insert(
+                "remote_control_description",
+                "Let a phone or tablet drive this Terry instance over the network. The endpoint serves the same automation API as the local CLI and requires the access token below.",
+            );
+            m.insert(
+                "remote_control_pairing_hint",
+                "Open one of these addresses on the paired device and connect with the access token. Keep this on a private network — Tailscale, WireGuard, or your LAN — and never expose it to the open internet.",
+            );
+            m.insert("remote_control_token", "Access token");
+            m.insert("remote_control_rotate", "Regenerate Token");
+            m.insert("remote_control_error", "Remote control could not start");
             m.insert("clipboard_read", "Allow Clipboard Read (OSC 52)");
             m.insert(
                 "clipboard_read_description",
@@ -625,6 +637,18 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
                 "persistent_sessions_detached_notice",
                 "该终端已在后台继续运行。可以用「重新打开已关闭的终端」恢复，或用 `terry daemon kill` 结束它。",
             );
+            m.insert("remote_control", "远程控制");
+            m.insert(
+                "remote_control_description",
+                "允许手机或平板通过网络控制这个 Terry 实例。该端提供与本地 CLI 相同的自动化 API，并需要下方的访问令牌。",
+            );
+            m.insert(
+                "remote_control_pairing_hint",
+                "在已配对的设备上打开下面的地址，并用访问令牌连接。请只在私有网络（Tailscale、WireGuard 或局域网）中启用，不要暴露到公网。",
+            );
+            m.insert("remote_control_token", "访问令牌");
+            m.insert("remote_control_rotate", "重新生成令牌");
+            m.insert("remote_control_error", "远程控制启动失败");
             m.insert("clipboard_read", "允许读取剪贴板（OSC 52）");
             m.insert(
                 "clipboard_read_description",

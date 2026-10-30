@@ -20,6 +20,9 @@ use theme_settings::FontFamilyName;
 /// `max_scroll_limit + lines` arithmetic from overflowing.
 pub(crate) const UNLIMITED_SCROLL_HISTORY_LINES: usize = 10_000_000;
 
+/// Default port for the remote-control endpoint.
+pub const DEFAULT_REMOTE_CONTROL_PORT: u16 = 47823;
+
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct Toolbar {
     pub breadcrumbs: bool,
@@ -169,6 +172,14 @@ pub struct TerminalProfile {
     pub color_scheme: Option<String>,
 }
 
+/// Remote-control endpoint exposed to companion clients (phone, tablet).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct RemoteControlSettings {
+    pub enabled: bool,
+    pub bind: String,
+    pub port: u16,
+}
+
 #[derive(Clone, Debug, Deserialize, RegisterSetting)]
 pub struct TerminalSettings {
     pub shell: Shell,
@@ -256,6 +267,7 @@ pub struct TerminalSettings {
     pub profiles: Vec<TerminalProfile>,
     /// Profile used for new terminals, if any.
     pub default_profile: Option<String>,
+    pub remote_control: RemoteControlSettings,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -409,6 +421,17 @@ impl settings::Settings for TerminalSettings {
                 })
                 .collect(),
             default_profile: user_content.default_profile,
+            remote_control: {
+                let content = user_content.remote_control.unwrap_or_default();
+                RemoteControlSettings {
+                    enabled: content.enabled.unwrap_or(false),
+                    bind: content
+                        .bind
+                        .filter(|bind| !bind.trim().is_empty())
+                        .unwrap_or_else(|| "0.0.0.0".to_string()),
+                    port: content.port.unwrap_or(DEFAULT_REMOTE_CONTROL_PORT),
+                }
+            },
         }
     }
 }

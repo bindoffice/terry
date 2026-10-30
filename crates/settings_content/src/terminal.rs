@@ -369,6 +369,41 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: null
     pub default_profile: Option<String>,
+    /// Remote-control HTTP endpoint that companion clients (phone, tablet) can
+    /// drive this Terry instance through. It offers the same automation API as
+    /// the local CLI.
+    ///
+    /// The endpoint speaks plain HTTP and is protected by a bearer token kept
+    /// in the data directory (`remote-token`), so only enable it on a network
+    /// you trust: Tailscale, WireGuard, or your own LAN.
+    ///
+    /// Default: disabled
+    pub remote_control: Option<RemoteControlSettingsContent>,
+}
+
+/// Settings for the remote-control endpoint that companion apps drive Terry
+/// through.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct RemoteControlSettingsContent {
+    /// Listen for remote clients on `bind`:`port`.
+    ///
+    /// The listener speaks plain HTTP, so reachability is expected to come from
+    /// the network layer (a tailnet, WireGuard, or the LAN). Every request must
+    /// carry the bearer token from the data directory's `remote-token` file.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
+    /// Address to bind. Use `0.0.0.0` to accept connections from every
+    /// interface, which is what a phone on the same LAN or tailnet needs. Bind
+    /// a specific address (for example the machine's Tailscale IP) to limit
+    /// exposure.
+    ///
+    /// Default: "0.0.0.0"
+    pub bind: Option<String>,
+    /// Port to listen on.
+    ///
+    /// Default: 47823
+    pub port: Option<u16>,
 }
 
 /// Shell configuration to open the terminal with.
