@@ -2163,6 +2163,12 @@ impl Terminal {
         self.output_processor.advance(&mut *term, &converted);
         drop(term);
         self.detect_init_command_startup_marker();
+        // `sync` rebuilds the painted `last_content` only when the content is
+        // dirty, and the PTY event loop is what normally sets that flag. Output
+        // fed straight into the emulator has to mark it here, or a terminal
+        // driven by the daemon (or any other display-only source) would keep
+        // painting its stale snapshot until the next keystroke or resize.
+        self.content_dirty = true;
         cx.emit(Event::Wakeup);
     }
 
@@ -5638,6 +5644,51 @@ mod tests {
 
         assert!(line1_col0, "First line should start at column 0");
         assert!(line2_col0, "Second line should start at column 0");
+    }
+
+    #[gpui::test]
+    async fn test_write_output_refreshes_painted_content(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| {
+            TerminalBuilder::new_display_only_with_bounds(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+                TerminalBounds::new(
+                    px(10.0),
+                    px(10.0),
+                    bounds(point(px(0.0), px(0.0)), size(px(400.0), px(400.0))),
+                ),
+            )
+            .subscribe(cx)
+        });
+
+        // The first frame syncs the initial snapshot and clears the dirty flag.
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.write_output(b"before\r\n", cx);
+            terminal.sync(window, cx);
+            assert_eq!(terminal.last_content.cursor.point.line, 1);
+        });
+
+        // Output that arrives with no keyboard input or resize still has to reach
+        // `last_content`, which is what the view paints. Without this, terminals
+        // backed by the daemon look frozen between keystrokes.
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.write_output(b"after\r\n", cx);
+            terminal.sync(window, cx);
+            assert_eq!(
+                terminal.last_content.cursor.point.line, 2,
+                "new output should update the painted snapshot",
+            );
+        });
     }
 
     #[gpui::test]
