@@ -3375,7 +3375,24 @@ impl Terminal {
             // directory it reports via `OSC 7` (if any).
             self.osc7_cwd.clone()
         } else {
+            // Display-only terminals (daemon-backed sessions, tmux mirrors)
+            // have no local process to inspect, so fall back to the directory
+            // the shell reported via `OSC 7`.
             self.client_side_working_directory()
+                .or_else(|| self.osc7_cwd.clone())
+        }
+    }
+
+    /// Seeds the working directory before the shell reports one via `OSC 7`,
+    /// e.g. the directory a daemon-backed session was spawned in.
+    ///
+    /// Ignored once the shell has reported a directory of its own.
+    pub fn set_initial_working_directory(&mut self, cwd: Option<PathBuf>, cx: &mut Context<Self>) {
+        if self.osc7_cwd.is_none()
+            && let Some(cwd) = cwd.filter(|cwd| !cwd.as_os_str().is_empty())
+        {
+            self.osc7_cwd = Some(cwd);
+            cx.emit(Event::CwdChanged);
         }
     }
 
@@ -3402,7 +3419,9 @@ impl Terminal {
         }
         match &self.terminal_type {
             TerminalType::Pty { info, .. } => info.latest_cwd(),
-            TerminalType::DisplayOnly => None,
+            // No process to inspect: the last directory the shell reported is
+            // the freshest one available.
+            TerminalType::DisplayOnly => self.osc7_cwd.clone(),
         }
     }
 
@@ -3526,7 +3545,20 @@ impl Terminal {
                             format!("{process_file} — {process_name}")
                         })
                         .unwrap_or_else(|| "Terminal".to_string()),
-                    TerminalType::DisplayOnly => "Terminal".to_string(),
+                    TerminalType::DisplayOnly => self
+                        .osc7_cwd
+                        .as_ref()
+                        .and_then(|cwd| cwd.file_name())
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .filter(|name| !name.is_empty())
+                        .map(|name| {
+                            if truncate {
+                                truncate_and_trailoff(&name, MAX_CHARS)
+                            } else {
+                                name
+                            }
+                        })
+                        .unwrap_or_else(|| "Terminal".to_string()),
                 }),
         }
     }
@@ -6088,6 +6120,128 @@ mod tests {
 
         let clipboard_text = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
         assert_eq!(clipboard_text.as_deref(), Some("original"));
+    }
+
+    #[gpui::test]
+    async fn test_display_only_terminal_tracks_osc7_working_directory(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        // Daemon-backed sessions are display-only, so the directory the shell
+        // reports via OSC 7 is the only source for the tab/sidebar name. It used
+        // to be ignored, leaving every terminal labelled "Terminal".
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]7;file:///work/terry\x07", cx);
+        });
+        cx.run_until_parked();
+
+        terminal.update(cx, |terminal, _cx| {
+            assert_eq!(
+                terminal.working_directory(),
+                Some(PathBuf::from("/work/terry"))
+            );
+            assert_eq!(terminal.title(true), "terry");
+        });
+    }
+
+    #[gpui::test]
+    async fn test_display_only_terminal_seeds_initial_working_directory(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.set_initial_working_directory(Some(PathBuf::from("/work/terry")), cx);
+        });
+        terminal.update(cx, |terminal, _cx| {
+            assert_eq!(
+                terminal.working_directory(),
+                Some(PathBuf::from("/work/terry"))
+            );
+            assert_eq!(terminal.title(true), "terry");
+        });
+
+        // Once the shell reports its own directory, that wins.
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]7;file:///work/other\x07", cx);
+        });
+        cx.run_until_parked();
+        terminal.update(cx, |terminal, _cx| {
+            assert_eq!(
+                terminal.working_directory(),
+                Some(PathBuf::from("/work/other"))
+            );
+            assert_eq!(terminal.title(true), "other");
+        });
+    }
+
+    #[gpui::test]
+    async fn test_display_only_terminal_title_falls_back_and_truncates(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        // Editor previews and other plain display-only terminals keep the old
+        // label, since nothing ever reports a directory for them.
+        terminal.update(cx, |terminal, _cx| {
+            assert_eq!(terminal.working_directory(), None);
+            assert_eq!(terminal.title(true), "Terminal");
+            assert_eq!(terminal.title(false), "Terminal");
+        });
+
+        let directory = "abcdefghijklmnopqrstuvwxyz0123";
+        let output = format!("\x1b]7;file:///work/{directory}\x07");
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(output.as_bytes(), cx);
+        });
+        cx.run_until_parked();
+
+        terminal.update(cx, |terminal, _cx| {
+            assert_eq!(terminal.title(false), directory);
+            let truncated = terminal.title(true);
+            assert_eq!(truncated, format!("{}…", &directory[..25]));
+            assert_eq!(truncated.chars().count(), 26);
+        });
     }
 
     #[gpui::test]
