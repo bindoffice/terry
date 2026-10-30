@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Terry — 终端优先的 AI 工作区</title>
+    <title>Terry — 终端工作区与 AI Agent</title>
     <meta
       name="description"
-      content="Terry 是以终端为中心的桌面工作区，内置 AI Agent。分组终端、文件面板与可配置 Agent，专注命令行与智能体工作流。"
+      content="Terry 把终端变成工作区：分组与平铺终端、SSH/tmux、Shell 集成、远程控制、配色库与可配置 AI Agent。"
     />
     <link rel="icon" href="assets/icon.png" type="image/png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -27,20 +27,19 @@
       </a>
       <div class="header-actions">
         <nav class="site-nav" data-i18n-aria="navAria" aria-label="主导航">
-          <a href="#workspace" data-i18n="navWorkspace">Workspace</a>
-          <a href="#naming" data-i18n="navNaming">Naming</a>
-          <a href="#split" data-i18n="navSplit">Split</a>
-          <a href="#performance" data-i18n="navPerformance">Performance</a>
-          <a href="#themes" data-i18n="navThemes">Themes</a>
+          <a href="#workspace" data-i18n="navWorkspace">工作区</a>
+          <a href="#sessions" data-i18n="navSessions">会话</a>
+          <a href="#terminal" data-i18n="navTerminal">终端</a>
           <a href="#agent" data-i18n="navAgent">Agent</a>
-          <a href="#download" data-i18n="navDownload">Download</a>
+          <a href="#cli" data-i18n="navCli">CLI</a>
+          <a href="#download" data-i18n="navDownload">下载</a>
           <a
             class="nav-external"
             href="https://bindoffice.com"
             target="_blank"
             rel="noopener noreferrer"
             data-i18n="navBindoffice"
-            >BindOffice</a
+            >官网</a
           >
           <a
             class="nav-external"
@@ -65,10 +64,10 @@
             <span class="brand-rule" aria-hidden="true"></span>
             <p class="brand-aside" data-i18n="brandAside">和 Tom &amp; Jerry 无关</p>
           </div>
-          <h1 data-i18n="heroTitle">终端在前，Agent 在侧。</h1>
+          <h1 data-i18n="heroTitle">终端就是工作区。</h1>
           <p class="lede" data-i18n="heroLede">
-            以终端为中心的桌面工作区。分组会话、项目文件与可配置 AI
-            Agent，专注命令行与智能体工作流——不是又一个完整 IDE。
+            分组终端、自动平铺、SSH 与 tmux、脚本化控制，再加上一个能显示工作状态的 AI
+            Agent——为长期生活在命令行里的人打造。
           </p>
           <div class="cta-row">
             <a class="btn btn-primary" href="#download" data-i18n="ctaGet">获取 Terry</a>
@@ -98,19 +97,22 @@
               </aside>
               <div class="product-terminal">
                 <pre class="term-lines">
-<span class="prompt">❯</span> cargo build --release
-   Compiling terry v0.1.0
-    Finished release in 42.18s
-<span class="prompt">❯</span> ./target/release/terry
+<span class="prompt">❯</span> terry new-tab --cwd ~/src
+<span class="prompt">❯</span> terry agents
+<span class="state-working">working</span>  3  claude   ~/dev/api
+<span class="state-blocked">blocked</span>  7  codex    ~/dev/web
+<span class="prompt">❯</span> terry wait --state blocked
 <span class="cursor"></span>
 </pre>
               </div>
               <aside class="product-agent">
                 <p class="agent-label">Agent</p>
                 <p class="agent-bubble" data-i18n="heroBubble">
-                  检查 release 产物，确认 macOS / Linux / Windows 均已打包。
+                  Codex 正在等待输入。点一下即可跳到对应终端。
                 </p>
-                <p class="agent-meta">running · shell + files</p>
+                <p class="agent-meta" data-i18n="heroAgentMeta">
+                  3 working · 1 blocked · MCP on
+                </p>
               </aside>
             </div>
           </div>
@@ -120,104 +122,148 @@
       <section class="band" id="workspace">
         <div class="band-inner reveal">
           <p class="eyebrow" data-i18n="workspaceEyebrow">Workspace</p>
-          <h2 data-i18n="workspaceTitle">终端分组，按目录开会话。</h2>
+          <h2 data-i18n="workspaceTitle">终端分组，自动平铺。</h2>
           <p class="support" data-i18n="workspaceBody">
-            管理多终端标签与分组，在正确工作目录新建会话；旁侧文件面板让项目树始终在手边。
+            把相关终端放进同一个组，用 ctrl-alt-shift-up / down
+            切换；新会话在正确的工作目录打开。kitty 风格的自动布局可随时切换，右键开启广播输入，一次键入所有终端。
           </p>
+          <div class="chips">
+            <span class="chip" data-i18n="workspaceChip1">分组切换</span>
+            <span class="chip" data-i18n="workspaceChip2">自动平铺布局</span>
+            <span class="chip" data-i18n="workspaceChip3">广播输入 ctrl-alt-b</span>
+            <span class="chip" data-i18n="workspaceChip4">按目录开会话</span>
+          </div>
         </div>
         <div class="feature-visual reveal delay-1" aria-hidden="true">
           <div class="grid-mock">
             <div class="cell">
               <span>group / api</span>
-              <code>cd services/api && cargo test</code>
+              <code>splits · tall · fat</code>
             </div>
             <div class="cell">
               <span>group / web</span>
-              <code>pnpm dev --host</code>
+              <code>grid · stack · horizontal</code>
+            </div>
+            <div class="cell">
+              <span>switch</span>
+              <code>ctrl-alt-shift-up / down</code>
+            </div>
+            <div class="cell">
+              <span>broadcast</span>
+              <code>ctrl-alt-b · type once</code>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band-alt" id="sessions">
+        <div class="band-inner reveal">
+          <p class="eyebrow" data-i18n="sessionsEyebrow">Sessions</p>
+          <h2 data-i18n="sessionsTitle">关掉的标签，随时回来。</h2>
+          <p class="support" data-i18n="sessionsBody">
+            cmd-shift-t / ctrl-shift-t 恢复最近关闭的终端，cwd、profile、SSH/tmux、配色与字体缩放原样带回；Move Tab to
+            New Window 把运行中的进程整体搬到新窗口。分组、布局、目录与标题随重启恢复；开启持久会话后，终端由后台守护进程持有，退出 Terry 也不中断。
+          </p>
+          <div class="chips">
+            <span class="chip" data-i18n="sessionsChip1">重命名分组与终端</span>
+            <span class="chip" data-i18n="sessionsChip2">终端 Profile</span>
+            <span class="chip" data-i18n="sessionsChip3">SSH hosts · 连接复用 60s</span>
+            <span class="chip" data-i18n="sessionsChip4">tmux attach / native</span>
+            <span class="chip" data-i18n="sessionsChip5">Quake 下拉终端 ctrl+`</span>
+          </div>
+        </div>
+        <div class="feature-visual reveal delay-1" aria-hidden="true">
+          <div class="session-list">
+            <div class="session-row">
+              <span class="session-state live">restored</span>
+              <code>release-build</code>
+              <em>~/dev/ship · font 14</em>
+            </div>
+            <div class="session-row">
+              <span class="session-state live">reused</span>
+              <code>deploy@edge-01</code>
+              <em>ControlMaster · 60s</em>
+            </div>
+            <div class="session-row">
+              <span class="session-state idle">detached</span>
+              <code>tmux · work</code>
+              <em>persistent daemon · reattach</em>
+            </div>
+            <div class="session-row">
+              <span class="session-state live">native</span>
+              <code>tmux control mode</code>
+              <em>windows → groups · panes → splits</em>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id="shell">
+        <div class="band-inner reveal">
+          <p class="eyebrow" data-i18n="shellEyebrow">Shell integration</p>
+          <h2 data-i18n="shellTitle">命令边界、输出与提示，全都看得见。</h2>
+          <p class="support" data-i18n="shellBody">
+            zsh 与 fish 开箱即用，bash 一行接入。Terry 解析 OSC 133 / 633 提示符标记与 OSC 7
+            工作目录，ctrl-shift-up / down 在提示符间跳转；复制、选中或重跑上一条命令的输出。Hints 用 Ctrl+Shift+E
+            列出 URL、路径、git hash、UUID、IP 和自定义正则。
+          </p>
+          <div class="chips">
+            <span class="chip" data-i18n="shellChip1">zsh · fish · bash</span>
+            <span class="chip" data-i18n="shellChip2">OSC 133 / 633 · OSC 7</span>
+            <span class="chip" data-i18n="shellChip3">复制命令输出</span>
+            <span class="chip" data-i18n="shellChip4">失败退出码</span>
+          </div>
+        </div>
+        <div class="feature-visual reveal delay-1" aria-hidden="true">
+          <div class="strip-list">
+            <div class="strip-line"><span>prompts</span>OSC 133 · OSC 633</div>
+            <div class="strip-line"><span>cwd</span>OSC 7 · ctrl-shift-up / down</div>
+            <div class="strip-line"><span>output</span>cmd-alt-u · copy · select · rerun</div>
+            <div class="strip-line"><span>hints</span>Ctrl+Shift+E · URLs · paths · hashes</div>
+            <div class="strip-line"><span>status</span>group · title · exit 1</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band band-alt" id="terminal">
+        <div class="band-inner reveal">
+          <p class="eyebrow" data-i18n="terminalEyebrow">Terminal</p>
+          <h2 data-i18n="terminalTitle">现代终端该有的协议与图像。</h2>
+          <p class="support" data-i18n="terminalBody">
+            kitty graphics 与 sixel 直接渲染图片和动图（chafa / viu / icat
+            可用）；kitty 键盘协议、OSC 52 剪贴板、OSC 99 通知、OSC 22 指针形状、OSC 66
+            文字尺寸与 Unicode 字素聚类一应俱全。多行粘贴默认确认，搜索支持大小写、整词与正则。
+          </p>
+          <div class="chips">
+            <span class="chip" data-i18n="terminalChip1">kitty graphics · sixel</span>
+            <span class="chip" data-i18n="terminalChip2">CSI u</span>
+            <span class="chip" data-i18n="terminalChip3">OSC 52 / 99 / 22 / 66</span>
+            <span class="chip" data-i18n="terminalChip4">Unicode 字素</span>
+            <span class="chip" data-i18n="terminalChip5">粘贴安全</span>
+            <span class="chip" data-i18n="terminalChip6">正则搜索</span>
+          </div>
+        </div>
+        <div class="feature-visual reveal delay-1" aria-hidden="true">
+          <div class="grid-mock">
+            <div class="cell">
+              <span>images</span>
+              <code>kitty graphics · sixel · GIF</code>
+            </div>
+            <div class="cell">
+              <span>keyboard</span>
+              <code>CSI u · press / repeat / release</code>
+            </div>
+            <div class="cell">
+              <span>clipboard</span>
+              <code>OSC 52 write · read opt-in</code>
+            </div>
+            <div class="cell">
+              <span>notify</span>
+              <code>OSC 99 · OSC 9 progress</code>
             </div>
             <div class="cell wide">
-              <span>files</span>
-              <code>crates/ · src/ · website/</code>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="band band-alt" id="naming">
-        <div class="band-inner reveal">
-          <p class="eyebrow" data-i18n="namingEyebrow">Naming</p>
-          <h2 data-i18n="namingTitle">支持修改分组名、终端名。</h2>
-          <p class="support" data-i18n="namingBody">
-            为分组和终端自定义名称，会话列表更清晰；改名结果会随工作区一起保存，下次打开仍在。
-          </p>
-        </div>
-        <div class="feature-visual reveal delay-1" aria-hidden="true">
-          <div class="naming-strip">
-            <div class="naming-item">
-              <span data-i18n="namingItem1Label">group</span>
-              <code>api → shipping</code>
-            </div>
-            <div class="naming-item">
-              <span data-i18n="namingItem2Label">terminal</span>
-              <code>bash → release-build</code>
-            </div>
-            <div class="naming-item">
-              <span data-i18n="namingItem3Label">persist</span>
-              <code data-i18n="namingItem3Value">saved with workspace</code>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="band" id="split">
-        <div class="band-inner reveal">
-          <p class="eyebrow" data-i18n="splitEyebrow">Split</p>
-          <h2 data-i18n="splitTitle">上下左右分屏，多终端同屏协作。</h2>
-          <p class="support" data-i18n="splitBody">
-            将当前窗格向右、向左、向上或向下拆分，并排查看日志与命令、前后端会话或远程与本地终端。布局会随终端分组一并保存。
-          </p>
-        </div>
-        <div class="feature-visual reveal delay-1" aria-hidden="true">
-          <div class="split-mock">
-            <div class="split-pane">
-              <span>left · build</span>
-              <code>cargo test -p terminal</code>
-              <code class="dim">ok · 42 passed</code>
-            </div>
-            <div class="split-pane">
-              <span>right · logs</span>
-              <code>tail -f /tmp/terry.log</code>
-              <code class="dim">info · pane split restored</code>
-            </div>
-            <div class="split-pane bottom">
-              <span>bottom · ssh</span>
-              <code>ssh deploy@edge-01</code>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="band band-alt" id="performance">
-        <div class="band-inner reveal">
-          <p class="eyebrow" data-i18n="perfEyebrow">Performance</p>
-          <h2 data-i18n="perfTitle">原生性能，开箱即快。</h2>
-          <p class="support" data-i18n="perfBody">
-            基于 Rust 与 GPUI 构建，GPU 加速界面与高效终端渲染，启动快、滚动顺、多会话也不拖泥带水。
-          </p>
-        </div>
-        <div class="feature-visual reveal delay-1" aria-hidden="true">
-          <div class="perf-strip">
-            <div class="perf-item">
-              <span data-i18n="perfItem1Label">stack</span>
-              <code data-i18n="perfItem1Value">Rust · GPUI</code>
-            </div>
-            <div class="perf-item">
-              <span data-i18n="perfItem2Label">render</span>
-              <code data-i18n="perfItem2Value">GPU-accelerated UI</code>
-            </div>
-            <div class="perf-item">
-              <span data-i18n="perfItem3Label">feel</span>
-              <code data-i18n="perfItem3Value">snappy scroll · light memory</code>
+              <span>unicode</span>
+              <code>grapheme clusters · emoji ZWJ · flags · keycaps</code>
             </div>
           </div>
         </div>
@@ -225,25 +271,34 @@
 
       <section class="band" id="themes">
         <div class="band-inner reveal">
-          <p class="eyebrow" data-i18n="themesEyebrow">Themes</p>
-          <h2 data-i18n="themesTitle">多种主题，随心切换。</h2>
+          <p class="eyebrow" data-i18n="themesEyebrow">Color schemes</p>
+          <h2 data-i18n="themesTitle">配色库，按终端切换。</h2>
           <p class="support" data-i18n="themesBody">
-            内置多套外观主题，覆盖明暗风格与配色偏好；界面与终端外观可一起调整，找到最适合长时间工作的视觉节奏。
+            Dracula、Nord、Solarized、Gruvbox、One Dark、Tokyo Night、Catppuccin、Rosé Pine
+            ……只改终端颜色。可按终端、按 Profile 或设置 terminal.color_scheme；从 Terminal 菜单导入 Alacritty
+            .toml、iTerm2 .itermcolors 或 Terry JSON。
           </p>
+          <div class="chips">
+            <span class="chip" data-i18n="themesChip1">内置配色库</span>
+            <span class="chip" data-i18n="themesChip2">按终端 / Profile 应用</span>
+            <span class="chip" data-i18n="themesChip3">导入 Alacritty / iTerm2</span>
+            <span class="chip" data-i18n="themesChip4">设置 · 外观 · Agent 模型</span>
+            <span class="chip" data-i18n="themesChip5">多语言界面</span>
+          </div>
         </div>
         <div class="feature-visual reveal delay-1" aria-hidden="true">
           <div class="theme-swatches">
-            <div class="swatch swatch-ink">
-              <span>Ink</span>
+            <div class="swatch swatch-catppuccin">
+              <span>Catppuccin</span>
             </div>
-            <div class="swatch swatch-dawn">
-              <span>Dawn</span>
+            <div class="swatch swatch-nord">
+              <span>Nord</span>
             </div>
-            <div class="swatch swatch-forest">
-              <span>Forest</span>
+            <div class="swatch swatch-gruvbox">
+              <span>Gruvbox</span>
             </div>
-            <div class="swatch swatch-slate">
-              <span>Slate</span>
+            <div class="swatch swatch-solarized">
+              <span>Solarized</span>
             </div>
           </div>
         </div>
@@ -252,15 +307,55 @@
       <section class="band band-alt" id="agent">
         <div class="band-inner reveal">
           <p class="eyebrow" data-i18n="agentEyebrow">Agent</p>
-          <h2 data-i18n="agentTitle">侧栏对话，直接驱动命令与工具。</h2>
+          <h2 data-i18n="agentTitle">Agent 在侧，状态一目了然。</h2>
           <p class="support" data-i18n="agentBody">
-            用可配置 Profile 连接大模型；通过 MCP 扩展能力，让 Agent 在终端上下文里读写与执行。
+            侧栏与 LLM 对话，用可配置 Profile 运行命令与工具；Terry 从终端屏幕底部识别 Claude、Codex、Gemini、OpenCode、Cursor、Qwen、Copilot 等编码 Agent 的工作 / 等待输入 / 空闲状态。通过 MCP 连接服务器扩展能力；文件面板与编辑器共享标签与分屏，Vim 模式、Markdown 预览与图片查看一并就绪。
           </p>
+          <div class="chips">
+            <span class="chip" data-i18n="agentChip1">Agent 状态检测</span>
+            <span class="chip" data-i18n="agentChip2">MCP</span>
+            <span class="chip" data-i18n="agentChip3">文件面板</span>
+            <span class="chip" data-i18n="agentChip4">编辑器 · Vim</span>
+            <span class="chip" data-i18n="agentChip5">Markdown 预览</span>
+          </div>
         </div>
-        <div class="agent-strip reveal delay-1" aria-hidden="true">
-          <div class="strip-line"><span>profile</span> default · openai-compatible</div>
-          <div class="strip-line"><span>tools</span> shell · files · mcp</div>
-          <div class="strip-line"><span>context</span> active cwd · open panels</div>
+        <div class="feature-visual reveal delay-1" aria-hidden="true">
+          <div class="strip-list">
+            <div class="strip-line"><span>profile</span>default · openai-compatible</div>
+            <div class="strip-line"><span>states</span>working · blocked · idle</div>
+            <div class="strip-line"><span>detect</span>claude · codex · gemini · opencode · cursor · qwen</div>
+            <div class="strip-line"><span>tools</span>shell · files · mcp</div>
+            <div class="strip-line"><span>editor</span>shared tabs · vim · markdown preview</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id="cli">
+        <div class="band-inner reveal">
+          <p class="eyebrow" data-i18n="cliEyebrow">CLI &amp; automation</p>
+          <h2 data-i18n="cliTitle">用脚本驱动正在运行的 Terry。</h2>
+          <p class="support" data-i18n="cliBody">
+            本地 IPC 受 token 保护，terry 二进制同时是客户端：new-tab、send-text、run、session
+            save/load、agents、wait、events、kitten。同样的能力也开放为 JSON 自动化 API 和插件（kittens）契约；手机或平板可通过
+            Tailscale 打开只绑私网的远程控制。
+          </p>
+          <div class="chips">
+            <span class="chip" data-i18n="cliChip1">本地 IPC · token</span>
+            <span class="chip" data-i18n="cliChip2">JSON API</span>
+            <span class="chip" data-i18n="cliChip3">SSE 事件</span>
+            <span class="chip" data-i18n="cliChip4">kittens 插件</span>
+            <span class="chip" data-i18n="cliChip5">远程控制 · Tailscale</span>
+          </div>
+        </div>
+        <div class="feature-visual reveal delay-1" aria-hidden="true">
+          <pre class="cli-block"><code><span class="prompt">❯</span> terry new-tab --cwd ~/src
+<span class="prompt">❯</span> terry send-text "cargo test"
+<span class="prompt">❯</span> terry run "cargo test"
+<span class="prompt">❯</span> terry session save "Work"
+<span class="prompt">❯</span> terry agents
+<span class="prompt">❯</span> terry wait --state blocked
+<span class="prompt">❯</span> terry events
+<span class="dim"># /api/send_text · /api/screen · /api/wait_for_output</span></code></pre>
         </div>
       </section>
 
@@ -269,8 +364,15 @@
           <p class="eyebrow" data-i18n="downloadEyebrow">Download</p>
           <h2 data-i18n="downloadTitle">macOS · Linux · Windows</h2>
           <p class="support" data-i18n="downloadBody">
-            发布包由 GitHub Actions 构建。从 Releases 下载对应平台，或自行从源码编译。
+            发布包由 GitHub Actions 构建，覆盖 Apple Silicon / Intel、Linux x86_64 与 Windows
+            x86_64。从 Releases 下载对应平台，或从源码编译（Rust 1.95）。
           </p>
+          <div class="chips">
+            <span class="chip">macOS</span>
+            <span class="chip">Linux x86_64</span>
+            <span class="chip">Windows x86_64</span>
+            <span class="chip" data-i18n="downloadChip1">Rust 1.95</span>
+          </div>
           <div class="cta-row">
             <a
               class="btn btn-primary"
