@@ -177,6 +177,22 @@ pub fn spawn_env(
     env
 }
 
+/// The program name shell integration is injected for.
+///
+/// The daemon falls back to `$SHELL` when the spawn spec has no program, so
+/// integration has to be chosen from that same shell. Handing `/bin/sh` to
+/// [`spawn_env`] instead silently skipped OSC 7 cwd tracking - and with it the
+/// sidebar name - for the common system-shell case.
+pub fn shell_program_for_integration(program: Option<&str>, shell: Option<&str>) -> String {
+    [program, shell]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|program| !program.is_empty())
+        .unwrap_or("/bin/sh")
+        .to_string()
+}
+
 /// Re-exported so the panel does not need to depend on the daemon crate.
 
 /// One-time notice shown when the first persistent terminal is detached.
@@ -404,4 +420,32 @@ pub fn wire(
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integration_program_uses_the_shell_that_will_run() {
+        // The daemon runs `$SHELL` when the spec has no program; integration
+        // must be injected for that shell, not for a hardcoded `/bin/sh`.
+        assert_eq!(
+            shell_program_for_integration(None, Some("/bin/zsh")),
+            "/bin/zsh"
+        );
+        // An explicit program always wins.
+        assert_eq!(
+            shell_program_for_integration(Some("/opt/homebrew/bin/fish"), Some("/bin/zsh")),
+            "/opt/homebrew/bin/fish"
+        );
+        // No information at all keeps the previous fallback.
+        assert_eq!(shell_program_for_integration(None, None), "/bin/sh");
+        // Blank values are ignored instead of disabling integration.
+        assert_eq!(shell_program_for_integration(None, Some("   ")), "/bin/sh");
+        assert_eq!(
+            shell_program_for_integration(Some(""), Some("/bin/zsh")),
+            "/bin/zsh"
+        );
+    }
 }

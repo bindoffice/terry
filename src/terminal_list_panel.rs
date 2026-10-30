@@ -4812,8 +4812,15 @@ impl TerminalListPanel {
                         Some(task::Shell::System) | None => (None, Vec::new()),
                     };
                     let env = {
-                        let program_for_env =
-                            program.clone().unwrap_or_else(|| "/bin/sh".to_string());
+                        // The daemon falls back to `$SHELL` when no program is
+                        // given, and shell integration is chosen from the
+                        // program name. Resolve it the same way here; passing
+                        // `/bin/sh` would skip integration (and OSC 7 cwd
+                        // tracking) for the common system-shell case.
+                        let program_for_env = persistent_sessions::shell_program_for_integration(
+                            program.as_deref(),
+                            std::env::var("SHELL").ok().as_deref(),
+                        );
                         let extra = profile_env.clone().unwrap_or_default();
                         cx.update(|_window, cx| {
                             persistent_sessions::spawn_env(&program_for_env, &extra, cx)
