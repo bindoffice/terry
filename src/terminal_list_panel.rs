@@ -1895,12 +1895,21 @@ impl TerminalListPanel {
     /// workspace id. Renaming the file here keeps the terminals (and their
     /// daemon sessions) attached across that transition instead of starting
     /// fresh shells on the next launch.
-    fn migrate_session_key(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// The project may already have its own session (opened in this window
+    /// before). That session wins: the caller restores it and parks the
+    /// welcome window's terminals in Detached Sessions instead of overwriting
+    /// it. Only when the project has no session yet is `default.json` moved
+    /// over, carrying the welcome terminals into the project.
+    ///
+    /// Returns true when the caller should restore the project session that
+    /// already exists at the new key.
+    fn migrate_session_key(&mut self, cx: &mut Context<Self>) -> bool {
         if self.session_key_migrated || !self.owns_workspace_session {
-            return;
+            return false;
         }
         let Some(project) = self.project.upgrade() else {
-            return;
+            return false;
         };
         let roots: Vec<String> = project
             .read(cx)
@@ -1908,7 +1917,7 @@ impl TerminalListPanel {
             .map(|worktree| worktree.read(cx).abs_path().to_string_lossy().into_owned())
             .collect();
         if roots.is_empty() {
-            return;
+            return false;
         }
         self.session_key_migrated = true;
 
@@ -1917,11 +1926,11 @@ impl TerminalListPanel {
         // the DB will restore was created with its id already assigned.
         let new_key = Self::session_key_for(self.session_database_id, roots);
         if new_key == self.session_workspace_key {
-            return;
+            return false;
         }
         // Only the empty-window fallback is provisional; a project key is final.
         if self.session_workspace_key != "default" {
-            return;
+            return false;
         }
 
         let old_path = self.session_file_path();
@@ -1934,14 +1943,41 @@ impl TerminalListPanel {
         } else {
             format!("{}-w{}", self.session_workspace_key, panel_id.as_u64())
         };
+        if !self.owns_workspace_session {
+            // Another window owns this project's session; leave its files alone.
+            return false;
+        }
 
         let new_path = self.session_file_path();
-        if old_path != new_path && old_path.exists() && !new_path.exists() {
-            if let Some(parent) = new_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::rename(&old_path, &new_path);
+        Self::migrate_session_files(&old_path, &new_path)
+    }
+
+    /// Decides what an empty window's session file becomes when the window
+    /// turns into a project workspace.
+    ///
+    /// Returns true when the project already has a session at `new_path`; the
+    /// caller restores (or keeps) that one and parks the welcome terminals.
+    /// Otherwise the welcome file is moved over so its terminals become the
+    /// project's first session.
+    fn migrate_session_files(old_path: &Path, new_path: &Path) -> bool {
+        if old_path == new_path {
+            return false;
         }
+        if new_path.exists() {
+            return true;
+        }
+        if !old_path.exists() {
+            return false;
+        }
+        if let Some(parent) = new_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::rename(old_path, new_path).is_err() {
+            // Windows does not replace an existing file on rename.
+            let _ = std::fs::remove_file(new_path);
+            let _ = std::fs::rename(old_path, new_path);
+        }
+        false
     }
 
     pub fn save_session(&mut self, cx: &App) {
@@ -2666,10 +2702,7 @@ impl TerminalListPanel {
     }
 
     fn read_previous_session_cwds(&self) -> HashMap<(usize, usize), Option<PathBuf>> {
-        let Ok(data) = std::fs::read_to_string(self.session_file_path()) else {
-            return HashMap::default();
-        };
-        let Ok(session): Result<PersistedSession, _> = serde_json::from_str(&data) else {
+        let Some(session) = self.read_persisted_session() else {
             return HashMap::default();
         };
         let mut out = HashMap::default();
@@ -2731,26 +2764,37 @@ impl TerminalListPanel {
         if !self.owns_workspace_session {
             return false;
         }
-
-        let path = self.session_file_path();
-        let Ok(data) = std::fs::read_to_string(path) else {
+        let Some(session) = self.read_persisted_session() else {
             return false;
         };
-        let Ok(session): Result<PersistedSession, _> = serde_json::from_str(&data) else {
-            return false;
-        };
+        self.restore_persisted_session(session, window, cx);
+        true
+    }
 
-        // Nothing to restore: no groups, or a session whose terminals were all
-        // closed before quitting. Report false so the caller falls back to
-        // spawning a terminal instead of opening a window with none.
+    /// Reads this panel's saved session, if it exists and has any terminals.
+    ///
+    /// Nothing to restore (no file, unreadable, or every terminal was closed
+    /// before quitting) yields `None` so callers can fall back to spawning a
+    /// terminal instead of opening a window with none.
+    fn read_persisted_session(&self) -> Option<PersistedSession> {
+        let data = std::fs::read_to_string(self.session_file_path()).ok()?;
+        let session: PersistedSession = serde_json::from_str(&data).ok()?;
         if !session
             .groups
             .iter()
             .any(|group| !group.terminals.is_empty())
         {
-            return false;
+            return None;
         }
+        Some(session)
+    }
 
+    fn restore_persisted_session(
+        &mut self,
+        session: PersistedSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Two-pass: create groups and set active_group_id *before* any spawn
         // completes. Otherwise early groups match the constructor's GroupId(0)
         // and get added to the pane, while switch_group later no-ops because
@@ -2901,7 +2945,77 @@ impl TerminalListPanel {
         if self.session_spawns_complete() {
             self.finish_session_restore(window, cx);
         }
-        true
+    }
+
+    /// Restores the project's session after an empty window became a project
+    /// workspace.
+    ///
+    /// The welcome window has already spawned (or restored) its own terminals.
+    /// They are parked in Detached Sessions so nothing running is killed, then
+    /// the project's saved terminals take over.
+    fn adopt_project_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.session_restoring || self.groups.is_empty() || !self.owns_workspace_session {
+            return false;
+        }
+        if self.read_persisted_session().is_none() {
+            return false;
+        }
+
+        self.park_all_terminals(window, cx);
+        if self.load_persisted_session(window, cx) {
+            return true;
+        }
+
+        // Defensive: the file disappeared between the check and the load. Put
+        // the panel back into a usable state instead of leaving it empty.
+        self.create_default_group(window, cx);
+        false
+    }
+
+    /// Moves every current terminal into the Detached Sessions list without
+    /// ending it, then clears the groups so a restored session can take over.
+    fn park_all_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let terminal_ids: Vec<EntityId> = self
+            .groups
+            .iter()
+            .flat_map(|group| group.terminals.iter().map(|view| view.entity_id()))
+            .collect();
+
+        // Take the terminals out of the center panes before clearing the model,
+        // guarded so the ItemRemoved events cannot drop anything else.
+        let was_switching = self.switching;
+        self.switching = true;
+        if let Some(workspace) = self.workspace.upgrade() {
+            let panes = workspace.read(cx).panes().to_vec();
+            for pane in panes {
+                pane.update(cx, |pane, cx| {
+                    for id in &terminal_ids {
+                        if pane.items().any(|item| item.item_id() == *id) {
+                            pane.remove_item(*id, false, false, window, cx);
+                        }
+                    }
+                });
+            }
+        }
+        self.switching = was_switching;
+
+        let mut parked = Vec::new();
+        for group in &mut self.groups {
+            for view in group.terminals.drain(..) {
+                let title = sidebar_terminal_name(&view, cx);
+                let cwd = self
+                    .terminal_spawn_cwds
+                    .get(&view.entity_id())
+                    .cloned()
+                    .flatten()
+                    .or_else(|| view.read(cx).terminal().read(cx).working_directory());
+                parked.push(DetachedSession { view, title, cwd });
+            }
+        }
+        self.detached_sessions.extend(parked);
+        self.groups.clear();
+        self.pending_switch_from = None;
+        self.pending_layout_restore = false;
     }
 
     pub fn create_default_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2913,7 +3027,6 @@ impl TerminalListPanel {
         // changes an empty window's key to the project key. Do this before
         // restoring so it reads the right file.
         self.migrate_session_key(cx);
-
         let profile = self.default_terminal_profile(cx);
 
         // Restore this workspace's previous terminals first. This is the normal
@@ -5275,8 +5388,11 @@ impl TerminalListPanel {
         cx: &mut Context<Self>,
     ) {
         // The first worktree turns an empty window into a project workspace, so
-        // its session file must move to the project key.
-        self.migrate_session_key(cx);
+        // its session file must move to the project key. If the project already
+        // had a session, restore it in place of the welcome terminals.
+        if self.migrate_session_key(cx) {
+            self.adopt_project_session(window, cx);
+        }
 
         // Restoring a session must not auto-spawn project terminals — that was
         // inflating group counts across restarts (cwd check fails while PTYs
@@ -5540,6 +5656,18 @@ impl TerminalListPanel {
             } else {
                 group.terminals.push(terminal_view);
             }
+        } else {
+            // The group vanished while this spawn was in flight (e.g. the
+            // window adopted a project session and rebuilt its groups). Keep
+            // the shell reachable from Detached Sessions instead of dropping
+            // its view and killing the PTY.
+            let title = sidebar_terminal_name(&terminal_view, cx);
+            let cwd = self.terminal_spawn_cwds.get(&view_id).cloned().flatten();
+            self.detached_sessions.push(DetachedSession {
+                view: terminal_view,
+                title,
+                cwd,
+            });
         }
         cx.notify();
     }
@@ -9534,6 +9662,147 @@ mod tests {
             TerminalListPanel::session_key_for(None, Vec::new()),
             "default"
         );
+    }
+
+    /// The panel's constructor (not just `session_key_for`) must resolve an
+    /// empty workspace to the stable `default` key even when the unstable
+    /// workspace id is known. This is the real restart path: the welcome window
+    /// gets a new id on every launch, yet must read the same session file.
+    #[gpui::test]
+    async fn panel_uses_default_session_key_for_empty_windows_with_any_id(cx: &mut TestAppContext) {
+        let params = cx.update(AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let project = Project::test(params.fs.clone(), [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+
+        for id in [1_i64, 2] {
+            let panel = window_handle
+                .update(cx, |_mw, window, cx| {
+                    let display_pane = workspace.read(cx).active_pane().clone();
+                    cx.new(|cx| {
+                        TerminalListPanel::new(
+                            workspace.clone(),
+                            display_pane,
+                            project.clone(),
+                            Some(WorkspaceId::from_i64(id)),
+                            window,
+                            cx,
+                        )
+                    })
+                })
+                .unwrap();
+            assert_eq!(
+                panel.read_with(cx, |panel, _| panel.session_workspace_key.clone()),
+                "default",
+                "empty workspace with database id {id} must not key by that id",
+            );
+        }
+    }
+
+    /// Opening a folder in an empty window migrates `default.json` to the
+    /// project key. A project that already has a session file keeps it: the
+    /// caller restores that session and parks the welcome terminals, so the
+    /// project's previous terminals are not overwritten.
+    #[test]
+    fn migration_prefers_an_existing_project_session() {
+        let dir =
+            std::env::temp_dir().join(format!("terry-session-migrate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("default.json");
+        let new = dir.join("ws-42.json");
+
+        // No project session yet: the welcome session moves over.
+        std::fs::write(&old, r#"{"welcome":true}"#).unwrap();
+        assert!(!TerminalListPanel::migrate_session_files(&old, &new));
+        assert!(!old.exists());
+        assert_eq!(
+            std::fs::read_to_string(&new).unwrap(),
+            r#"{"welcome":true}"#
+        );
+
+        // The project session wins; the welcome file stays untouched.
+        std::fs::write(&old, r#"{"welcome":true}"#).unwrap();
+        std::fs::write(&new, r#"{"project":true}"#).unwrap();
+        assert!(TerminalListPanel::migrate_session_files(&old, &new));
+        assert_eq!(
+            std::fs::read_to_string(&old).unwrap(),
+            r#"{"welcome":true}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(&new).unwrap(),
+            r#"{"project":true}"#
+        );
+
+        // Missing files are a no-op.
+        std::fs::remove_file(&old).unwrap();
+        std::fs::remove_file(&new).unwrap();
+        assert!(!TerminalListPanel::migrate_session_files(&old, &new));
+        assert!(!old.exists() && !new.exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Adopting a project session must not drop the welcome window's running
+    /// shells: they move to Detached Sessions, where they can be reattached.
+    #[gpui::test]
+    async fn parking_terminals_keeps_them_in_detached_sessions(cx: &mut TestAppContext) {
+        ensure_test_data_dir();
+
+        let params = cx.update(AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let project = Project::test(params.fs.clone(), [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+
+        let panel = window_handle
+            .update(cx, |mw, window, cx| {
+                let workspace = mw.workspace().clone();
+                let project = workspace.read(cx).project().clone();
+                let display_pane = workspace.read(cx).active_pane().clone();
+                let panel = cx.new(|cx| {
+                    TerminalListPanel::new(
+                        workspace.clone(),
+                        display_pane,
+                        project,
+                        None,
+                        window,
+                        cx,
+                    )
+                });
+                workspace.update(cx, |workspace, cx| {
+                    workspace.add_panel(panel.clone(), window, cx);
+                });
+                panel
+            })
+            .unwrap();
+
+        seed_group(&panel, &workspace, &project, &window_handle, cx);
+        assert_eq!(panel.read_with(cx, |p, _| p.groups[0].terminals.len()), 2);
+
+        window_handle
+            .update(cx, |_mw, window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.park_all_terminals(window, cx);
+                    assert!(panel.groups.is_empty());
+                    assert_eq!(panel.detached_sessions.len(), 2);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let detached = panel.read_with(cx, |panel, cx| panel.detached_sessions_json(cx));
+        assert_eq!(detached["sessions"].as_array().unwrap().len(), 2);
     }
 
     /// Session files written before per-profile color schemes existed must
