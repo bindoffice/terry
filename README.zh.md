@@ -77,9 +77,15 @@ terry events                       # 订阅 agent 状态变化（SSE，Ctrl-C �
 terry kitten list                  # 列出已安装的 kitten/插件
 terry kitten run hello --arg       # 运行 kitten（也可直接 terry kitten hello --arg）
 terry kitten path                  # 显示插件搜索目录
+terry install-cli                  # 把 terry/terry-daemon 安装到 ~/.local/bin
+terry uninstall-cli                # 移除上述 shim
 ```
 
 `send-text` 只粘贴不执行 —— 永远不会自动附加换行；`run` 会粘贴并提交。session 模板会保存分组内的终端、工作目录、profile/启动方式、平铺布局和广播设置。
+
+在 Terry 打开的终端里，`terry` 与 `terry-daemon` 始终在 `PATH` 中：两者都指向当前运行的构建，且 `terry-daemon ...` 等价于 `terry daemon ...`。即使 Terry 从不在登录 shell `PATH` 里的应用包启动，也能直接使用。
+
+要在 Terry 之外的终端里使用 CLI，运行 `terry install-cli`。它会把两个 shim 写入 `~/.local/bin`（可用 `--dir DIR` 或 `TERRY_CLI_DIR` 覆盖），并在需要时提示如何把该目录加入 `PATH`。如果目标位置已存在不是 Terry 创建的同名文件，它不会覆盖。
 
 Kitten 是放在 `$TERRY_KITTEN_PATH`、Terry 配置目录下 `kittens/` 或数据目录下 `kittens/` 中的可执行文件（Unix 下需要 shebang 和可执行位）。插件继承 stdio，并获得 `TERRY_KITTEN_NAME`、`TERRY_KITTEN_DIR`、`TERRY_KITTEN_PATH`、`TERRY_PID`、`TERRY_IPC_URL`、`TERRY_IPC_TOKEN`、`TERRY_CONFIG_DIR`、`TERRY_DATA_DIR`，因此可以调用自动化 API 或 `terry` CLI。Kitten 是受信任的本地可执行文件，会拿到 IPC token，请只安装可信插件。这里不提供 kitty 的 Python kitten API；现有 kitten 需要按这个协议移植。
 

@@ -6,6 +6,7 @@ mod agent_switcher;
 mod app_icon;
 mod app_menus;
 mod app_title_bar;
+mod cli_install;
 mod clipboard_history;
 mod command_history;
 mod file_list_panel;

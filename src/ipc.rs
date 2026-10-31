@@ -64,6 +64,8 @@ pub fn run_cli_subcommand(args: &[String]) -> Option<i32> {
         Some("session") => Some(run_session_cli(&args[1..])),
         Some("daemon") => Some(run_daemon_cli(&args[1..])),
         Some("agent-integration") => Some(run_agent_integration_cli(&args[1..])),
+        Some("install-cli") => Some(crate::cli_install::run_install_cli(&args[1..])),
+        Some("uninstall-cli") => Some(crate::cli_install::run_uninstall_cli(&args[1..])),
         Some("daemon-serve") => Some(run_daemon_serve(&args[1..])),
         Some("agents") => Some(post_command("/api/list_agent_states", "{}")),
         Some("wait") => Some(run_wait_cli(&args[1..], false)),
@@ -254,6 +256,12 @@ fn run_daemon_cli(args: &[String]) -> i32 {
     };
 
     match command {
+        "help" | "--help" | "-h" => {
+            println!(
+                "用法: terry daemon list | kill SESSION | prune [--dry-run] [--min-idle-secs N] | serve [--socket PATH]"
+            );
+            0
+        }
         "list" => {
             let sessions = match connect_daemon() {
                 Ok(mut control) => match control.list() {
@@ -671,6 +679,10 @@ fn print_cli_usage() {
     println!("  daemon prune [--dry-run]  清理不再被任何会话文件引用的孤儿会话");
     println!("  agent-integration install|uninstall|list [AGENT]");
     println!("                        安装/卸载 agent 状态上报集成（目前支持 pi）");
+    println!(
+        "  install-cli [--dir DIR]  把 terry / terry-daemon 安装到 PATH 目录（默认 ~/.local/bin）"
+    );
+    println!("  uninstall-cli [--dir DIR] 移除 install-cli 安装的 shim");
     println!("  context [--terminal ID] 输出终端的标题、cwd、命令与 agent 状态（JSON）");
     println!("  kitten list           列出可用的 kitten 插件");
     println!("  kitten run NAME       运行 kitten 插件（也可直接 kitten NAME）");

@@ -77,11 +77,23 @@ terry events                       # subscribe to agent state changes (SSE, Ctrl
 terry kitten list                  # list installed kitten/plugin executables
 terry kitten run hello --arg       # run a kitten (or: terry kitten hello --arg)
 terry kitten path                  # show plugin search directories
+terry install-cli                  # install terry/terry-daemon into ~/.local/bin
+terry uninstall-cli                # remove those shims again
 ```
 
 `send-text` pastes without executing — it never appends a newline. `run`
 pastes and submits the command. A session template stores the group's terminals,
 working directories, profiles/launches, tiling layout, and broadcast setting.
+
+Inside terminals opened by Terry, `terry` and `terry-daemon` are always on
+`PATH`: both resolve to the running build, and `terry-daemon ...` is shorthand
+for `terry daemon ...`. This works even when Terry is launched from a bundle
+that is not on your login shell's `PATH`.
+
+To use the CLI from shells Terry did not spawn, run `terry install-cli`. It
+writes both shims into `~/.local/bin` (override with `--dir DIR` or
+`TERRY_CLI_DIR`) and prints how to add that directory to `PATH` if needed. An
+existing file with the same name that Terry did not create is never overwritten.
 
 Kittens are executables (with a shebang on Unix) in `$TERRY_KITTEN_PATH`, the
 `kittens/` directory under Terry's config directory, or the `kittens/` directory
