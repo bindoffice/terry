@@ -1829,21 +1829,37 @@ impl TerminalListPanel {
         database_id: Option<workspace::WorkspaceId>,
         cx: &App,
     ) -> String {
-        let mut roots: Vec<String> = project
+        let roots = project
             .read(cx)
             .visible_worktrees(cx)
             .map(|worktree| worktree.read(cx).abs_path().to_string_lossy().into_owned())
             .collect();
-        roots.sort();
-        roots.dedup();
-        // Empty welcome windows share one stable key so the first window can
-        // restore `default.json` across restarts; later windows are isolated
-        // via ownership (they get a `-w{id}` file stem).
-        if roots.is_empty() {
-            return "default".to_string();
-        }
+        Self::session_key_for(database_id, roots)
+    }
+
+    /// Session file key for a workspace.
+    ///
+    /// The workspace id wins whenever it is known: panels are created before a
+    /// restored project's worktrees have finished loading, so deriving the key
+    /// from the roots made the same window write `default.json` on one run and
+    /// `ws-<id>.json` on another. The next launch then looked for a file the
+    /// previous one never wrote and the terminals appeared lost until yet
+    /// another restart. The id is the value the workspace DB reuses for the same
+    /// roots, so it is stable across restarts.
+    ///
+    /// Without a database id (windows built outside the workspace DB) the key
+    /// falls back to the worktree roots, and to `default` for the empty welcome
+    /// window. Secondary windows are isolated via ownership (they get a
+    /// `-w{id}` file stem).
+    fn session_key_for(database_id: Option<workspace::WorkspaceId>, roots: Vec<String>) -> String {
         if let Some(id) = database_id {
             return format!("ws-{}", i64::from(id));
+        }
+        let mut roots = roots;
+        roots.sort();
+        roots.dedup();
+        if roots.is_empty() {
+            return "default".to_string();
         }
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         roots.hash(&mut hasher);
@@ -2652,7 +2668,14 @@ impl TerminalListPanel {
             return false;
         };
 
-        if session.groups.is_empty() {
+        // Nothing to restore: no groups, or a session whose terminals were all
+        // closed before quitting. Report false so the caller falls back to
+        // spawning a terminal instead of opening a window with none.
+        if !session
+            .groups
+            .iter()
+            .any(|group| !group.terminals.is_empty())
+        {
             return false;
         }
 
@@ -2814,11 +2837,21 @@ impl TerminalListPanel {
             return;
         }
 
-        // When opening a folder, worktrees are already on the project before this
-        // panel is created — prefer those cwds over the global session file, which
-        // still holds the empty-welcome home directory.
-        let project_dirs = self.project_working_directories(cx);
         let profile = self.default_terminal_profile(cx);
+
+        // Restore this workspace's previous terminals first. This is the normal
+        // restart path: the session file already records the cwds, titles,
+        // layouts and daemon sessions, so it restores the terminals the user had
+        // instead of opening a brand-new shell in each project directory. Trying
+        // the project directories first (as this used to) dropped the whole
+        // session whenever the worktrees happened to be loaded already.
+        if self.load_persisted_session(window, cx) {
+            return;
+        }
+
+        // No session file yet (a folder opened for the first time): open one
+        // terminal per project directory rather than a single shell in `$HOME`.
+        let project_dirs = self.project_working_directories(cx);
         if !project_dirs.is_empty() {
             let id = self.new_group_id();
             self.groups.push(TerminalGroup {
@@ -2851,9 +2884,6 @@ impl TerminalListPanel {
             return;
         }
 
-        if self.load_persisted_session(window, cx) {
-            return;
-        }
         let id = self.new_group_id();
         self.groups.push(TerminalGroup {
             id,
@@ -8563,7 +8593,7 @@ mod tests {
     use terminal::TerminalBuilder;
     use terminal::terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape};
     use util::paths::PathStyle;
-    use workspace::{AppState, MultiWorkspace};
+    use workspace::{AppState, MultiWorkspace, WorkspaceId};
 
     #[test]
     fn recognizes_npm_installed_agents_by_package_path() {
@@ -9376,6 +9406,36 @@ mod tests {
                     .to_string_lossy(),
             );
         });
+    }
+
+    /// The session key must not depend on whether the project's worktrees have
+    /// finished loading when the panel is created. Restoring a workspace builds
+    /// the panel first and opens the worktrees afterwards, so keying by roots
+    /// made the same window write `default.json` on one run and `ws-<id>.json`
+    /// on another — the next launch then never found the file the previous one
+    /// wrote, and the terminals looked lost until another restart.
+    #[test]
+    fn session_key_is_stable_across_worktree_load_timing() {
+        let id = Some(WorkspaceId::from_i64(42));
+        assert_eq!(TerminalListPanel::session_key_for(id, Vec::new()), "ws-42");
+        assert_eq!(
+            TerminalListPanel::session_key_for(id, vec!["/tmp/project".to_string()]),
+            "ws-42",
+        );
+    }
+
+    #[test]
+    fn session_key_falls_back_to_paths_without_a_database_id() {
+        let unsorted =
+            TerminalListPanel::session_key_for(None, vec!["/b".to_string(), "/a".to_string()]);
+        let sorted =
+            TerminalListPanel::session_key_for(None, vec!["/a".to_string(), "/b".to_string()]);
+        assert_eq!(unsorted, sorted);
+        assert!(unsorted.starts_with("paths-"), "unexpected key {unsorted}");
+        assert_eq!(
+            TerminalListPanel::session_key_for(None, Vec::new()),
+            "default"
+        );
     }
 
     /// Session files written before per-profile color schemes existed must
