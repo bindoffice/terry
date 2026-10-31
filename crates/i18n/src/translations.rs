@@ -189,6 +189,8 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("command_history_empty", "No commands recorded yet");
             m.insert("command_history_no_matches", "No matching commands");
             m.insert("command_history_exit", "exit {code}");
+            m.insert("command_history_copy", "Copy");
+            m.insert("command_history_run", "Run");
             m.insert("export_scrollback", "Export scrollback");
             m.insert("export_scrollback_clipboard", "Copy last {count} lines");
             m.insert("export_scrollback_markdown", "Copy last {count} lines as Markdown");
@@ -694,6 +696,8 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("command_history_empty", "还没有命令记录");
             m.insert("command_history_no_matches", "没有匹配的命令");
             m.insert("command_history_exit", "退出码 {code}");
+            m.insert("command_history_copy", "复制");
+            m.insert("command_history_run", "运行");
             m.insert("export_scrollback", "导出滚动缓冲");
             m.insert("export_scrollback_clipboard", "复制最近 {count} 行");
             m.insert(
@@ -1148,6 +1152,8 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
             m.insert("command_history_empty", "尚無指令記錄");
             m.insert("command_history_no_matches", "沒有符合的指令");
             m.insert("command_history_exit", "結束碼 {code}");
+            m.insert("command_history_copy", "複製");
+            m.insert("command_history_run", "執行");
             m.insert("export_scrollback", "匯出捲動緩衝");
             m.insert("export_scrollback_clipboard", "複製最近 {count} 行");
             m.insert(

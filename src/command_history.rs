@@ -14,15 +14,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use db::kvp::KeyValueStore;
 use editor::Editor;
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement, ParentElement,
-    Render, SharedString, Subscription, TitlebarOptions, WeakEntity, Window, WindowBounds,
-    WindowOptions, actions, div, px,
+    App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle, Focusable, IntoElement,
+    ParentElement, Render, SharedString, Subscription, TitlebarOptions, WeakEntity, Window,
+    WindowBounds, WindowOptions, actions, div, px,
 };
 use serde::{Deserialize, Serialize};
 use theme::ActiveTheme;
 use ui::{
-    Button, ButtonSize, ButtonStyle, Color, Disableable, Icon, IconButton, IconName, IconSize,
-    Label, LabelSize, ListItem, ListItemSpacing, Tooltip, prelude::*,
+    Button, ButtonSize, ButtonStyle, Color, ContextMenu, Disableable, Icon, IconButton, IconName,
+    IconSize, Label, LabelSize, ListItem, ListItemSpacing, Tooltip, prelude::*, right_click_menu,
 };
 use util::ResultExt;
 
@@ -334,6 +334,29 @@ impl CommandHistoryWindow {
         window.remove_window();
     }
 
+    /// Right-click menu for a history row: copy the command, or run it in the
+    /// active terminal (which also closes the window, like a click).
+    fn build_entry_context_menu(
+        history: WeakEntity<Self>,
+        index: usize,
+        command: String,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<ContextMenu> {
+        ContextMenu::build(window, cx, move |menu, _, _| {
+            let copy_text = command.clone();
+            let run_history = history.clone();
+            menu.entry(i18n::t("command_history_copy"), None, move |_, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+            })
+            .entry(i18n::t("command_history_run"), None, move |window, cx| {
+                run_history
+                    .update(cx, |this, cx| this.run_entry(index, window, cx))
+                    .log_err();
+            })
+        })
+    }
+
     fn remove_entry(&mut self, index: usize, cx: &mut Context<Self>) {
         let changed = cx.update_global::<CommandHistory, _>(|history, _| history.remove(index));
         if changed {
@@ -424,6 +447,8 @@ impl CommandHistoryWindow {
         }
 
         let output_preview = preview_text(&entry.output);
+        let menu_command = entry.command.clone();
+        let menu_this = cx.entity().downgrade();
 
         let item = ListItem::new(index)
             .spacing(ListItemSpacing::Sparse)
@@ -461,7 +486,18 @@ impl CommandHistoryWindow {
                 }),
             );
 
-        item.into_any_element()
+        right_click_menu(format!("command-history-entry-{index}"))
+            .trigger(move |_is_open, _window, _cx| item)
+            .menu(move |window, cx| {
+                Self::build_entry_context_menu(
+                    menu_this.clone(),
+                    index,
+                    menu_command.clone(),
+                    window,
+                    cx,
+                )
+            })
+            .into_any_element()
     }
 }
 
