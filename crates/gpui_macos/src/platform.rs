@@ -194,8 +194,22 @@ pub(crate) struct MacPlatformState {
     /// Registered global hotkey callbacks, keyed by the synthetic hotkey ID
     /// passed to `RegisterEventHotKey`.
     global_hotkeys: HashMap<u32, Box<dyn FnMut()>>,
+    /// References returned by `RegisterEventHotKey` for each hotkey ID.
+    /// `RegisterEventHotKey` rejects a NULL out-parameter with `paramErr`
+    /// (-50), so the reference must be kept around.
+    global_hotkey_refs: HashMap<u32, carbon_hotkey::EventHotKeyRef>,
     next_global_hotkey_id: u32,
     global_hotkey_handler_installed: bool,
+}
+
+impl Drop for MacPlatformState {
+    fn drop(&mut self) {
+        for (_, hotkey_ref) in self.global_hotkey_refs.drain() {
+            if !hotkey_ref.is_null() {
+                unsafe { carbon_hotkey::UnregisterEventHotKey(hotkey_ref) };
+            }
+        }
+    }
 }
 
 impl MacPlatform {
@@ -244,6 +258,7 @@ impl MacPlatform {
             cursor_visible: Arc::new(AtomicBool::new(true)),
             system_notifications: crate::system_notifications::SystemNotificationState::new(),
             global_hotkeys: HashMap::new(),
+            global_hotkey_refs: HashMap::new(),
             next_global_hotkey_id: 0,
             global_hotkey_handler_installed: false,
         }))
@@ -778,6 +793,7 @@ impl Platform for MacPlatform {
         };
 
         unsafe {
+            let mut hotkey_ref: carbon_hotkey::EventHotKeyRef = ptr::null_mut();
             let status = carbon_hotkey::RegisterEventHotKey(
                 hotkey.key_code,
                 hotkey.modifiers,
@@ -787,7 +803,7 @@ impl Platform for MacPlatform {
                 },
                 carbon_hotkey::GetApplicationEventTarget(),
                 0,
-                ptr::null_mut(),
+                &mut hotkey_ref,
             );
             if status != carbon_hotkey::noErr {
                 log::error!(
@@ -796,6 +812,8 @@ impl Platform for MacPlatform {
                     hotkey.modifiers
                 );
                 self.0.lock().global_hotkeys.remove(&id);
+            } else {
+                self.0.lock().global_hotkey_refs.insert(id, hotkey_ref);
             }
         }
     }

@@ -74,24 +74,55 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &Toggle, cx| toggle(cx));
 }
 
+/// What a hotkey press should do, given the current window state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToggleAction {
+    /// No window exists yet: create it and reveal it in the same press.
+    CreateAndShow,
+    Hide,
+    Show,
+}
+
+fn action_for(window_exists: bool, visible: bool, active: bool) -> ToggleAction {
+    if !window_exists {
+        ToggleAction::CreateAndShow
+    } else if visible && active {
+        ToggleAction::Hide
+    } else {
+        ToggleAction::Show
+    }
+}
+
 /// Show/hide semantics: visible-and-key → hide; otherwise → show + focus.
 fn toggle(cx: &mut App) {
     QuakeState::update_global(cx, |state, cx| {
-        let Some(handle) = state.window else {
-            create_window(cx, state);
-            return;
-        };
-
-        if state.visible && handle.is_active(cx) == Some(true) {
-            state.visible = false;
-            if handle.update(cx, |_, window, _| window.hide()).is_err() {
-                // Window was closed since the last toggle; recreate next time.
-                state.window = None;
+        let active = state.window.and_then(|handle| handle.is_active(cx)) == Some(true);
+        match action_for(state.window.is_some(), state.visible, active) {
+            ToggleAction::CreateAndShow => {
+                create_window(cx, state);
+                // `create_window` opens the window hidden so an empty frame
+                // never flashes; the press that created it must also reveal
+                // it, otherwise the first shortcut does nothing visible.
+                if let Some(handle) = state.window {
+                    show_window(cx, state, handle);
+                }
             }
-            return;
+            ToggleAction::Hide => {
+                let Some(handle) = state.window else {
+                    return;
+                };
+                state.visible = false;
+                if handle.update(cx, |_, window, _| window.hide()).is_err() {
+                    // Window was closed since the last toggle; recreate next time.
+                    state.window = None;
+                }
+            }
+            ToggleAction::Show => {
+                if let Some(handle) = state.window {
+                    show_window(cx, state, handle);
+                }
+            }
         }
-
-        show_window(cx, state, handle);
     });
 }
 
@@ -234,5 +265,28 @@ impl Render for QuakeTerminalRoot {
             .size_full()
             .bg(cx.theme().colors().background)
             .children(self.terminal_view.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_press_creates_and_shows_the_window() {
+        // Creating without showing was the bug: the shortcut appeared dead
+        // until a second press because the window was opened hidden.
+        assert_eq!(action_for(false, false, false), ToggleAction::CreateAndShow);
+    }
+
+    #[test]
+    fn visible_and_active_hides_but_everything_else_shows() {
+        assert_eq!(action_for(true, true, true), ToggleAction::Hide);
+        // Visible but another window/app is key: bring it back.
+        assert_eq!(action_for(true, true, false), ToggleAction::Show);
+        // Hidden (after a previous hide).
+        assert_eq!(action_for(true, false, false), ToggleAction::Show);
+        // A closed window reports no active state; `show_window` recreates it.
+        assert_eq!(action_for(true, false, false), ToggleAction::Show);
     }
 }
