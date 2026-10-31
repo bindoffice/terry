@@ -6,6 +6,7 @@
 //! the same server) and means session restore only has to replay the argv.
 
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -303,7 +304,7 @@ pub fn ssh_invocation(
         args.push("-o".to_string());
         args.push("ControlMaster=auto".to_string());
         args.push("-o".to_string());
-        args.push(format!("ControlPath={}", control_path()));
+        args.push(format!("ControlPath={}", control_path(target)));
         args.push("-o".to_string());
         args.push("ControlPersist=60s".to_string());
     }
@@ -350,15 +351,46 @@ fn expand_tilde(path: &str) -> String {
     }
 }
 
-/// A control socket path. `%C` is expanded by ssh to a hash of the connection
-/// tuple, so every host gets its own socket. The pid namespaces sockets per app
-/// run while still allowing the 60s `ControlPersist` window to be shared by all
-/// terminals opened from this window.
-fn control_path() -> String {
-    let dir = std::env::temp_dir();
-    dir.join(format!("terry-ssh-{}-%C", std::process::id()))
+/// Longest `ControlPath` OpenSSH accepts. It must fit the `sun_path` field of
+/// the socket address minus its trailing NUL: 104 bytes on macOS/BSD and 108 on
+/// Linux, so 103 bytes is the portable ceiling.
+const MAX_CONTROL_PATH_BYTES: usize = 103;
+
+/// A control socket path for `target`.
+///
+/// ssh refuses a `ControlPath` that does not fit the platforms' socket path
+/// limit, and `%C` — the obvious way to make one socket per connection —
+/// expands to a 40-byte hash. macOS temp dirs are already ~50 bytes, so
+/// `$TMPDIR/terry-ssh-1234-%C` was over the limit and every connection died with
+/// "ControlPath too long" before it even reached the host. Hash the connection
+/// tuple into a short stem instead, and fall back to `/tmp` when `TMPDIR` itself
+/// is long enough to overflow the limit.
+fn control_path(target: &SshTarget) -> String {
+    control_path_in(&std::env::temp_dir(), target)
+        .or_else(|| control_path_in(Path::new("/tmp"), target))
+        .expect("a control path under /tmp always fits the socket path limit")
+}
+
+fn control_path_in(base: &Path, target: &SshTarget) -> Option<String> {
+    let path = base
+        .join(control_socket_name(target))
         .to_string_lossy()
-        .to_string()
+        .into_owned();
+    (path.len() <= MAX_CONTROL_PATH_BYTES).then_some(path)
+}
+
+/// Socket file name: one per connection tuple, namespaced by pid so a socket
+/// left behind by a previous run cannot be mistaken for a live master (while
+/// still letting every terminal opened from this window share one connection
+/// during the 60s `ControlPersist` window).
+fn control_socket_name(target: &SshTarget) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    target.login().hash(&mut hasher);
+    target.port.hash(&mut hasher);
+    // ssh hashes the identity into `%C` too: two aliases for the same host with
+    // different keys must not share a master.
+    target.identity_file.hash(&mut hasher);
+    format!("terry-ssh-{}-{:016x}", std::process::id(), hasher.finish())
 }
 
 /// A local tmux session as reported by `tmux list-sessions`.
@@ -607,6 +639,74 @@ Match host foo
         assert_eq!(hosts[2].host_name.as_deref(), Some("db.example.com"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `%C` is a 40-byte hash, which pushed `$TMPDIR/terry-ssh-<pid>-%C` over
+    /// OpenSSH's 104-byte socket path limit on macOS and made every SSH
+    /// connection fail before dialing the host.
+    #[test]
+    fn control_path_fits_the_socket_path_limit() {
+        let target = SshTarget {
+            label: "web".into(),
+            host: "web.example.com".into(),
+            user: Some("alice".into()),
+            port: Some(2222),
+            identity_file: Some("~/.ssh/id_web".into()),
+            host_name: None,
+        };
+        let path = control_path(&target);
+        assert!(
+            path.len() <= MAX_CONTROL_PATH_BYTES,
+            "control path is {} bytes: {path}",
+            path.len()
+        );
+        assert!(
+            !path.contains("%C"),
+            "tokens must be resolved locally: {path}"
+        );
+    }
+
+    #[test]
+    fn control_path_is_stable_per_target_and_shared_by_its_terminals() {
+        let target = SshTarget {
+            label: "web".into(),
+            host: "web.example.com".into(),
+            user: Some("alice".into()),
+            port: None,
+            identity_file: None,
+            host_name: None,
+        };
+        // Two terminals to the same host must share the master socket...
+        assert_eq!(control_path(&target), control_path(&target.clone()));
+
+        // ...but different connection tuples must not.
+        let other_host = SshTarget {
+            host: "db.example.com".into(),
+            ..target.clone()
+        };
+        let other_user = SshTarget {
+            user: Some("bob".into()),
+            ..target.clone()
+        };
+        let other_port = SshTarget {
+            port: Some(2222),
+            ..target.clone()
+        };
+        assert_ne!(control_path(&target), control_path(&other_host));
+        assert_ne!(control_path(&target), control_path(&other_user));
+        assert_ne!(control_path(&target), control_path(&other_port));
+    }
+
+    /// A long `TMPDIR` must not reintroduce the overflow: the socket moves to
+    /// `/tmp`, which is always short enough.
+    #[test]
+    fn control_path_falls_back_to_tmp_for_long_temp_dirs() {
+        let target = SshTarget::ad_hoc("web");
+        let long_base = PathBuf::from(format!("/{}/T", "x".repeat(120)));
+        assert!(control_path_in(&long_base, &target).is_none());
+        let fallback = control_path_in(Path::new("/tmp"), &target).unwrap();
+        assert!(fallback.starts_with("/tmp/"));
+        assert!(fallback.len() <= MAX_CONTROL_PATH_BYTES);
     }
 
     #[test]
