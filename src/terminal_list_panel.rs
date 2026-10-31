@@ -1573,6 +1573,13 @@ pub struct TerminalListPanel {
     session_file_stem: String,
     /// True when this panel owns the shared restore file for `session_workspace_key`.
     owns_workspace_session: bool,
+    /// Workspace DB id this panel was created with, if it was known. Kept so a
+    /// later worktree load can migrate an empty-window session key to the
+    /// project key even when the workspace itself is not readable here.
+    session_database_id: Option<workspace::WorkspaceId>,
+    /// Set once the empty-window key was migrated (or found unnecessary), so a
+    /// later worktree never renames the session file again.
+    session_key_migrated: bool,
     /// Spawn-time / last-known cwd per terminal view. Filled with the directory
     /// the shell was actually started in (after defaulting), and refreshed from
     /// live process info so session writes don't permanently store `null`.
@@ -1787,6 +1794,8 @@ impl TerminalListPanel {
             session_workspace_key,
             session_file_stem,
             owns_workspace_session,
+            session_database_id: database_id,
+            session_key_migrated: false,
             terminal_spawn_cwds: HashMap::default(),
             terminal_launches: HashMap::default(),
             terminal_daemon_sessions: HashMap::default(),
@@ -1839,27 +1848,31 @@ impl TerminalListPanel {
 
     /// Session file key for a workspace.
     ///
-    /// The workspace id wins whenever it is known: panels are created before a
-    /// restored project's worktrees have finished loading, so deriving the key
-    /// from the roots made the same window write `default.json` on one run and
-    /// `ws-<id>.json` on another. The next launch then looked for a file the
-    /// previous one never wrote and the terminals appeared lost until yet
-    /// another restart. The id is the value the workspace DB reuses for the same
-    /// roots, so it is stable across restarts.
+    /// Empty windows (the welcome window, or a window whose worktrees have not
+    /// loaded yet) must not be keyed by the workspace DB id: unlike project
+    /// workspaces, which the DB matches by their paths and therefore reuse the
+    /// same id, an empty workspace is not addressable by paths and gets a brand
+    /// new row id on every launch. Keying by that id made the panel look for
+    /// `ws-<new id>.json` each time and made persistent sessions appear lost on
+    /// every restart. They use the stable `default` key instead; once a
+    /// worktree arrives the key is migrated to the project key (see
+    /// [`Self::migrate_session_key`]).
     ///
-    /// Without a database id (windows built outside the workspace DB) the key
-    /// falls back to the worktree roots, and to `default` for the empty welcome
-    /// window. Secondary windows are isolated via ownership (they get a
-    /// `-w{id}` file stem).
+    /// When roots are known, the workspace id wins over hashing them so the
+    /// same project maps to the same file whether it was restored directly or
+    /// opened inside an empty window. Without a database id the key falls back
+    /// to the worktree roots, and to `default` for the empty welcome window.
+    /// Secondary windows are isolated via ownership (they get a `-w{id}` file
+    /// stem).
     fn session_key_for(database_id: Option<workspace::WorkspaceId>, roots: Vec<String>) -> String {
-        if let Some(id) = database_id {
-            return format!("ws-{}", i64::from(id));
-        }
         let mut roots = roots;
         roots.sort();
         roots.dedup();
         if roots.is_empty() {
             return "default".to_string();
+        }
+        if let Some(id) = database_id {
+            return format!("ws-{}", i64::from(id));
         }
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         roots.hash(&mut hasher);
@@ -1870,6 +1883,65 @@ impl TerminalListPanel {
         paths::data_dir()
             .join("sessions")
             .join(format!("{}.json", self.session_file_stem))
+    }
+
+    /// Moves the session file of an empty window to the project key once its
+    /// first worktree loads.
+    ///
+    /// A window created empty (the welcome window, or a project whose worktrees
+    /// had not loaded yet) uses the stable `default` key. Opening a folder in
+    /// that window turns it into a project workspace, and the next launch
+    /// restores it through `Workspace::new_local`, which keys it by the
+    /// workspace id. Renaming the file here keeps the terminals (and their
+    /// daemon sessions) attached across that transition instead of starting
+    /// fresh shells on the next launch.
+    fn migrate_session_key(&mut self, cx: &mut Context<Self>) {
+        if self.session_key_migrated || !self.owns_workspace_session {
+            return;
+        }
+        let Some(project) = self.project.upgrade() else {
+            return;
+        };
+        let roots: Vec<String> = project
+            .read(cx)
+            .visible_worktrees(cx)
+            .map(|worktree| worktree.read(cx).abs_path().to_string_lossy().into_owned())
+            .collect();
+        if roots.is_empty() {
+            return;
+        }
+        self.session_key_migrated = true;
+
+        // Use the id captured at construction: reading the Workspace from a
+        // worktree event could re-enter a Workspace update. Every workspace
+        // the DB will restore was created with its id already assigned.
+        let new_key = Self::session_key_for(self.session_database_id, roots);
+        if new_key == self.session_workspace_key {
+            return;
+        }
+        // Only the empty-window fallback is provisional; a project key is final.
+        if self.session_workspace_key != "default" {
+            return;
+        }
+
+        let old_path = self.session_file_path();
+        let panel_id = cx.entity_id();
+        release_session_claim(&self.session_workspace_key, panel_id);
+        self.owns_workspace_session = try_claim_session(&new_key, panel_id);
+        self.session_workspace_key = new_key;
+        self.session_file_stem = if self.owns_workspace_session {
+            self.session_workspace_key.clone()
+        } else {
+            format!("{}-w{}", self.session_workspace_key, panel_id.as_u64())
+        };
+
+        let new_path = self.session_file_path();
+        if old_path != new_path && old_path.exists() && !new_path.exists() {
+            if let Some(parent) = new_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::rename(&old_path, &new_path);
+        }
     }
 
     pub fn save_session(&mut self, cx: &App) {
@@ -2836,6 +2908,11 @@ impl TerminalListPanel {
         if !self.groups.is_empty() {
             return;
         }
+
+        // Worktrees may have finished loading since the panel was created, which
+        // changes an empty window's key to the project key. Do this before
+        // restoring so it reads the right file.
+        self.migrate_session_key(cx);
 
         let profile = self.default_terminal_profile(cx);
 
@@ -5197,6 +5274,10 @@ impl TerminalListPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The first worktree turns an empty window into a project workspace, so
+        // its session file must move to the project key.
+        self.migrate_session_key(cx);
+
         // Restoring a session must not auto-spawn project terminals — that was
         // inflating group counts across restarts (cwd check fails while PTYs
         // are still coming up).
@@ -9408,16 +9489,33 @@ mod tests {
         });
     }
 
-    /// The session key must not depend on whether the project's worktrees have
-    /// finished loading when the panel is created. Restoring a workspace builds
-    /// the panel first and opens the worktrees afterwards, so keying by roots
-    /// made the same window write `default.json` on one run and `ws-<id>.json`
-    /// on another — the next launch then never found the file the previous one
-    /// wrote, and the terminals looked lost until another restart.
+    /// Empty windows must not follow the workspace DB id. The DB only matches
+    /// project workspaces by their paths, so every launch of the welcome window
+    /// allocates a new row id. Keying the session file by that id made the panel
+    /// look for `ws-<new id>.json` on every restart and the terminals (and their
+    /// daemon sessions) appeared lost.
     #[test]
-    fn session_key_is_stable_across_worktree_load_timing() {
+    fn session_key_is_stable_for_empty_windows_across_workspace_ids() {
+        assert_eq!(
+            TerminalListPanel::session_key_for(None, Vec::new()),
+            "default"
+        );
+        assert_eq!(
+            TerminalListPanel::session_key_for(Some(WorkspaceId::from_i64(1)), Vec::new()),
+            "default"
+        );
+        assert_eq!(
+            TerminalListPanel::session_key_for(Some(WorkspaceId::from_i64(2)), Vec::new()),
+            "default"
+        );
+    }
+
+    /// A project window keeps using the workspace id once its roots are known,
+    /// so the same project maps to one file whether it was restored directly or
+    /// migrated from an empty window.
+    #[test]
+    fn session_key_prefers_the_workspace_id_when_roots_are_known() {
         let id = Some(WorkspaceId::from_i64(42));
-        assert_eq!(TerminalListPanel::session_key_for(id, Vec::new()), "ws-42");
         assert_eq!(
             TerminalListPanel::session_key_for(id, vec!["/tmp/project".to_string()]),
             "ws-42",

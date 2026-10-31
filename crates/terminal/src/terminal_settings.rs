@@ -534,6 +534,18 @@ mod tests {
     }
 
     #[test]
+    fn persistent_sessions_is_off_by_default_and_can_be_enabled() {
+        let content = SettingsContent::parse_json_with_comments("{}").unwrap();
+        assert!(!TerminalSettings::from_settings(&content).persistent_sessions);
+
+        let content = SettingsContent::parse_json_with_comments(
+            r#"{ "terminal": { "persistent_sessions": true } }"#,
+        )
+        .unwrap();
+        assert!(TerminalSettings::from_settings(&content).persistent_sessions);
+    }
+
+    #[test]
     fn background_opacity_is_clamped() {
         let content = SettingsContent::parse_json_with_comments(
             r#"{ "terminal": { "background_opacity": 2.0 } }"#,
