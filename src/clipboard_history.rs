@@ -15,13 +15,13 @@ use editor::Editor;
 use gpui::{
     App, AppContext as _, BorrowAppContext as _, ClipboardItem, Context, Entity, FocusHandle,
     Focusable, IntoElement, ParentElement, Render, SharedString, Subscription, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, actions, div, px,
+    WeakEntity, Window, WindowBounds, WindowOptions, actions, div, px,
 };
 use serde::{Deserialize, Serialize};
 use theme::ActiveTheme;
 use ui::{
-    Button, ButtonSize, ButtonStyle, Color, Disableable, Icon, IconButton, IconName, IconSize,
-    Label, LabelSize, ListItem, ListItemSpacing, Tooltip, prelude::*,
+    Button, ButtonSize, ButtonStyle, Color, ContextMenu, Disableable, Icon, IconButton, IconName,
+    IconSize, Label, LabelSize, ListItem, ListItemSpacing, Tooltip, prelude::*, right_click_menu,
 };
 use util::ResultExt;
 
@@ -288,6 +288,34 @@ impl ClipboardHistoryWindow {
         cx.notify();
     }
 
+    /// Right-click menu for a history row: copy the entry (same as a click) or
+    /// delete it.
+    fn build_entry_context_menu(
+        history: WeakEntity<Self>,
+        text: String,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<ContextMenu> {
+        ContextMenu::build(window, cx, move |menu, _, _| {
+            let copy_history = history.clone();
+            let copy_text = text.clone();
+            let delete_history = history.clone();
+            let delete_text = text.clone();
+            menu.entry(i18n::t("copy"), None, move |window, cx| {
+                copy_history
+                    .update(cx, |this, cx| {
+                        this.copy_entry(copy_text.clone(), window, cx)
+                    })
+                    .log_err();
+            })
+            .entry(i18n::t("clipboard_delete"), None, move |_, cx| {
+                delete_history
+                    .update(cx, |this, cx| this.remove_entry(&delete_text, cx))
+                    .log_err();
+            })
+        })
+    }
+
     fn clear_history(&mut self, cx: &mut Context<Self>) {
         let changed = cx.update_global::<ClipboardHistory, _>(|history, _| history.clear());
         if changed {
@@ -364,8 +392,10 @@ impl ClipboardHistoryWindow {
         let click_text = entry.text.clone();
         let delete_this = cx.entity().downgrade();
         let delete_text = entry.text.clone();
+        let menu_this = cx.entity().downgrade();
+        let menu_text = entry.text.clone();
 
-        ListItem::new(index)
+        let item = ListItem::new(index)
             .spacing(ListItemSpacing::Sparse)
             .inset(true)
             .on_click(move |_, window, cx| {
@@ -414,7 +444,13 @@ impl ClipboardHistoryWindow {
                         .update(cx, |this, cx| this.remove_entry(&text, cx))
                         .ok();
                 }),
-            )
+            );
+
+        right_click_menu(format!("clipboard-history-entry-{index}"))
+            .trigger(move |_is_open, _window, _cx| item)
+            .menu(move |window, cx| {
+                Self::build_entry_context_menu(menu_this.clone(), menu_text.clone(), window, cx)
+            })
             .into_any_element()
     }
 }
