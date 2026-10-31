@@ -14,17 +14,20 @@
 //!   when the workspace handle cannot be upgraded (all call sites use
 //!   `upgrade() … else return`), and workspace-specific context-menu actions
 //!   are hidden via `set_show_workspace_actions(false)`.
+//! - With no `Pane` around the `TerminalView`, nothing would consume the
+//!   `ItemEvent::CloseItem` emitted when the shell exits (`exit`, ctrl+D, ...),
+//!   so the root view subscribes to it and closes the window itself.
 
 use gpui::{
     App, AppContext, Bounds, Context, Entity, Focusable, Global, InteractiveElement, IntoElement,
-    ParentElement, Render, Styled, UpdateGlobal, WeakEntity, Window, WindowBounds, WindowHandle,
-    WindowKind, WindowOptions, actions, div, point, px, size,
+    ParentElement, Render, Styled, Subscription, UpdateGlobal, WeakEntity, Window, WindowBounds,
+    WindowHandle, WindowKind, WindowOptions, actions, div, point, px, size,
 };
 use project::{LocalProjectFlags, Project};
 use terminal_view::TerminalView;
 use theme::ActiveTheme;
 use util::ResultExt;
-use workspace::{AppState, Workspace};
+use workspace::{AppState, Workspace, item::ItemEvent};
 
 actions!(
     quake_terminal,
@@ -130,7 +133,24 @@ fn toggle(cx: &mut App) {
 /// terminal. Recreates the window if it was closed.
 fn show_window(cx: &mut App, state: &mut QuakeState, handle: WindowHandle<QuakeTerminalRoot>) {
     state.visible = true;
-    let shown = handle
+    if reveal_window(cx, handle) {
+        return;
+    }
+
+    // The window was closed since the last toggle (the shell exited, or the
+    // window was closed directly): recreate it and reveal the fresh terminal
+    // in the same press, otherwise the shortcut would appear dead.
+    state.window = None;
+    create_window(cx, state);
+    if let Some(handle) = state.window {
+        reveal_window(cx, handle);
+    }
+}
+
+/// Shows and focuses an existing quake window. Returns `false` if the window
+/// no longer exists.
+fn reveal_window(cx: &mut App, handle: WindowHandle<QuakeTerminalRoot>) -> bool {
+    handle
         .update(cx, |root, window, cx| {
             // makeKeyAndOrderFront alone does not activate the app when
             // another app is frontmost, which is exactly when quake is used.
@@ -141,11 +161,21 @@ fn show_window(cx: &mut App, state: &mut QuakeState, handle: WindowHandle<QuakeT
                 window.focus(&focus, cx);
             }
         })
-        .is_ok();
-    if !shown {
+        .is_ok()
+}
+
+/// Handles the shell exiting (typed `exit`, ctrl+D, a crashed shell, ...).
+///
+/// The quake window has no `Pane` to consume `TerminalView`'s
+/// `ItemEvent::CloseItem`, so the window is closed here; the next hotkey press
+/// spawns a fresh shell. Without this the window would linger on a dead
+/// terminal and the shell would look unquittable.
+fn close_window_after_shell_exit(window: &mut Window, cx: &mut App) {
+    QuakeState::update_global(cx, |state, _| {
         state.window = None;
-        create_window(cx, state);
-    }
+        state.visible = false;
+    });
+    window.remove_window();
 }
 
 /// Creates the quake window (hidden) and spawns its shell asynchronously.
@@ -202,6 +232,7 @@ fn create_window(cx: &mut App, state: &mut QuakeState) {
     let window = match cx.open_window(options, |_window, cx| {
         cx.new(|_cx| QuakeTerminalRoot {
             terminal_view: None,
+            _subscriptions: Vec::new(),
         })
     }) {
         Ok(window) => window,
@@ -241,6 +272,15 @@ fn create_window(cx: &mut App, state: &mut QuakeState) {
                 view.set_show_workspace_actions(false, cx);
                 view
             });
+            // Close the window when the shell exits: with no pane around the
+            // terminal view, `ItemEvent::CloseItem` has no other consumer.
+            let close_subscription =
+                cx.subscribe_in(&view, window, |_, _, event: &ItemEvent, window, cx| {
+                    if matches!(event, ItemEvent::CloseItem) {
+                        close_window_after_shell_exit(window, cx);
+                    }
+                });
+            root._subscriptions.push(close_subscription);
             root.terminal_view = Some(view.clone());
             let focus = view.focus_handle(cx);
             window.focus(&focus, cx);
@@ -256,6 +296,9 @@ fn create_window(cx: &mut App, state: &mut QuakeState) {
 /// Root view of the quake window: hosts the standalone TerminalView.
 struct QuakeTerminalRoot {
     terminal_view: Option<Entity<TerminalView>>,
+    /// Kept for the window's lifetime. Currently just the subscription that
+    /// closes the window when the shell exits.
+    _subscriptions: Vec<Subscription>,
 }
 
 impl Render for QuakeTerminalRoot {
