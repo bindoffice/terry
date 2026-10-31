@@ -173,6 +173,12 @@ pub fn spawn_env(
         }
     }
 
+    // A persistent terminal is still an interactive shell: expose the running
+    // binary so `terry` / `terry-daemon` resolve there too.
+    if let Err(error) = terminal::shell_integration::inject_cli_path_env(&mut env) {
+        log::warn!("persistent session: failed to expose the terry CLI in PATH: {error}");
+    }
+
     env.remove("SHLVL");
     env
 }

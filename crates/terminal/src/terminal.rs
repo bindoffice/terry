@@ -1263,6 +1263,9 @@ impl TerminalBuilder {
         let inject_shell_integration = task.is_none()
             && !no_pty
             && TerminalSettings::try_get(cx).is_some_and(|settings| settings.shell_integration);
+        // The CLI shims are independent of shell integration: `terry` should
+        // resolve in any interactive terminal the app opens.
+        let inject_cli_path = task.is_none() && !no_pty;
         let clipboard_read =
             TerminalSettings::try_get(cx).is_some_and(|settings| settings.clipboard_read);
         let fut = async move {
@@ -1288,6 +1291,12 @@ impl TerminalBuilder {
             }
 
             insert_zed_terminal_env(&mut env, &version);
+
+            if inject_cli_path {
+                if let Err(error) = shell_integration::inject_cli_path_env(&mut env) {
+                    log::warn!("Failed to expose the terry CLI in PATH: {error:#}");
+                }
+            }
 
             #[derive(Default)]
             struct ShellParams {
