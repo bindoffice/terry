@@ -222,7 +222,9 @@ pub struct TerminalSettings {
     /// supported shells (zsh, fish, PowerShell, Nushell) so prompt marks
     /// (OSC 133) and working directory reports (OSC 7) work out of the box.
     /// bash needs the script to be sourced manually from
-    /// `$TERRY_INTEGRATION_DIR`.
+    /// `$TERRY_INTEGRATION_DIR`. SSH connections opened from Terry's host
+    /// picker also bootstrap zsh, fish, and bash integration on the remote
+    /// host.
     pub shell_integration: bool,
     /// Allow applications to read the clipboard via OSC 52. Writing is always
     /// allowed; reading is opt-in because remote shells can use it to read

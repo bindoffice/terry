@@ -7793,6 +7793,7 @@ impl TerminalListPanel {
             let options = crate::remote_hosts::SshOptions {
                 reuse_connections: settings.ssh_reuse_connections,
                 extra_args: &settings.ssh_extra_args,
+                remote_shell_integration: settings.shell_integration,
             };
             crate::remote_hosts::ssh_invocation(&target, options, remote_tmux.as_deref())
         };
@@ -8843,6 +8844,23 @@ mod tests {
                 "ssh".to_string(),
                 "-o".to_string(),
                 "ProxyCommand=warp host".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn local_shell_command_preserves_remote_bootstrap() {
+        let bootstrap = terminal::shell_integration::remote_bootstrap_command();
+        let args = vec!["-t".to_string(), "web".to_string(), bootstrap.clone()];
+        let command = shell_command(task::ShellKind::Posix, "ssh", &args);
+
+        assert_eq!(
+            task::ShellKind::Posix.split(&command),
+            Some(vec![
+                "ssh".to_string(),
+                "-t".to_string(),
+                "web".to_string(),
+                bootstrap
             ])
         );
     }

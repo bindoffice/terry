@@ -1,0 +1,27 @@
+# Terry remote bash integration shim.
+#
+# Terry starts remote bash with `--rcfile` so this file can load the user's
+# login profile and then install Terry's prompt hooks. Keep the integration
+# directory in a separate variable in case the user's profile changes it.
+
+_terry_integration_dir="$TERRY_INTEGRATION_DIR"
+
+if [ -r /etc/profile ]; then
+  . /etc/profile
+fi
+
+if [ -r "$HOME/.bash_profile" ]; then
+  . "$HOME/.bash_profile"
+elif [ -r "$HOME/.bash_login" ]; then
+  . "$HOME/.bash_login"
+elif [ -r "$HOME/.profile" ]; then
+  . "$HOME/.profile"
+elif [ -r "$HOME/.bashrc" ]; then
+  . "$HOME/.bashrc"
+fi
+
+if [ -r "$_terry_integration_dir/bash/terry.bash" ]; then
+  . "$_terry_integration_dir/bash/terry.bash"
+fi
+
+unset _terry_integration_dir

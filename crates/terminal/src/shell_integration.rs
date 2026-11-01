@@ -1,5 +1,7 @@
 //! Terry shell integration: automatic setup for zsh, fish, PowerShell and
-//! Nushell, plus a manually sourced script for bash.
+//! Nushell, plus a manually sourced script for bash. SSH connections opened
+//! from the host picker bootstrap zsh, fish, and bash integration on the remote
+//! host.
 //!
 //! When a terminal is spawned, Terry writes its integration scripts to the app
 //! data dir and injects environment variables so supported shells load them.
@@ -20,6 +22,7 @@ use std::{
 };
 
 use anyhow::Context as _;
+use base64::Engine as _;
 use collections::HashMap;
 
 use paths::data_dir;
@@ -34,6 +37,7 @@ const TERRY_ZSH: &str = include_str!("../../../assets/shell-integration/zsh/terr
 const FISH_INTEGRATION: &str =
     include_str!("../../../assets/shell-integration/fish/vendor_conf.d/terry_integration.fish");
 const TERRY_BASH: &str = include_str!("../../../assets/shell-integration/bash/terry.bash");
+const TERRY_BASH_RC: &str = include_str!("../../../assets/shell-integration/bash/rc");
 const TERRY_POWERSHELL: &str =
     include_str!("../../../assets/shell-integration/powershell/terry.ps1");
 const TERRY_NUSHELL: &str = include_str!("../../../assets/shell-integration/nushell/terry.nu");
@@ -48,6 +52,7 @@ const SCRIPTS: &[(&str, &str)] = &[
         FISH_INTEGRATION,
     ),
     ("bash/terry.bash", TERRY_BASH),
+    ("bash/rc", TERRY_BASH_RC),
     ("powershell/terry.ps1", TERRY_POWERSHELL),
     ("nushell/terry.nu", TERRY_NUSHELL),
 ];
@@ -214,9 +219,103 @@ fn shim_contents(exe: &Path, forwarded: Option<&str>) -> String {
     )
 }
 
-#[cfg(unix)]
 fn sh_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// A POSIX shell command that installs Terry's shell integration in a remote
+/// user's cache and then starts their login shell.
+///
+/// SSH executes this through the remote login shell, so the outer command is
+/// limited to `sh -c '<script>'`, which works in POSIX shells and fish. The
+/// script writes the existing integration files over a small base64 payload
+/// and silently falls back to a normal login shell when the remote host lacks
+/// `base64`, a writable cache directory, or a supported shell.
+pub fn remote_bootstrap_command() -> String {
+    format!("sh -c {}", sh_quote(&remote_bootstrap_script()))
+}
+
+fn remote_bootstrap_script() -> String {
+    let mut script = String::from(
+        r#"terry_shell=${SHELL:-/bin/sh}
+terry_dir=${XDG_CACHE_HOME:-$HOME/.cache}/terry/shell-integration
+terry_fallback() { exec "$terry_shell" -l; }
+
+if ! command -v base64 >/dev/null 2>&1; then
+  terry_fallback
+fi
+if printf 'dGVzdA==' | base64 -d >/dev/null 2>&1; then
+  terry_decode() { base64 -d; }
+elif printf 'dGVzdA==' | base64 -D >/dev/null 2>&1; then
+  terry_decode() { base64 -D; }
+else
+  terry_fallback
+fi
+
+terry_write() {
+  terry_path=$1
+  terry_data=$2
+  mkdir -p "${terry_path%/*}" || return 1
+  printf '%s' "$terry_data" | terry_decode > "$terry_path.tmp.$$" || return 1
+  mv "$terry_path.tmp.$$" "$terry_path" || return 1
+}
+
+umask 077
+mkdir -p "$terry_dir" || terry_fallback
+"#,
+    );
+
+    for (relative_path, contents) in [
+        ("zsh/.zshenv", ZSHENV_SHIM),
+        ("zsh/.zprofile", ZPROFILE_SHIM),
+        ("zsh/.zshrc", ZSHRC_SHIM),
+        ("zsh/terry.zsh", TERRY_ZSH),
+        (
+            "fish/vendor_conf.d/terry_integration.fish",
+            FISH_INTEGRATION,
+        ),
+        ("bash/terry.bash", TERRY_BASH),
+        ("bash/rc", TERRY_BASH_RC),
+    ] {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(contents);
+        script.push_str("terry_write ");
+        script.push('"');
+        script.push_str("$terry_dir/");
+        script.push_str(relative_path);
+        script.push('"');
+        script.push(' ');
+        script.push_str(&sh_quote(&encoded));
+        script.push_str(" || terry_fallback\n");
+    }
+
+    script.push_str(
+        r#"
+export TERRY_INTEGRATION_DIR="$terry_dir"
+export TERRY_SHELL_INTEGRATION=1
+terry_shell_name=${terry_shell##*/}
+terry_shell_name=${terry_shell_name#-}
+case "$terry_shell_name" in
+  zsh)
+    if [ -n "${ZDOTDIR:-}" ]; then
+      export TERRY_USER_ZDOTDIR="$ZDOTDIR"
+    fi
+    export ZDOTDIR="$terry_dir/zsh"
+    exec "$terry_shell" -l
+    ;;
+  fish)
+    export XDG_DATA_DIRS="$terry_dir:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+    exec "$terry_shell" -l
+    ;;
+  bash)
+    exec "$terry_shell" --rcfile "$terry_dir/bash/rc" -i
+    ;;
+  *)
+    terry_fallback
+    ;;
+esac
+"#,
+    );
+    script
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -270,8 +369,9 @@ fn write_scripts(dir: &Path) -> anyhow::Result<()> {
 ///
 /// Returns commands that must be typed into the spawned shell after it starts
 /// (used for shells that cannot be configured through the environment). Does
-/// nothing for unsupported shells (or remote shells like `ssh`) and when
-/// integration was already injected for this environment, as happens when
+/// nothing for unsupported shells (or remote shells like `ssh`; the SSH picker
+/// uses [`remote_bootstrap_command`] instead) and when integration was already
+/// injected for this environment, as happens when
 /// `TerminalBuilder::clone_builder` re-runs `TerminalBuilder::new` with an
 /// already-prepared template.
 pub fn inject_shell_integration_env(
@@ -679,5 +779,107 @@ mod tests {
                 "{name} integration must emit a file:// OSC 7 URI",
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_bootstrap_is_valid_posix_shell() {
+        let script = remote_bootstrap_script();
+        let output = std::process::Command::new("sh")
+            .args(["-n", "-c", &script])
+            .output()
+            .expect("sh should be available");
+        assert!(
+            output.status.success(),
+            "remote bootstrap has invalid shell syntax: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let command = remote_bootstrap_command();
+        let output = std::process::Command::new("sh")
+            .args(["-n", "-c", &command])
+            .output()
+            .expect("sh should be available");
+        assert!(
+            output.status.success(),
+            "quoted remote command has invalid shell syntax: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn remote_bootstrap_supports_common_remote_shells() {
+        let script = remote_bootstrap_script();
+        assert!(
+            script.contains("terry_dir=${XDG_CACHE_HOME:-$HOME/.cache}/terry/shell-integration")
+        );
+        assert!(script.contains("export TERRY_INTEGRATION_DIR=\"$terry_dir\""));
+        assert!(script.contains("export TERRY_SHELL_INTEGRATION=1"));
+        assert!(script.contains("exec \"$terry_shell\" -l"));
+        assert!(script.contains("--rcfile \"$terry_dir/bash/rc\" -i"));
+        assert!(script.contains("XDG_DATA_DIRS"));
+        assert!(script.contains("ZDOTDIR"));
+        assert!(script.contains("terry_fallback"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_bootstrap_writes_scripts_and_starts_the_remote_shell() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!(
+            "terry-remote-integration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = dir.join("home");
+        let cache = dir.join("cache");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let fake_shell = dir.join("zsh");
+        std::fs::write(
+            &fake_shell,
+            "#!/bin/sh\nprintf '%s\\n' \"$TERRY_INTEGRATION_DIR\" \"$TERRY_SHELL_INTEGRATION\" \"$ZDOTDIR\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let output = std::process::Command::new("sh")
+            .args(["-c", &remote_bootstrap_script()])
+            .env("HOME", &home)
+            .env("XDG_CACHE_HOME", &cache)
+            .env("SHELL", &fake_shell)
+            .env_remove("ZDOTDIR")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "remote bootstrap failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let integration_dir = cache.join("terry").join("shell-integration");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            stdout.lines().collect::<Vec<_>>(),
+            vec![
+                integration_dir.to_str().unwrap(),
+                "1",
+                integration_dir.join("zsh").to_str().unwrap(),
+            ]
+        );
+        assert!(integration_dir.join("zsh/terry.zsh").is_file());
+        assert!(
+            integration_dir
+                .join("fish/vendor_conf.d/terry_integration.fish")
+                .is_file()
+        );
+        assert!(integration_dir.join("bash/terry.bash").is_file());
+        assert!(integration_dir.join("bash/rc").is_file());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

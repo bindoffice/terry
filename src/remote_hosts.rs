@@ -288,6 +288,8 @@ pub struct SshOptions<'a> {
     pub reuse_connections: bool,
     /// Extra user-provided arguments inserted before the destination.
     pub extra_args: &'a [String],
+    /// Install Terry's OSC 133/7 shell integration in the remote login shell.
+    pub remote_shell_integration: bool,
 }
 
 /// Builds the `ssh` command for `target`. `remote_tmux` attaches to (or creates)
@@ -319,8 +321,9 @@ pub fn ssh_invocation(
     }
     args.extend(options.extra_args.iter().cloned());
 
-    if remote_tmux.is_some() {
-        // Allocate a TTY so tmux can attach.
+    let bootstrap_remote_shell = remote_tmux.is_none() && options.remote_shell_integration;
+    if remote_tmux.is_some() || bootstrap_remote_shell {
+        // Both tmux and the interactive remote shell need a TTY.
         args.push("-t".to_string());
     }
     args.push(target.login());
@@ -333,6 +336,8 @@ pub fn ssh_invocation(
     if let Some(session) = remote_tmux {
         args.push("tmux".to_string());
         args.extend(local_tmux_args(session));
+    } else if bootstrap_remote_shell {
+        args.push(terminal::shell_integration::remote_bootstrap_command());
     }
 
     ("ssh".to_string(), args, title)
@@ -715,6 +720,7 @@ Match host foo
         let options = SshOptions {
             reuse_connections: true,
             extra_args: &extra,
+            remote_shell_integration: true,
         };
         let target = SshTarget {
             label: "web".into(),
@@ -743,6 +749,46 @@ Match host foo
         assert!(args.iter().any(|arg| arg.starts_with("ControlPath=")));
         #[cfg(unix)]
         assert!(args.contains(&"-t".to_string()));
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("sh -c ")),
+            "remote tmux must keep its existing launch command"
+        );
+    }
+
+    #[test]
+    fn builds_ssh_args_with_remote_shell_integration() {
+        let extra = Vec::new();
+        let options = SshOptions {
+            reuse_connections: false,
+            extra_args: &extra,
+            remote_shell_integration: true,
+        };
+        let target = SshTarget::ad_hoc("web");
+
+        let (_, args, _) = ssh_invocation(&target, options, None);
+
+        assert!(args.contains(&"-t".to_string()));
+        assert_eq!(args[args.len() - 2], "web");
+        let bootstrap = args.last().expect("remote bootstrap command");
+        assert!(bootstrap.starts_with("sh -c '"));
+        assert!(bootstrap.contains("TERRY_INTEGRATION_DIR"));
+        assert!(bootstrap.contains("zsh/terry.zsh"));
+        assert!(bootstrap.contains("bash/terry.bash"));
+    }
+
+    #[test]
+    fn remote_shell_integration_can_be_disabled() {
+        let extra = Vec::new();
+        let options = SshOptions {
+            reuse_connections: false,
+            extra_args: &extra,
+            remote_shell_integration: false,
+        };
+        let target = SshTarget::ad_hoc("web");
+
+        let (_, args, _) = ssh_invocation(&target, options, None);
+
+        assert_eq!(args, vec!["web".to_string()]);
     }
 
     #[test]

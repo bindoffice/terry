@@ -29,7 +29,7 @@ Group shells, browse files, and keep an AI agent beside you — built for people
 - **Paste safety** — multi-line pastes ask for confirmation by default; choose “Paste and Don't Ask Again” in the prompt to stop asking, or set `"terminal": { "confirm_multiline_paste": false }`
 - **Shell integration** — automatic for zsh and fish: prompt marks (OSC 133 / VS Code OSC 633) and working-directory tracking (OSC 7); `ctrl-shift-up` / `ctrl-shift-down` move between prompts
 - **Terminal profiles** — named launch profiles can override the shell, environment, and working directory, and run a startup command (for example `tmux` or a project virtualenv); pick one from a group's context menu or set `default_profile`
-- **SSH hosts** — a picker built from `~/.ssh/config` and `terminal.ssh_hosts`; connections are reused for 60s (`ControlMaster`), so a second terminal on the same host opens instantly. “Connect with tmux” starts an attach-or-create tmux session on the remote host
+- **SSH hosts** — a picker built from `~/.ssh/config` and `terminal.ssh_hosts`; connections are reused for 60s (`ControlMaster`), so a second terminal on the same host opens instantly. Plain SSH sessions automatically install shell integration for remote zsh, fish, and bash. “Connect with tmux” starts an attach-or-create tmux session on the remote host
 - **tmux sessions** — attach to (or create) a local tmux session from the picker; the remote equivalent goes through `ssh … tmux new -A -s <name>`. Choose the native option to mirror the session through tmux *control mode*: every tmux window becomes a Terry group and every pane a native split, with input, layout changes, window names and reconnects kept in sync. Without native mode the session runs inside a single terminal.
 - **Terminal color schemes** — a bundled library (Dracula, Nord, Solarized, Gruvbox, One Dark, Tokyo Night, Catppuccin, Rosé Pine, …) that changes only terminal colors; pick one per terminal, per profile, or with `terminal.color_scheme`. Import Alacritty `.toml`, iTerm2 `.itermcolors`, or Terry JSON files from the Terminal menu
 - **Session restore** — groups, split layouts, working directories, titles, per-profile color schemes, per-terminal font zoom, and profile/SSH/tmux launches are restored on restart
@@ -55,7 +55,11 @@ Terry parses **OSC 133** prompt marks (including the VS Code **OSC 633** variant
 
   (Works with the system bash on macOS; if [bash-preexec](https://github.com/rcaloras/bash-preexec) is loaded, Terry hooks into it automatically.)
 
-Remote shells launched as `ssh` are skipped, and task runs never get integration.
+SSH sessions opened from the host picker bootstrap the same integration into a
+remote zsh, fish, or bash login shell. The remote host needs `base64` and a
+writable cache directory; otherwise Terry silently starts a normal login shell.
+SSH commands typed manually inside a terminal, remote tmux sessions, and task
+runs do not get automatic integration.
 
 ## CLI
 
