@@ -83,6 +83,13 @@ fn release_session_claim(workspace_key: &str, owner: EntityId) {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionFileMigration {
+    NoSession,
+    DestinationWins,
+    SourceMoved,
+}
+
 /// A terminal whose foreground process is a coding agent. Kept alive after the
 /// tab is closed so opening a terminal again continues the same session.
 struct ParkedAgentSession {
@@ -1566,16 +1573,16 @@ pub struct TerminalListPanel {
     session_finish_scheduled: bool,
     /// Ensures [`Self::reveal_active_group_during_restore`] is deferred at most once.
     session_reveal_scheduled: bool,
-    /// Stable key for this workspace (db id / project paths / "default").
+    /// Stable key for this workspace (project paths / "default").
     session_workspace_key: String,
     /// File stem under `sessions/` — workspace key for the owner, or
     /// `{key}-w{panel_id}` for secondary windows.
     session_file_stem: String,
     /// True when this panel owns the shared restore file for `session_workspace_key`.
     owns_workspace_session: bool,
-    /// Workspace DB id this panel was created with, if it was known. Kept so a
-    /// later worktree load can migrate an empty-window session key to the
-    /// project key even when the workspace itself is not readable here.
+    /// Workspace DB id this panel was created with, if it was known. Session
+    /// files no longer use this unstable id, but it lets startup consolidate a
+    /// legacy `ws-<id>.json` into the path-keyed file.
     session_database_id: Option<workspace::WorkspaceId>,
     /// Set once the empty-window key was migrated (or found unnecessary), so a
     /// later worktree never renames the session file again.
@@ -1718,8 +1725,13 @@ impl TerminalListPanel {
         let panel_id = cx.entity_id();
         // Must not `workspace.read(cx)` here — `new` often runs inside a
         // Workspace update (observe_new / init_workspace).
-        let session_workspace_key = Self::compute_workspace_session_key(&project, database_id, cx);
+        let session_workspace_key = Self::compute_workspace_session_key(&project, cx);
         let owns_workspace_session = try_claim_session(&session_workspace_key, panel_id);
+        if owns_workspace_session {
+            if let Some(database_id) = database_id {
+                Self::migrate_legacy_workspace_session(&session_workspace_key, database_id);
+            }
+        }
         let session_file_stem = if owns_workspace_session {
             session_workspace_key.clone()
         } else {
@@ -1833,56 +1845,60 @@ impl TerminalListPanel {
 
     /// Creates the initial group (with one terminal) if none exists yet.
 
-    fn compute_workspace_session_key(
-        project: &Entity<Project>,
-        database_id: Option<workspace::WorkspaceId>,
-        cx: &App,
-    ) -> String {
+    fn compute_workspace_session_key(project: &Entity<Project>, cx: &App) -> String {
         let roots = project
             .read(cx)
             .visible_worktrees(cx)
             .map(|worktree| worktree.read(cx).abs_path().to_string_lossy().into_owned())
             .collect();
-        Self::session_key_for(database_id, roots)
+        Self::session_key_for(roots)
     }
 
     /// Session file key for a workspace.
     ///
     /// Empty windows (the welcome window, or a window whose worktrees have not
-    /// loaded yet) must not be keyed by the workspace DB id: unlike project
-    /// workspaces, which the DB matches by their paths and therefore reuse the
-    /// same id, an empty workspace is not addressable by paths and gets a brand
-    /// new row id on every launch. Keying by that id made the panel look for
-    /// `ws-<new id>.json` each time and made persistent sessions appear lost on
-    /// every restart. They use the stable `default` key instead; once a
-    /// worktree arrives the key is migrated to the project key (see
+    /// loaded yet) use the stable `default` key. Once a worktree arrives it is
+    /// migrated to a key derived from the project paths (see
     /// [`Self::migrate_session_key`]).
     ///
-    /// When roots are known, the workspace id wins over hashing them so the
-    /// same project maps to the same file whether it was restored directly or
-    /// opened inside an empty window. Without a database id the key falls back
-    /// to the worktree roots, and to `default` for the empty welcome window.
+    /// The workspace id is deliberately not part of the key. Closing a window
+    /// can temporarily unbind that id, while a full app restart can bind it
+    /// again, which previously produced both `ws-<id>.json` and
+    /// `paths-<hash>.json` for the same project. Project paths are available in
+    /// both cases and therefore define the canonical file.
+    ///
     /// Secondary windows are isolated via ownership (they get a `-w{id}` file
     /// stem).
-    fn session_key_for(database_id: Option<workspace::WorkspaceId>, roots: Vec<String>) -> String {
+    fn session_key_for(roots: Vec<String>) -> String {
         let mut roots = roots;
         roots.sort();
         roots.dedup();
         if roots.is_empty() {
             return "default".to_string();
         }
-        if let Some(id) = database_id {
-            return format!("ws-{}", i64::from(id));
-        }
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         roots.hash(&mut hasher);
         format!("paths-{:x}", hasher.finish())
     }
 
-    fn session_file_path(&self) -> PathBuf {
+    fn session_file_path_for_key(key: &str) -> PathBuf {
         paths::data_dir()
             .join("sessions")
-            .join(format!("{}.json", self.session_file_stem))
+            .join(format!("{key}.json"))
+    }
+
+    fn session_file_path(&self) -> PathBuf {
+        Self::session_file_path_for_key(&self.session_file_stem)
+    }
+
+    fn migrate_legacy_workspace_session(session_key: &str, database_id: workspace::WorkspaceId) {
+        if session_key == "default" {
+            return;
+        }
+
+        let destination = Self::session_file_path_for_key(session_key);
+        let legacy = Self::session_file_path_for_key(&format!("ws-{}", i64::from(database_id)));
+        Self::consolidate_session_files(&destination, &[legacy]);
     }
 
     /// Moves the session file of an empty window to the project key once its
@@ -1891,16 +1907,15 @@ impl TerminalListPanel {
     /// A window created empty (the welcome window, or a project whose worktrees
     /// had not loaded yet) uses the stable `default` key. Opening a folder in
     /// that window turns it into a project workspace, and the next launch
-    /// restores it through `Workspace::new_local`, which keys it by the
-    /// workspace id. Renaming the file here keeps the terminals (and their
+    /// restores it through `Workspace::new_local`, which resolves the same
+    /// path-based key. Renaming the file here keeps the terminals (and their
     /// daemon sessions) attached across that transition instead of starting
     /// fresh shells on the next launch.
     ///
-    /// The project may already have its own session (opened in this window
-    /// before). That session wins: the caller restores it and parks the
-    /// welcome window's terminals in Detached Sessions instead of overwriting
-    /// it. Only when the project has no session yet is `default.json` moved
-    /// over, carrying the welcome terminals into the project.
+    /// If the canonical project file is newest, the caller restores it and
+    /// parks the welcome window's terminals in Detached Sessions. Otherwise the
+    /// newest legacy file is moved over, carrying the current terminals into
+    /// the project.
     ///
     /// Returns true when the caller should restore the project session that
     /// already exists at the new key.
@@ -1921,10 +1936,7 @@ impl TerminalListPanel {
         }
         self.session_key_migrated = true;
 
-        // Use the id captured at construction: reading the Workspace from a
-        // worktree event could re-enter a Workspace update. Every workspace
-        // the DB will restore was created with its id already assigned.
-        let new_key = Self::session_key_for(self.session_database_id, roots);
+        let new_key = Self::session_key_for(roots);
         if new_key == self.session_workspace_key {
             return false;
         }
@@ -1949,35 +1961,87 @@ impl TerminalListPanel {
         }
 
         let new_path = self.session_file_path();
-        Self::migrate_session_files(&old_path, &new_path)
+        let mut sources = vec![old_path];
+        if let Some(database_id) = self.session_database_id {
+            let legacy = Self::session_file_path_for_key(&format!("ws-{}", i64::from(database_id)));
+            if legacy != new_path && !sources.contains(&legacy) {
+                sources.push(legacy);
+            }
+        }
+        Self::consolidate_session_files(&new_path, &sources)
+            == SessionFileMigration::DestinationWins
     }
 
-    /// Decides what an empty window's session file becomes when the window
-    /// turns into a project workspace.
+    /// Consolidates legacy session files into one canonical file.
     ///
-    /// Returns true when the project already has a session at `new_path`; the
-    /// caller restores (or keeps) that one and parks the welcome terminals.
-    /// Otherwise the welcome file is moved over so its terminals become the
-    /// project's first session.
-    fn migrate_session_files(old_path: &Path, new_path: &Path) -> bool {
-        if old_path == new_path {
-            return false;
+    /// If both sides exist, the newest file wins. This handles the transition
+    /// where a full restart wrote `ws-<id>.json` and a later window close wrote
+    /// `paths-<hash>.json` (or vice versa): the stale duplicate is removed
+    /// instead of alternating which session is restored.
+    fn consolidate_session_files(new_path: &Path, old_paths: &[PathBuf]) -> SessionFileMigration {
+        let old_paths: Vec<&Path> = old_paths
+            .iter()
+            .map(PathBuf::as_path)
+            .filter(|path| *path != new_path && path.exists())
+            .collect();
+        let destination_exists = new_path.exists();
+
+        if old_paths.is_empty() {
+            return if destination_exists {
+                SessionFileMigration::DestinationWins
+            } else {
+                SessionFileMigration::NoSession
+            };
         }
-        if new_path.exists() {
-            return true;
-        }
-        if !old_path.exists() {
-            return false;
-        }
-        if let Some(parent) = new_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if std::fs::rename(old_path, new_path).is_err() {
-            // Windows does not replace an existing file on rename.
+
+        let newest_old = old_paths
+            .iter()
+            .copied()
+            .max_by_key(|path| Self::session_file_modified(path));
+        let destination_modified = destination_exists
+            .then(|| Self::session_file_modified(new_path))
+            .flatten();
+
+        if let Some(newest_old) = newest_old {
+            let old_modified = Self::session_file_modified(newest_old);
+            if destination_modified
+                .is_some_and(|modified| old_modified.is_none_or(|old| modified >= old))
+            {
+                for old_path in old_paths {
+                    let _ = std::fs::remove_file(old_path);
+                }
+                return SessionFileMigration::DestinationWins;
+            }
+
+            if let Some(parent) = new_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let temp_path = new_path.with_extension("json.migrate");
+            let _ = std::fs::remove_file(&temp_path);
+            if std::fs::copy(newest_old, &temp_path).is_err() {
+                return SessionFileMigration::NoSession;
+            }
             let _ = std::fs::remove_file(new_path);
-            let _ = std::fs::rename(old_path, new_path);
+            if std::fs::rename(&temp_path, new_path).is_err() {
+                let _ = std::fs::remove_file(&temp_path);
+                return SessionFileMigration::NoSession;
+            }
+            let _ = std::fs::remove_file(newest_old);
+            for old_path in old_paths {
+                if old_path != newest_old {
+                    let _ = std::fs::remove_file(old_path);
+                }
+            }
+            return SessionFileMigration::SourceMoved;
         }
-        false
+
+        SessionFileMigration::NoSession
+    }
+
+    fn session_file_modified(path: &Path) -> Option<std::time::SystemTime> {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
     }
 
     pub fn save_session(&mut self, cx: &App) {
@@ -9617,51 +9681,37 @@ mod tests {
         });
     }
 
-    /// Empty windows must not follow the workspace DB id. The DB only matches
-    /// project workspaces by their paths, so every launch of the welcome window
-    /// allocates a new row id. Keying the session file by that id made the panel
-    /// look for `ws-<new id>.json` on every restart and the terminals (and their
-    /// daemon sessions) appeared lost.
+    /// Empty windows must use one stable key instead of following the workspace
+    /// DB id, which changes on every launch of the welcome window.
     #[test]
     fn session_key_is_stable_for_empty_windows_across_workspace_ids() {
-        assert_eq!(
-            TerminalListPanel::session_key_for(None, Vec::new()),
-            "default"
-        );
-        assert_eq!(
-            TerminalListPanel::session_key_for(Some(WorkspaceId::from_i64(1)), Vec::new()),
-            "default"
-        );
-        assert_eq!(
-            TerminalListPanel::session_key_for(Some(WorkspaceId::from_i64(2)), Vec::new()),
-            "default"
-        );
+        assert_eq!(TerminalListPanel::session_key_for(Vec::new()), "default");
     }
 
-    /// A project window keeps using the workspace id once its roots are known,
-    /// so the same project maps to one file whether it was restored directly or
-    /// migrated from an empty window.
+    /// Project sessions are keyed only by their paths, so they resolve to the
+    /// same file whether a window close or a full app restart changes the
+    /// workspace DB binding.
     #[test]
-    fn session_key_prefers_the_workspace_id_when_roots_are_known() {
-        let id = Some(WorkspaceId::from_i64(42));
+    fn session_key_uses_only_project_paths() {
+        let key = TerminalListPanel::session_key_for(vec!["/tmp/project".to_string()]);
+        assert!(key.starts_with("paths-"), "unexpected key {key}");
         assert_eq!(
-            TerminalListPanel::session_key_for(id, vec!["/tmp/project".to_string()]),
-            "ws-42",
+            key,
+            TerminalListPanel::session_key_for(vec!["/tmp/project".to_string()]),
         );
     }
 
     #[test]
-    fn session_key_falls_back_to_paths_without_a_database_id() {
-        let unsorted =
-            TerminalListPanel::session_key_for(None, vec!["/b".to_string(), "/a".to_string()]);
-        let sorted =
-            TerminalListPanel::session_key_for(None, vec!["/a".to_string(), "/b".to_string()]);
+    fn session_key_normalizes_project_path_order() {
+        let unsorted = TerminalListPanel::session_key_for(vec![
+            "/b".to_string(),
+            "/a".to_string(),
+            "/b".to_string(),
+        ]);
+        let sorted = TerminalListPanel::session_key_for(vec!["/a".to_string(), "/b".to_string()]);
         assert_eq!(unsorted, sorted);
         assert!(unsorted.starts_with("paths-"), "unexpected key {unsorted}");
-        assert_eq!(
-            TerminalListPanel::session_key_for(None, Vec::new()),
-            "default"
-        );
+        assert_eq!(TerminalListPanel::session_key_for(Vec::new()), "default");
     }
 
     /// The panel's constructor (not just `session_key_for`) must resolve an
@@ -9705,44 +9755,71 @@ mod tests {
         }
     }
 
-    /// Opening a folder in an empty window migrates `default.json` to the
-    /// project key. A project that already has a session file keeps it: the
-    /// caller restores that session and parks the welcome terminals, so the
-    /// project's previous terminals are not overwritten.
+    /// Opening a folder in an empty window leaves exactly one canonical session
+    /// file. If a project file already exists, the newest copy wins and stale
+    /// duplicates are removed.
     #[test]
-    fn migration_prefers_an_existing_project_session() {
+    fn migration_consolidates_session_files() {
         let dir =
             std::env::temp_dir().join(format!("terry-session-migrate-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let old = dir.join("default.json");
-        let new = dir.join("ws-42.json");
+        let legacy = dir.join("ws-42.json");
+        let new = dir.join("paths-42.json");
+
+        let write_with_mtime = |path: &Path, contents: &str, seconds: u64| {
+            std::fs::write(path, contents).unwrap();
+            let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            file.set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(seconds)),
+            )
+            .unwrap();
+        };
 
         // No project session yet: the welcome session moves over.
-        std::fs::write(&old, r#"{"welcome":true}"#).unwrap();
-        assert!(!TerminalListPanel::migrate_session_files(&old, &new));
+        write_with_mtime(&old, r#"{"welcome":true}"#, 1);
+        assert_eq!(
+            TerminalListPanel::consolidate_session_files(&new, &[old.clone()]),
+            SessionFileMigration::SourceMoved,
+        );
         assert!(!old.exists());
         assert_eq!(
             std::fs::read_to_string(&new).unwrap(),
             r#"{"welcome":true}"#
         );
 
-        // The project session wins; the welcome file stays untouched.
-        std::fs::write(&old, r#"{"welcome":true}"#).unwrap();
-        std::fs::write(&new, r#"{"project":true}"#).unwrap();
-        assert!(TerminalListPanel::migrate_session_files(&old, &new));
+        // The project file is newer: the welcome duplicate is removed.
+        write_with_mtime(&old, r#"{"welcome":true}"#, 2);
+        write_with_mtime(&legacy, r#"{"legacy":true}"#, 2);
+        write_with_mtime(&new, r#"{"project":true}"#, 3);
         assert_eq!(
-            std::fs::read_to_string(&old).unwrap(),
-            r#"{"welcome":true}"#
+            TerminalListPanel::consolidate_session_files(&new, &[old.clone(), legacy.clone()]),
+            SessionFileMigration::DestinationWins,
         );
+        assert!(!old.exists() && !legacy.exists());
         assert_eq!(
             std::fs::read_to_string(&new).unwrap(),
             r#"{"project":true}"#
         );
 
+        // The newest legacy file wins over both the welcome and canonical
+        // files, and every duplicate is removed.
+        write_with_mtime(&old, r#"{"welcome":true}"#, 2);
+        write_with_mtime(&legacy, r#"{"legacy":true}"#, 4);
+        write_with_mtime(&new, r#"{"stale":true}"#, 3);
+        let migration =
+            TerminalListPanel::consolidate_session_files(&new, &[old.clone(), legacy.clone()]);
+        assert_eq!(migration, SessionFileMigration::SourceMoved);
+        assert!(!old.exists() && !legacy.exists());
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), r#"{"legacy":true}"#);
+
         // Missing files are a no-op.
-        std::fs::remove_file(&old).unwrap();
         std::fs::remove_file(&new).unwrap();
-        assert!(!TerminalListPanel::migrate_session_files(&old, &new));
+        assert_eq!(
+            TerminalListPanel::consolidate_session_files(&new, &[old.clone()]),
+            SessionFileMigration::NoSession,
+        );
         assert!(!old.exists() && !new.exists());
 
         std::fs::remove_dir_all(&dir).unwrap();

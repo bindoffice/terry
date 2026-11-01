@@ -924,6 +924,13 @@ impl<T> Term<T> {
                 | TermMode::KITTY_KEYBOARD_PROTOCOL,
         );
 
+        // Kitty keyboard modes also live on a per-screen stack. Clearing only
+        // the mode bits leaves a stale stack entry that is restored the next
+        // time the alternate screen is swapped, which can make ordinary input
+        // turn back into CSI-u sequences after a remote program disconnects.
+        self.keyboard_mode_stack.clear();
+        self.inactive_keyboard_mode_stack.clear();
+
         // Pointer shapes and unfinished notifications belong to the child
         // that just exited.
         self.mouse_cursor_icon = None;

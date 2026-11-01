@@ -1169,7 +1169,6 @@ impl TerminalBuilder {
             output_processor: Processor::<StdSyncHandler>::new(),
             title_override: None,
             events: VecDeque::with_capacity(10),
-            last_synced_history_size: 0,
             last_content: Content {
                 terminal_bounds,
                 ..Default::default()
@@ -1506,7 +1505,6 @@ impl TerminalBuilder {
                 output_processor: Processor::<StdSyncHandler>::new(),
                 title_override: terminal_title_override,
                 events: VecDeque::with_capacity(10), //Should never get this high.
-                last_synced_history_size: 0,
                 last_content: Default::default(),
                 last_mouse: None,
                 mouse_down_position: None,
@@ -1705,10 +1703,6 @@ pub struct Terminal {
     pub matches: Vec<Range>,
     pub last_content: Content,
     pub content_dirty: bool,
-    /// Scrollback line count observed at the last [`Terminal::sync`]. Used to
-    /// detect large output bursts (e.g. `git log`) so the viewport can stay at
-    /// the start of the new output instead of following it to the bottom.
-    last_synced_history_size: usize,
     pub selection_head: Option<Point>,
 
     /// Cache of GPU-ready images keyed by (graphics image id, generation).
@@ -1920,8 +1914,16 @@ impl Terminal {
                 cx.emit(Event::CommandStarted);
             }
             TerminalBackendEvent::CommandFinished(code) => {
+                // Shell integration reports this when a foreground command has
+                // returned to the prompt. Reset modes here as well as on child
+                // exit: an SSH connection can disappear without the local shell
+                // exiting, leaving kitty keyboard protocol enabled so every
+                // keystroke is emitted as a CSI-u sequence.
+                self.term.lock().reset_modes();
+                self.content_dirty = true;
                 self.last_exit_code = code;
                 cx.emit(Event::LastCommandFinished(code));
+                cx.emit(Event::Wakeup);
             }
         }
     }
@@ -2810,23 +2812,6 @@ impl Terminal {
         while let Some(e) = self.events.pop_front() {
             self.process_terminal_event(&e, &mut terminal, window, cx)
         }
-
-        // When a burst of output (more than a viewport of lines) arrives between
-        // two frames while the viewport is pinned to the bottom, keep the viewport
-        // at the *start* of the new output instead of following it down. This way
-        // commands like `git log` show their beginning (the newest commits) rather
-        // than dumping the user straight at the tail of the log.
-        let viewport_lines = screen_lines(&terminal);
-        let history_lines = total_lines(&terminal).saturating_sub(viewport_lines);
-        let added_lines = history_lines.saturating_sub(self.last_synced_history_size);
-        if added_lines > viewport_lines && display_offset(&terminal) == 0 {
-            let scroll_to_start_of_output = added_lines - viewport_lines;
-            scroll_display(
-                &mut terminal,
-                Scroll::Delta(scroll_to_start_of_output as i32),
-            );
-        }
-        self.last_synced_history_size = history_lines;
 
         self.last_content = make_content(&mut terminal, &self.last_content);
         self.content_dirty = false;
@@ -4769,7 +4754,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_burst_output_keeps_viewport_at_start(cx: &mut TestAppContext) {
+    async fn test_burst_output_keeps_viewport_at_bottom(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let settings_store = settings::SettingsStore::test(cx);
             cx.set_global(settings_store);
@@ -4794,8 +4779,9 @@ mod tests {
             .subscribe(cx)
         });
 
-        // A burst of output taller than the viewport (like `git log`): the
-        // viewport should settle at the start of the burst, not its tail.
+        // A burst of output taller than the viewport must keep following the
+        // live tail. Scrolling back to the start of the burst makes long
+        // commands and restored sessions appear to jump away from the prompt.
         window.update_window_entity(&terminal, |terminal, window, cx| {
             let output: Vec<u8> = (0..100)
                 .flat_map(|i| format!("commit {i}\r\n").into_bytes())
@@ -4803,17 +4789,13 @@ mod tests {
             terminal.write_output(&output, cx);
             terminal.sync(window, cx);
 
-            // 100 lines on a 40-line viewport yields 61 scrollback lines (the
-            // cursor starts on line 0, so scrolling kicks in on the 40th
-            // line); pinning the viewport to the start of the burst offsets
-            // it by 61 - 40 = 21 lines from the bottom.
             assert_eq!(
-                terminal.last_content.display_offset, 21,
-                "viewport should show the beginning of the burst",
+                terminal.last_content.display_offset, 0,
+                "viewport should follow the end of the burst",
             );
             assert!(
-                !terminal.last_content.scrolled_to_bottom,
-                "viewport should not be pinned to the bottom",
+                terminal.last_content.scrolled_to_bottom,
+                "viewport should remain pinned to the bottom",
             );
         });
 
@@ -4823,7 +4805,7 @@ mod tests {
             terminal.content_dirty = true;
             terminal.sync(window, cx);
             assert_eq!(
-                terminal.last_content.display_offset, 22,
+                terminal.last_content.display_offset, 0,
                 "small output should keep following the bottom",
             );
         });
@@ -6080,6 +6062,64 @@ mod tests {
             let a = Keystroke::parse("a").unwrap();
             assert!(terminal.try_key_event(&a, KeyEventType::Press, false));
             assert_eq!(terminal.take_input_log(), vec![b"\x1b[97;;97u".to_vec()]);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_command_finish_resets_stale_kitty_keyboard_mode(cx: &mut TestAppContext) {
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        let refresh_modes = |terminal: &mut Terminal| {
+            let mut term = terminal.term.lock();
+            terminal.last_content = make_content(&mut term, &terminal.last_content);
+        };
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b[=1u", cx);
+            refresh_modes(terminal);
+            terminal.take_input_log();
+
+            let ctrl_c = Keystroke::parse("ctrl-c").unwrap();
+            assert!(terminal.try_key_event(&ctrl_c, KeyEventType::Press, false));
+            assert_eq!(terminal.take_input_log(), vec![b"\x1b[99;5u".to_vec()]);
+
+            terminal.process_event(TerminalBackendEvent::CommandFinished(Some(0)), cx);
+            refresh_modes(terminal);
+            assert!(
+                !terminal
+                    .last_content
+                    .mode
+                    .intersects(Modes::KITTY_KEYBOARD_PROTOCOL)
+            );
+
+            assert!(terminal.try_key_event(&ctrl_c, KeyEventType::Press, false));
+            assert_eq!(terminal.take_input_log(), vec![b"\x03".to_vec()]);
+
+            // The keyboard mode stack must be cleared too. Otherwise leaving and
+            // re-entering the alternate screen restores the stale CSI-u mode.
+            terminal.write_output(b"\x1b[=1u\x1b[?1049h\x1b[=1u", cx);
+            terminal.process_event(TerminalBackendEvent::CommandFinished(Some(0)), cx);
+            terminal.write_output(b"\x1b[?1049h", cx);
+            refresh_modes(terminal);
+            assert!(
+                !terminal
+                    .last_content
+                    .mode
+                    .intersects(Modes::KITTY_KEYBOARD_PROTOCOL)
+            );
+
+            assert!(terminal.try_key_event(&ctrl_c, KeyEventType::Press, false));
+            assert_eq!(terminal.take_input_log(), vec![b"\x03".to_vec()]);
         });
     }
 
