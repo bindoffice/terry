@@ -205,12 +205,10 @@ fn main() {
         let Some(app_state) = AppState::try_global(cx) else {
             return;
         };
-        workspace::open_new(OpenOptions::default(), app_state, cx, {
-            move |workspace, window, cx| {
-                init_workspace(workspace, window, cx);
-            }
-        })
-        .detach_and_log_err(cx);
+        // Reopening from the Dock must use the same restore path as a fresh
+        // launch; otherwise it opens an empty `default` session while quitting
+        // and relaunching restores the project's session.
+        open_or_restore_workspaces(app_state, cx);
     });
 
     app.run(move |cx| {

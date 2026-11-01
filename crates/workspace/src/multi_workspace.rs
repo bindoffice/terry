@@ -322,6 +322,22 @@ impl MultiWorkspace {
     }
 
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // The native traffic-light close bypasses action dispatch. Route it
+        // through the same close flow as the File > Close Window action so
+        // terminal sessions and workspace restore state are handled uniformly.
+        let close_window_handle = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            if close_window_handle
+                .update(cx, |this, cx| {
+                    this.close_window(&CloseWindow, window, cx);
+                })
+                .is_err()
+            {
+                return true;
+            }
+            false
+        });
+
         let release_subscription = cx.on_release(|this: &mut MultiWorkspace, _cx| {
             if let Some(task) = this._serialize_task.take() {
                 task.detach();

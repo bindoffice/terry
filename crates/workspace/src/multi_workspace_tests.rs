@@ -1006,6 +1006,43 @@ async fn test_open_project_closes_empty_workspace_but_not_non_empty_ones(cx: &mu
 }
 
 #[gpui::test]
+async fn test_native_window_close_uses_workspace_close_flow(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    let project = Project::test(fs, [], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = window
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .unwrap();
+    assert!(workspace.read_with(cx, |workspace, _| workspace.session_id().is_some()));
+
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    assert!(
+        !cx.simulate_close(),
+        "native close should be intercepted and routed through CloseWindow"
+    );
+    cx.run_until_parked();
+
+    assert_eq!(cx.cx.update(|cx| cx.windows().len()), 0);
+
+    #[cfg(target_os = "macos")]
+    assert!(
+        workspace
+            .read_with(cx, |workspace, _| workspace.session_id())
+            .is_none(),
+        "the shared close flow should remove the workspace from the session"
+    );
+
+    #[cfg(not(target_os = "macos"))]
+    assert!(
+        workspace
+            .read_with(cx, |workspace, _| workspace.session_id())
+            .is_some(),
+        "the shared close flow should preserve the last workspace for restoration"
+    );
+}
+
+#[gpui::test]
 async fn test_close_workspace_with_remote_neighbor_does_not_create_local_workspace(
     cx: &mut TestAppContext,
 ) {
