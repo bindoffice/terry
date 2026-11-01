@@ -44,15 +44,6 @@ actions!(
     ]
 );
 
-/// Max consecutive automatic reconnects for a remote terminal.
-const MAX_REMOTE_RECONNECT_ATTEMPTS: u32 = 5;
-
-/// Programs that should be reconnected automatically when they exit because
-/// the remote side went away (as opposed to the user closing the tab).
-fn is_remote_program(program: &str) -> bool {
-    matches!(command_basename(program).as_str(), "ssh" | "mosh")
-}
-
 /// Which window currently owns the shared restore file for a workspace key.
 /// A second window for the same workspace starts fresh instead of respawning
 /// the same PTYs.
@@ -560,6 +551,43 @@ fn agent_session_resume_command(agent_id: &str, session: &str) -> Option<String>
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn shell_command(shell_kind: task::ShellKind, program: &str, args: &[String]) -> String {
+    let mut command = String::new();
+    for arg in std::iter::once(program).chain(args.iter().map(String::as_str)) {
+        if !command.is_empty() {
+            command.push(' ');
+        }
+        match shell_kind.try_quote(arg) {
+            Some(quoted) => command.push_str(&quoted),
+            None => command.push_str(&shell_quote(arg)),
+        }
+    }
+    command
+}
+
+/// Creates a local-shell profile that runs `program` as a child command.
+///
+/// Directly making SSH or tmux the PTY's foreground process means exiting the
+/// remote command also exits the terminal. Starting from the user's shell keeps
+/// the tab alive and returns it to a local prompt instead.
+fn local_command_profile(
+    shell_kind: task::ShellKind,
+    program: String,
+    args: Vec<String>,
+    title: String,
+) -> TerminalProfile {
+    let command = shell_command(shell_kind, &program, &args);
+    TerminalProfile {
+        name: format!("program:{title}"),
+        // No shell override: use the user's configured local shell.
+        shell: None,
+        working_directory: None,
+        env: Default::default(),
+        command: Some(command),
+        color_scheme: None,
+    }
 }
 
 fn agent_by_id(id: &str) -> Option<&'static AgentCli> {
@@ -1606,8 +1634,6 @@ pub struct TerminalListPanel {
     /// Terminals whose agent went quiet after producing output, i.e. are most
     /// likely waiting for user input.
     agent_waiting: HashSet<EntityId>,
-    /// Attempt counter for automatic remote reconnects, keyed by launch.
-    remote_reconnects: HashMap<String, (u32, std::time::Instant)>,
     /// Mapping from tmux window ids to the group mirroring that window.
     tmux_window_groups: HashMap<u32, GroupId>,
     /// Terminal views created by the tmux control-mode bridge, so they can be
@@ -1814,7 +1840,6 @@ impl TerminalListPanel {
             _terminal_subscriptions: HashMap::default(),
             terminal_activity: HashMap::default(),
             agent_waiting: HashSet::default(),
-            remote_reconnects: HashMap::default(),
             tmux_window_groups: HashMap::default(),
             tmux_mirrored: HashSet::default(),
             git_subscriptions,
@@ -7810,18 +7835,10 @@ impl TerminalListPanel {
         if !self.groups.iter().any(|group| group.id == group_id) {
             return;
         }
-        let profile = TerminalProfile {
-            name: format!("program:{title}"),
-            shell: Some(task::Shell::WithArguments {
-                program,
-                args,
-                title_override: Some(title),
-            }),
-            working_directory: None,
-            env: Default::default(),
-            command: None,
-            color_scheme: None,
-        };
+        let shell_kind = TerminalSettings::get_global(cx)
+            .shell
+            .shell_kind(cfg!(windows));
+        let profile = local_command_profile(shell_kind, program, args, title);
         self.prepare_group_for_terminal(group_id, window, cx);
         self.spawn_terminal(
             group_id,
@@ -7924,7 +7941,6 @@ impl TerminalListPanel {
         let mut removed_from_active_auto = false;
         let mut parked: Option<ParkedAgentSession> = None;
         let mut remembered: Option<(&'static str, &'static str, Option<PathBuf>)> = None;
-        let mut reconnect: Option<(GroupId, Option<PathBuf>, PersistedLaunch)> = None;
         for group in &mut self.groups {
             if let Some(removed_ix) = group
                 .terminals
@@ -7933,19 +7949,9 @@ impl TerminalListPanel {
             {
                 let removed = group.terminals.remove(removed_ix);
                 let remembered_cwd = self.terminal_spawn_cwds.remove(&item_id).flatten();
-                let launch = self.terminal_launches.remove(&item_id);
-                let exited = removed.read(cx).terminal().read(cx).has_exited();
+                let _ = self.terminal_launches.remove(&item_id);
                 let cwd = remembered_cwd
                     .or_else(|| removed.read(cx).terminal().read(cx).working_directory());
-                if exited {
-                    if let Some(launch_value) = launch {
-                        if let PersistedLaunch::Command { program, .. } = &launch_value {
-                            if is_remote_program(program) {
-                                reconnect = Some((group.id, cwd.clone(), launch_value));
-                            }
-                        }
-                    }
-                }
                 if let Some((agent, bin)) = coding_agent_from_view(&removed, cx) {
                     remembered = Some((agent.id, bin, cwd.clone()));
                 }
@@ -8050,73 +8056,6 @@ impl TerminalListPanel {
 
         self.save_session(cx);
         cx.notify();
-
-        if let Some((group_id, cwd, launch)) = reconnect {
-            self.schedule_remote_reconnect(group_id, cwd, launch, window, cx);
-        }
-    }
-
-    /// Re-spawns a remote terminal after its connection dropped, backing off
-    /// exponentially and giving up after a few attempts so a dead host cannot
-    /// loop forever.
-    fn schedule_remote_reconnect(
-        &mut self,
-        group_id: GroupId,
-        cwd: Option<PathBuf>,
-        launch: PersistedLaunch,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let PersistedLaunch::Command { program, args, .. } = &launch else {
-            return;
-        };
-        let key = format!("{program}:{}", args.join(" "));
-        let now = std::time::Instant::now();
-        let attempts = {
-            let entry = self
-                .remote_reconnects
-                .entry(key.clone())
-                .or_insert((0, now));
-            // Forget old failures so a long-lived session starts fresh.
-            if now.duration_since(entry.1) > Duration::from_secs(300) {
-                *entry = (0, now);
-            }
-            entry.0 += 1;
-            entry.1 = now;
-            entry.0
-        };
-        if attempts > MAX_REMOTE_RECONNECT_ATTEMPTS {
-            log::warn!("remote reconnect: giving up on {key} after {attempts} attempts");
-            return;
-        }
-        let delay = Duration::from_secs(1u64 << (attempts - 1).min(4));
-        log::info!("remote reconnect: retrying {key} in {delay:?} (attempt {attempts})");
-
-        cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(delay).await;
-            this.update_in(cx, |this, window, cx| {
-                if !this.groups.iter().any(|group| group.id == group_id) {
-                    return;
-                }
-                this.spawn_terminal(
-                    group_id,
-                    cwd,
-                    None,
-                    None,
-                    SpawnRestore {
-                        launch: Some(launch),
-                        ..SpawnRestore::default()
-                    },
-                    None,
-                    None,
-                    window,
-                    cx,
-                );
-                this.save_session(cx);
-            })
-            .ok();
-        })
-        .detach();
     }
 
     fn remap_layout_after_remove(node: &mut GroupLayoutNode, removed: usize) {
@@ -8867,6 +8806,46 @@ mod tests {
     use terminal::terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape};
     use util::paths::PathStyle;
     use workspace::{AppState, MultiWorkspace, WorkspaceId};
+
+    #[test]
+    fn program_terminals_run_inside_the_local_shell() {
+        let program = "ssh".to_string();
+        let args = vec![
+            "-p".to_string(),
+            "2222".to_string(),
+            "alice@example.com".to_string(),
+        ];
+        let shell_kind = task::ShellKind::system();
+        let profile =
+            local_command_profile(shell_kind, program.clone(), args.clone(), "web".to_string());
+
+        assert!(
+            profile.shell.is_none(),
+            "SSH must not replace the PTY's local shell"
+        );
+        assert_eq!(
+            profile.command.as_deref(),
+            Some(shell_command(shell_kind, &program, &args).as_str()),
+            "the local shell should run the SSH command instead"
+        );
+    }
+
+    #[test]
+    fn local_shell_command_quotes_arguments() {
+        let command = shell_command(
+            task::ShellKind::Posix,
+            "ssh",
+            &["-o".to_string(), "ProxyCommand=warp host".to_string()],
+        );
+        assert_eq!(
+            task::ShellKind::Posix.split(&command),
+            Some(vec![
+                "ssh".to_string(),
+                "-o".to_string(),
+                "ProxyCommand=warp host".to_string()
+            ])
+        );
+    }
 
     #[test]
     fn recognizes_npm_installed_agents_by_package_path() {
