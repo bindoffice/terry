@@ -6,13 +6,14 @@ use gpui::{
 };
 use terminal::Event as TerminalEvent;
 use terminal_view::TerminalView;
-use ui::{Button, LabelSize, Tooltip, prelude::*};
+use ui::{Button, Color, Icon, IconName, IconSize, LabelSize, Tooltip, prelude::*};
 use util::paths::PathExt;
 use workspace::{HideStatusItem, StatusItemView, item::ItemHandle};
 
 use crate::terminal_list_panel::TerminalListPanel;
 
 const CWD_MAX_CHARS: usize = 48;
+const SSH_DESTINATION_MAX_CHARS: usize = 36;
 
 /// Status-bar item: active group name and current terminal title.
 pub struct ActiveTerminalContext {
@@ -167,6 +168,111 @@ impl StatusItemView for ActiveTerminalContext {
 
     fn hide_setting(&self, _: &App) -> Option<HideStatusItem> {
         // Always relevant while a terminal group exists.
+        None
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SshSession {
+    destination: String,
+}
+
+/// Status-bar item: indicates when the focused terminal is connected over SSH.
+pub struct ActiveTerminalSsh {
+    active_terminal: Option<WeakEntity<TerminalView>>,
+    session: Option<SshSession>,
+    _terminal_subscription: Option<Subscription>,
+}
+
+impl ActiveTerminalSsh {
+    pub fn new() -> Self {
+        Self {
+            active_terminal: None,
+            session: None,
+            _terminal_subscription: None,
+        }
+    }
+
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.session = self.active_terminal.as_ref().and_then(|tv| {
+            let tv = tv.upgrade()?;
+            let terminal = tv.read(cx).terminal().read(cx);
+            ssh_session_for_terminal(&terminal)
+        });
+        cx.notify();
+    }
+
+    fn track_active_terminal(
+        &mut self,
+        terminal_view: Option<Entity<TerminalView>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.active_terminal = terminal_view.as_ref().map(|tv| tv.downgrade());
+        self._terminal_subscription = terminal_view.map(|tv| {
+            let terminal = tv.read(cx).terminal().clone();
+            cx.subscribe(&terminal, |this, _, event, cx| {
+                if matches!(
+                    event,
+                    TerminalEvent::TitleChanged
+                        | TerminalEvent::BreadcrumbsChanged
+                        | TerminalEvent::CommandStarted
+                        | TerminalEvent::LastCommandFinished(_)
+                ) {
+                    this.refresh(cx);
+                }
+            })
+        });
+    }
+}
+
+impl Default for ActiveTerminalSsh {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Render for ActiveTerminalSsh {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(session) = self.session.as_ref() else {
+            return Empty.into_any_element();
+        };
+        let destination = format_ssh_destination(&session.destination);
+
+        div()
+            .child(
+                Button::new("active-terminal-ssh", format!("SSH · {destination}"))
+                    .label_size(LabelSize::Small)
+                    .color(Color::Accent)
+                    .start_icon(
+                        Icon::new(IconName::Server)
+                            .size(IconSize::XSmall)
+                            .color(Color::Accent),
+                    )
+                    .tooltip(Tooltip::text(format!(
+                        "SSH remote session · {}",
+                        session.destination
+                    ))),
+            )
+            .into_any_element()
+    }
+}
+
+impl EventEmitter<workspace::ToolbarItemEvent> for ActiveTerminalSsh {}
+
+impl StatusItemView for ActiveTerminalSsh {
+    fn set_active_pane_item(
+        &mut self,
+        active_pane_item: Option<&dyn ItemHandle>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let terminal_view = active_pane_item.and_then(|item| item.act_as::<TerminalView>(cx));
+        self.track_active_terminal(terminal_view, cx);
+        self.refresh(cx);
+    }
+
+    fn hide_setting(&self, _: &App) -> Option<HideStatusItem> {
+        // Only exists while an SSH connection is active.
         None
     }
 }
@@ -441,6 +547,89 @@ fn format_cwd(path: &Path) -> (SharedString, SharedString) {
     (display.into(), full)
 }
 
+fn ssh_session_for_terminal(terminal: &terminal::Terminal) -> Option<SshSession> {
+    if terminal.has_exited() {
+        return None;
+    }
+    let command = terminal.foreground_process_command_name()?;
+    let argv = terminal.foreground_process_argv()?;
+    ssh_session_for_process(&command, &argv)
+}
+
+fn ssh_session_for_process(command: &str, argv: &[String]) -> Option<SshSession> {
+    let base = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    let base = base.strip_suffix(".exe").unwrap_or(base);
+    if !base.eq_ignore_ascii_case("ssh") {
+        return None;
+    }
+
+    ssh_destination(argv).map(|destination| SshSession { destination })
+}
+
+/// Finds the destination argument in an OpenSSH argv, skipping options and
+/// their values so `ssh -p 2222 alice@example.com` reports the host rather
+/// than `2222`.
+fn ssh_destination(argv: &[String]) -> Option<String> {
+    let mut args = argv.iter().skip(1);
+    while let Some(argument) = args.next() {
+        if argument == "--" {
+            return args.next().filter(|value| !value.is_empty()).cloned();
+        }
+        if !argument.starts_with('-') || argument == "-" {
+            return (!argument.is_empty()).then(|| argument.clone());
+        }
+        if argument.starts_with("--") {
+            continue;
+        }
+
+        let options = &argument[1..];
+        let takes_separate_value =
+            options.chars().any(ssh_option_takes_argument) && options.chars().count() == 1;
+        if takes_separate_value {
+            args.next();
+        }
+    }
+    None
+}
+
+fn ssh_option_takes_argument(option: char) -> bool {
+    matches!(
+        option,
+        'B' | 'b'
+            | 'c'
+            | 'D'
+            | 'E'
+            | 'e'
+            | 'F'
+            | 'I'
+            | 'i'
+            | 'J'
+            | 'L'
+            | 'l'
+            | 'm'
+            | 'O'
+            | 'o'
+            | 'p'
+            | 'Q'
+            | 'R'
+            | 'S'
+            | 'W'
+            | 'w'
+    )
+}
+
+fn format_ssh_destination(destination: &str) -> SharedString {
+    if destination.chars().count() <= SSH_DESTINATION_MAX_CHARS {
+        return destination.to_string().into();
+    }
+
+    let truncated: String = destination
+        .chars()
+        .take(SSH_DESTINATION_MAX_CHARS)
+        .collect();
+    format!("{truncated}…").into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,5 +655,57 @@ mod tests {
             display.as_ref().contains('…')
                 || display.as_ref().len() < path.display().to_string().len()
         );
+    }
+
+    #[test]
+    fn detects_an_ssh_process_and_its_destination() {
+        let argv = [
+            "ssh",
+            "-o",
+            "ServerAliveInterval=30",
+            "-p",
+            "2222",
+            "-i",
+            "~/.ssh/id_web",
+            "-t",
+            "alice@web",
+            "tmux",
+            "attach",
+        ]
+        .map(str::to_string);
+        assert_eq!(
+            ssh_session_for_process("ssh", &argv),
+            Some(SshSession {
+                destination: "alice@web".into()
+            })
+        );
+    }
+
+    #[test]
+    fn finds_ssh_destination_with_compact_options_and_separator() {
+        let argv = [
+            "ssh",
+            "-vvv",
+            "-p2222",
+            "-i~/.ssh/id_web",
+            "--",
+            "-remote-host",
+        ]
+        .map(str::to_string);
+        assert_eq!(ssh_destination(&argv).as_deref(), Some("-remote-host"));
+    }
+
+    #[test]
+    fn ignores_non_ssh_foreground_processes() {
+        let argv = ["zsh"].map(str::to_string);
+        assert_eq!(ssh_session_for_process("zsh", &argv), None);
+    }
+
+    #[test]
+    fn ssh_destination_is_truncated_for_the_status_bar() {
+        let destination = "alice@a-very-long-remote-hostname.example.com";
+        let formatted = format_ssh_destination(destination);
+        assert_eq!(formatted.chars().count(), SSH_DESTINATION_MAX_CHARS + 1);
+        assert!(formatted.ends_with('…'));
     }
 }

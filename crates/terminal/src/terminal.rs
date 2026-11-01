@@ -3502,6 +3502,18 @@ impl Terminal {
         }
     }
 
+    /// Full argv of the foreground process, if one is known.
+    pub fn foreground_process_argv(&self) -> Option<Vec<String>> {
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => info
+                .current
+                .read()
+                .as_ref()
+                .map(|process| process.argv.clone()),
+            TerminalType::DisplayOnly => None,
+        }
+    }
+
     /// Script path passed to a `node`/`bun`/`deno` foreground process, if any.
     ///
     /// npm-installed CLIs run as `node .../node_modules/<package>/dist/cli.js`,

@@ -779,6 +779,7 @@ fn init_workspace(
     let update_status_item = cx.new(|cx| update_checker::UpdateStatusItem::new(cx));
     let active_terminal_context =
         cx.new(|_| status_bar_items::ActiveTerminalContext::new(&terminal_panel));
+    let active_terminal_ssh = cx.new(|_| status_bar_items::ActiveTerminalSsh::new());
     let active_terminal_cwd = cx.new(|_| status_bar_items::ActiveTerminalCwd::new());
     let terminal_resource_usage =
         cx.new(|cx| status_bar_items::TerminalResourceUsage::new(&terminal_panel, cx));
@@ -800,8 +801,9 @@ fn init_workspace(
         status_bar.add_right_item(vim_mode_indicator, window, cx);
         status_bar.add_right_item(cursor_position, window, cx);
         // Right tools render reversed: prepend so cwd sits at the far right,
-        // with group name immediately to its left.
+        // with the SSH indicator and group name to its left.
         status_bar.prepend_right_item(active_terminal_context, window, cx);
+        status_bar.prepend_right_item(active_terminal_ssh, window, cx);
         status_bar.prepend_right_item(active_terminal_cwd, window, cx);
         status_bar.add_right_item(terminal_resource_usage, window, cx);
     });
