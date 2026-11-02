@@ -1,0 +1,29 @@
+[package]
+name = "tom-runtime"
+# Vendored from the tom workspace, which targets edition 2021 (the code
+# predates the edition-2024 `unsafe` requirements on `std::env::set_var`).
+edition = "2021"
+publish.workspace = true
+license = "MIT"
+version = "0.16.0"
+description = "Embeddable model catalog, credential resolution and provider execution bindings"
+readme = "README.md"
+
+[dependencies]
+tom-ai = { workspace = true, features = ["providers"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+indexmap = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true, features = [
+    "json",
+    "stream",
+    "rustls-tls-native-roots",
+    "charset",
+    "http2",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

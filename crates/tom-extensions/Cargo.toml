@@ -1,0 +1,39 @@
+[package]
+name = "tom-extensions"
+version = "0.16.0"
+edition = "2021"
+publish.workspace = true
+license = "MIT"
+documentation = "https://docs.rs/tom-extensions"
+description = "Rust-native (cdylib) plugin loader + AgentTool adapter for tom — libloading + spawn_blocking ABI bridge"
+readme = "README.md"
+keywords = ["agent", "llm", "ai", "plugin", "ffi"]
+categories = ["api-bindings", "development-tools::ffi"]
+
+[dependencies]
+tom-plugin-sdk = { workspace = true }
+tom-ai = { workspace = true }
+tom-agent = { workspace = true }
+libloading = "0.8"
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+tempfile = { workspace = true }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = []
+provider-performance = ["tom-plugin-sdk/provider"]

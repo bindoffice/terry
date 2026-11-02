@@ -63,6 +63,11 @@ pub fn run_cli_subcommand(args: &[String]) -> Option<i32> {
         }),
         Some("session") => Some(run_session_cli(&args[1..])),
         Some("daemon") => Some(run_daemon_cli(&args[1..])),
+        // The built-in coding agent. It is a full terminal program of its own
+        // (tom's TUI), so it must not touch the GUI or the single-instance
+        // lock: a `tom` run inside a Terry terminal has to work even when no
+        // Terry window is up.
+        Some("tom") => Some(run_coding_agent(&args[1..])),
         Some("agent-integration") => Some(run_agent_integration_cli(&args[1..])),
         Some("install-cli") => Some(crate::cli_install::run_install_cli(&args[1..])),
         Some("uninstall-cli") => Some(crate::cli_install::run_uninstall_cli(&args[1..])),
@@ -362,6 +367,34 @@ fn connect_daemon() -> Result<terminal_daemon::Control, String> {
 
 /// Runs the terminal daemon in this process. Hidden: the GUI starts it
 /// automatically when persistent sessions are enabled.
+/// Runs Terry's built-in coding agent (`tom`) to completion.
+///
+/// `tom` is the full terminal coding agent: an interactive TUI by default, and
+/// `--print`/`--mode json` for scripted use. It owns the terminal while it
+/// runs, so this must happen before the GUI initialises logging to stderr or
+/// takes the single-instance lock — a `tom` session inside a Terry terminal is
+/// independent of whether a Terry window is open.
+///
+/// The harness's run loop drives provider streams with `block_in_place`, which
+/// requires a multi-thread runtime, hence the explicit runtime here rather than
+/// a plain `block_on`.
+fn run_coding_agent(args: &[String]) -> i32 {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("tom: could not start the async runtime: {error}");
+            return 1;
+        }
+    };
+    // `app::run` reads `std::env::args()` itself, so hand it the arguments this
+    // process was started with instead of trying to inject `args`.
+    let _ = args;
+    runtime.block_on(tom_cli::app::run())
+}
+
 fn run_daemon_serve(args: &[String]) -> i32 {
     let mut socket = terminal_daemon::socket_path();
     let mut index = 0;

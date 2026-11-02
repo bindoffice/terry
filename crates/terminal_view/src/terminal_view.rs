@@ -2084,6 +2084,11 @@ impl Render for TerminalView {
         }
 
         let theme = self.theme(cx);
+        // Keep the coding agent's theme file in sync with the palette this
+        // terminal actually paints. `tom` reads it on launch, so a theme change
+        // or a per-terminal color scheme is picked up the next time the agent
+        // starts, with no extra plumbing.
+        publish_agent_theme(&theme);
         // The terminal element paints its own background over its full bounds,
         // so the wrapper only needs a color when the terminal is opaque.
         // Stacking two translucent layers would make the grid darker than the
@@ -4042,5 +4047,32 @@ mod tests {
                 text
             );
         });
+    }
+}
+
+/// Writes the coding agent's theme file for `theme`, if it changed.
+///
+/// Called from the terminal's render path, so the write is skipped when the
+/// serialized theme is unchanged — otherwise this would run once per frame.
+fn publish_agent_theme(theme: &theme::Theme) {
+    use std::sync::{Mutex, OnceLock};
+
+    static LAST_WRITTEN: OnceLock<Mutex<String>> = OnceLock::new();
+
+    let json = terminal::agent_theme::TerminalPalette::from_theme(theme).to_theme_json();
+    let last = LAST_WRITTEN.get_or_init(|| Mutex::new(String::new()));
+    {
+        let Ok(mut last) = last.lock() else {
+            return;
+        };
+        if *last == json {
+            return;
+        }
+        // Record before writing so a persistent failure is retried once per
+        // theme change rather than on every frame.
+        *last = json.clone();
+    }
+    if let Err(error) = terminal::agent_theme::write_theme_json(&json) {
+        log::warn!("could not write the coding agent theme: {error:#}");
     }
 }

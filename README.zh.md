@@ -35,6 +35,7 @@
 - **会话恢复** — 重启后恢复分组、分屏布局、工作目录、标题、Profile 配色、每终端字号缩放，以及 Profile / SSH / tmux 启动方式
 - **持久会话（可选）** — 开启 `terminal.persistent_sessions` 后，终端由后台 daemon 持有：退出 Terry 或关闭窗口后进程继续运行，重新打开时自动重连并回放 scrollback。关闭单个标签页会分离（首次会提示），可用「重新打开已关闭的终端」恢复，或运行 `terry daemon kill` 结束。目前仅支持 Unix
 - **Hints** — `Ctrl+Shift+E` 列出可见的 URL、路径、git hash、UUID、IP 与自定义正则匹配；可键盘选择打开、复制、粘贴或选中。自定义规则写在 `terminal.hints`，例如 `{ "regex": "#\\d+", "action": "copy" }`
+- **内置编码助手** — [tom](https://github.com/bigfish1913/tom) 已随 Terry 一起发布：在任意终端里输入 `tom` 即可获得完整的终端编码助手，可读写文件、执行 Shell 命令。它继承终端配色、保留 JSONL 会话，无需单独安装。见[编码助手](#编码助手)。
 - **AI Agent** — 侧边栏与大模型对话，通过可配置的 Profile 调用命令与工具；侧边栏还会标记运行中的 coding agent 是「工作中 / 等待输入 / 空闲」（基于终端底部屏幕内容识别，支持 Claude、Codex、Gemini、OpenCode、Cursor、Qwen、Copilot、Grok、Kimi、Amp、Hermes、Qoder、Antigravity 等）
 - **MCP** — 接入 Model Context Protocol 服务器，扩展 Agent 能力
 - **文件面板** — 在终端旁浏览项目目录树
@@ -201,7 +202,11 @@ Shell 集成生效后，Terry 会跟踪每条命令的边界与退出码（`OSC 
 ### 环境要求
 
 - Rust **1.95.0**（见 `rust-toolchain.toml`）
-- 平台构建依赖：CMake、C/C++ 工具链；Linux 还需常见的 X11/Wayland/fontconfig 等库
+- 平台构建依赖：CMake、C/C++ 工具链；Linux 还需 X11/Wayland 相关库（`libxcb`、`libxkbcommon`、`libxkbcommon-x11`）。
+
+  不再需要 fontconfig。字体族由 cosmic-text 自带的纯 Rust 字体数据库解析，同族内的字面选择使用
+  gpui_wgpu 内置的匹配实现，因此 Linux 上不会链接原生 `libfontconfig`。（macOS 仍会使用它，
+  但那里由 CoreText 支撑，无需安装系统包。）
 
 ### 编译与运行
 
@@ -226,11 +231,64 @@ script/package-linux.sh
 
 产物输出在 `target/release/`。
 
+## 编码助手
+
+Terry 内置 [tom](https://github.com/bigfish1913/tom) 作为编码助手。它不是一个侧栏面板 ——
+它是一个完整的终端程序，在 Terry 打开的每个终端里都能直接用 `tom` 启动：
+
+```sh
+tom                              # 交互式编码助手
+tom "给解析器补一个测试"          # 带上首条提示启动
+tom --print "解释一下 Cargo.toml" # 非交互模式
+tom --model openai-compatible/gpt-4.1
+```
+
+`tom` 就是 Terry 自身二进制的一个子命令，因此助手版本永远与应用一致，无需单独安装。
+在 Terry 的终端之外，执行 `terry install-cli` 可以把同样的 `tom`（以及 `terry`、
+`terry-daemon`）装到 `~/.local/bin`。
+
+因为用的就是真正的 tom CLI，它文档里的功能全部可用：会话、`--print`/`--mode json`、
+`--tools`/`--exclude-tools`、系统提示词、skills、提示词模板，以及 cdylib 扩展。配置位于
+`~/.tom`，与独立运行的 tom 完全一致。
+
+### 主题
+
+助手跟随终端的配色。启动时 Terry 会根据当前终端正在绘制的调色板（含单终端配色方案与
+明暗切换）生成主题文件 `<数据目录>/coding_agent/terry-terminal.json`，并把
+`TERRY_AGENT_THEME` 指向它。`tom` 只把它当作兜底：显式 `--theme` 或已保存的 `theme`
+设置优先，因此手工调好的主题不会被覆盖。
+
+### 对话历史
+
+会话以 `tom-harness` 写入的 JSONL 文件保存，位置就是 tom 自己使用的目录
+（`~/.tom/sessions/<编码后的工作目录>/`）。每条消息在落定后立即追加，运行中途崩溃仍会留下
+可读的记录，`tom -c` / `tom -r` 可以接着上次继续。文件是 tom 的格式，CLI、`--export` 与
+Terry 读的是同一份历史。
+
+### 引入的 tom crate
+
+整个 tom workspace 都被引入（MIT）：`tom-telemetry`、`tom-ai`、`tom-agent`、`tom-tools`、
+`tom-harness`、`tom-runtime`、`tom-plugin-sdk`、`tom-tui`、`tom-extensions`、`tom-cli`。
+其中 `tom-cli` + `tom-tui` 正是让 `tom` 成为真正的 tom 而非另写一套实现的关键。
+
+为融入本工作区做了两处适配：
+
+- 它们保留 Rust edition 2021（工作区其余部分为 2024），因为代码早于 edition 2024 对
+  `std::env::set_var` 的 `unsafe` 要求。
+- `tom-ai` 与 `tom-tools` 从 `jsonschema` 0.18 的 API（`JSONSchema::compile`/`validate`）
+  移植到本工作区已依赖的 0.37（`validator_for`/`iter_errors`）。
+
+`tom-cli` 只加了一个钩子：当 `--theme` 与已保存的 `theme` 设置都不存在时，读取
+`TERRY_AGENT_THEME`。这是唯一一处源码改动，CLI 自身行为未变。
+
+用 `cargo test -p tom-cli -p tom-tui -p tom-harness -p tom-ai -p tom-tools -p tom-agent` 运行它们的测试。
+
 ## 目录结构
 
 ```
 src/                 # 应用入口、终端/文件面板、菜单
 crates/              # 共享库（GPUI、终端、Agent、设置等）
+crates/tom-*         # 随仓库引入的 tom 运行时 + CLI（MIT）—— `tom` 已内置
 agent_ui / crates/agent_ui
 assets/              # 图标、默认设置、主题
 script/              # 打包脚本

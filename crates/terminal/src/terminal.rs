@@ -1,6 +1,7 @@
 mod hints;
 mod mappings;
 
+pub mod agent_theme;
 mod alacritty;
 pub mod color_scheme;
 mod pty_info;
@@ -1305,6 +1306,9 @@ impl TerminalBuilder {
             }
 
             insert_zed_terminal_env(&mut env, &version);
+            // Point the built-in coding agent at the theme Terry is painting
+            // with, so `tom` comes up in the terminal's own colors.
+            crate::agent_theme::insert_agent_theme_env(&mut env);
 
             if inject_cli_path {
                 if let Err(error) = shell_integration::inject_cli_path_env(&mut env) {

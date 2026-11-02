@@ -60,7 +60,17 @@ image.workspace = true
 futures.workspace = true
 gpui.workspace = true
 gpui_util.workspace = true
-gpui_wgpu = { workspace = true, optional = true, features = ["font-kit"] }
+# `font-kit` is deliberately NOT enabled here. On Linux it exists only to pick
+# the best face *within* an already-resolved family (`find_best_match` in
+# gpui_wgpu's cosmic_text_system); family lookup and the fallback chain come
+# from cosmic-text's own fontdb. font-kit's Linux path defaults to its
+# `source-fontconfig` feature, which links the native libfontconfig — a build
+# dependency Terry does not need. gpui_wgpu ships an equivalent pure-Rust
+# matcher for exactly this case (style penalty + weight distance), so dropping
+# the feature removes the libfontconfig requirement with no behaviour change
+# for family selection. macOS keeps its own `font-kit` feature, where it is
+# backed by CoreText and needs no fontconfig.
+gpui_wgpu = { workspace = true, optional = true }
 http_client.workspace = true
 itertools.workspace = true
 libc.workspace = true

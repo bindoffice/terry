@@ -1,0 +1,38 @@
+[package]
+name = "tom-harness"
+# Vendored from the tom workspace, which targets edition 2021 (the code
+# predates the edition-2024 `unsafe` requirements on `std::env::set_var`).
+edition = "2021"
+publish.workspace = true
+license = "MIT"
+version = "0.16.0"
+description = "Session tree, JSONL persistence, compaction and the AgentHarness loop"
+readme = "README.md"
+keywords = ["agent", "llm", "ai", "claude", "harness"]
+categories = ["api-bindings", "asynchronous", "artificial-intelligence"]
+
+[dependencies]
+tom-telemetry = { workspace = true }
+tom-ai = { workspace = true }
+tom-agent = { workspace = true }
+tom-tools = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+yaml_serde = { workspace = true }
+schemars = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+# The SQLite session backend shares the workspace's bundled libsqlite3-sys.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+tom-telemetry = { workspace = true }
+tom-ai = { workspace = true }
+tom-agent = { workspace = true }

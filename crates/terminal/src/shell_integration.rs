@@ -75,7 +75,15 @@ fn cli_bin_dir() -> &'static PathBuf {
 
 /// Shims that make the running build callable from its own terminals. The app
 /// ships a single executable, so `terry-daemon` forwards to `terry daemon`.
-const CLI_SHIMS: &[(&str, Option<&str>)] = &[("terry", None), ("terry-daemon", Some("daemon"))];
+const CLI_SHIMS: &[(&str, Option<&str>)] = &[
+    ("terry", None),
+    ("terry-daemon", Some("daemon")),
+    // `tom` is Terry's built-in coding agent. The shim runs the same binary
+    // with the `tom` subcommand, so the agent travels with the app and needs no
+    // separate install. It is the full tom CLI (TUI, --print, sessions, tools),
+    // configured from `~/.tom` exactly like a standalone tom.
+    ("tom", Some("tom")),
+];
 
 /// Marker that identifies shims written by Terry, so `terry uninstall-cli`
 /// never deletes a real executable that happens to share the name.
@@ -717,9 +725,40 @@ mod tests {
         std::fs::write(&terry, "not a shim").unwrap();
 
         let removed = uninstall_cli_shims_from(&dir).unwrap();
-        assert_eq!(removed.len(), 1, "only the generated daemon shim is ours");
+        // Every shim except the overwritten `terry` is ours; derive the count
+        // from the shim table so adding a shim does not need this test edited.
+        assert_eq!(
+            removed.len(),
+            CLI_SHIMS.len() - 1,
+            "every generated shim except the foreign `terry` should be removed"
+        );
         assert!(terry.exists(), "a foreign `terry` must not be deleted");
         assert!(!dir.join(shim_file_name("terry-daemon")).exists());
+        assert!(!dir.join(shim_file_name("tom")).exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The coding agent must be reachable as `tom` inside a Terry terminal,
+    /// forwarding to the `tom` subcommand of the same binary.
+    #[test]
+    fn the_coding_agent_is_exposed_as_tom() {
+        let dir = std::env::temp_dir().join(format!(
+            "terry-cli-tom-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_cli_shims(&dir, Path::new("/exe/terry")).unwrap();
+
+        let shim = dir.join(shim_file_name("tom"));
+        let contents = std::fs::read_to_string(&shim).expect("tom shim exists");
+        assert!(contents.contains(SHIM_MARKER));
+        // Runs the same binary with the `tom` subcommand and forwards args.
+        assert!(contents.contains("'/exe/terry' tom"), "got: {contents}");
+        assert!(contents.contains("\"$@\""), "must forward arguments");
 
         std::fs::remove_dir_all(&dir).ok();
     }

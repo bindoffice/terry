@@ -35,6 +35,7 @@ Group shells, browse files, and keep an AI agent beside you — built for people
 - **Session restore** — groups, split layouts, working directories, titles, per-profile color schemes, per-terminal font zoom, and profile/SSH/tmux launches are restored on restart
 - **Persistent sessions (opt-in)** — with `terminal.persistent_sessions` enabled, terminals are owned by a background daemon: they keep running after you quit Terry or close the window, and reattach with their scrollback when you come back. Closing a single tab detaches it (you are told once); reopen it with "Reopen Closed Terminal" or end it with `terry daemon kill`. Unix only for now
 - **Hints** — `Ctrl+Shift+E` lists visible URLs, paths, git hashes, UUIDs, IPs, and custom regex matches; choose one with the keyboard to open, copy, paste, or select. Add custom rules under `terminal.hints`, for example `{ "regex": "#\\d+", "action": "copy" }`
+- **Built-in coding agent** — [tom](https://github.com/bigfish1913/tom) ships inside Terry: type `tom` in any terminal to get a full terminal coding agent that reads, edits, and writes files and runs shell commands. It inherits the terminal's colors, keeps durable JSONL sessions, and needs no separate install. See [Coding agent](#coding-agent).
 - **AI Agent** — Chat with LLMs in a side panel; run commands and tools with configurable profiles. The side panel also marks running coding agents as working, waiting for input, or idle, detected from the bottom of the terminal screen (Claude, Codex, Gemini, OpenCode, Cursor, Qwen, Copilot, Grok, Kimi, Amp, Hermes, Qoder, Antigravity, and more)
 - **MCP** — Connect Model Context Protocol servers to extend agent capabilities
 - **Files panel** — Browse the project tree alongside your terminals
@@ -84,7 +85,7 @@ terry events                       # subscribe to agent state changes (SSE, Ctrl
 terry kitten list                  # list installed kitten/plugin executables
 terry kitten run hello --arg       # run a kitten (or: terry kitten hello --arg)
 terry kitten path                  # show plugin search directories
-terry install-cli                  # install terry/terry-daemon into ~/.local/bin
+terry install-cli                  # install terry/terry-daemon/tom into ~/.local/bin
 terry uninstall-cli                # remove those shims again
 ```
 
@@ -92,13 +93,14 @@ terry uninstall-cli                # remove those shims again
 pastes and submits the command. A session template stores the group's terminals,
 working directories, profiles/launches, tiling layout, and broadcast setting.
 
-Inside terminals opened by Terry, `terry` and `terry-daemon` are always on
-`PATH`: both resolve to the running build, and `terry-daemon ...` is shorthand
-for `terry daemon ...`. This works even when Terry is launched from a bundle
-that is not on your login shell's `PATH`.
+Inside terminals opened by Terry, `terry`, `terry-daemon`, and `tom` are always
+on `PATH`: all resolve to the running build, `terry-daemon ...` is shorthand for
+`terry daemon ...`, and `tom ...` starts the built-in coding agent (see
+[Coding agent](#coding-agent)). This works even when Terry is launched from a
+bundle that is not on your login shell's `PATH`.
 
-To use the CLI from shells Terry did not spawn, run `terry install-cli`. It
-writes both shims into `~/.local/bin` (override with `--dir DIR` or
+To use these from shells Terry did not spawn, run `terry install-cli`. It writes
+all three shims into `~/.local/bin` (override with `--dir DIR` or
 `TERRY_CLI_DIR`) and prints how to add that directory to `PATH` if needed. An
 existing file with the same name that Terry did not create is never overwritten.
 
@@ -235,7 +237,13 @@ Release packages are built via GitHub Actions (`.github/workflows/release.yml`).
 ### Prerequisites
 
 - Rust **1.95.0** (see `rust-toolchain.toml`)
-- Platform build deps: CMake, a C/C++ toolchain, and on Linux the usual X11/Wayland/fontconfig libraries
+- Platform build deps: CMake, a C/C++ toolchain, and on Linux the X11/Wayland libraries (`libxcb`, `libxkbcommon`, `libxkbcommon-x11`).
+
+  fontconfig is **not** required. Font families are resolved by cosmic-text's own
+  pure-Rust font database, and the per-family face selection uses gpui_wgpu's
+  built-in matcher, so the native `libfontconfig` is never linked on Linux. (It
+  is still used on macOS, where it is backed by CoreText and needs no system
+  package.)
 
 ### Build & run
 
@@ -260,11 +268,73 @@ script/package-linux.sh
 
 Artifacts are written under `target/release/`.
 
+## Coding agent
+
+Terry ships [tom](https://github.com/bigfish1913/tom) as its built-in coding
+agent. It is not a panel — it is a full terminal program, available as `tom`
+inside every terminal Terry opens:
+
+```sh
+tom                              # interactive coding agent
+tom "add a test for the parser"  # start with a prompt
+tom --print "explain Cargo.toml" # non-interactive
+tom --model openai-compatible/gpt-4.1
+```
+
+`tom` is the same binary as Terry, forwarding to its `tom` subcommand, so the
+agent always matches the app version and needs no separate install. Outside
+Terry's terminals, run `terry install-cli` to get the same `tom` (plus `terry`
+and `terry-daemon`) in `~/.local/bin`.
+
+Because it is the real tom CLI, everything documented there works: sessions,
+`--print`/`--mode json`, `--tools`/`--exclude-tools`, system prompts, skills,
+prompt templates, and cdylib extensions. Configuration lives in `~/.tom`, exactly
+as for a standalone tom.
+
+### Theme
+
+The agent follows the terminal's colors. On launch Terry writes a theme file
+derived from the palette the terminal is painting — including a per-terminal
+color scheme and light/dark switches — to
+`<data dir>/coding_agent/terry-terminal.json`, and points `TERRY_AGENT_THEME` at
+it. `tom` treats that as a fallback: an explicit `--theme` or a saved `theme`
+setting still wins, so a hand-tuned theme is never overridden.
+
+### Conversation history
+
+Sessions are stored as JSONL files written by `tom-harness`, under the directory
+tom itself uses (`~/.tom/sessions/<encoded working directory>/`). Each message is
+appended as it settles, so a crash mid-run still leaves a readable transcript,
+and `tom -c` / `tom -r` resume where you left off. The files are tom's format, so
+the CLI, `--export`, and Terry all read the same history.
+
+### Vendored tom crates
+
+The whole tom workspace is vendored (MIT): `tom-telemetry`, `tom-ai`,
+`tom-agent`, `tom-tools`, `tom-harness`, `tom-runtime`, `tom-plugin-sdk`,
+`tom-tui`, `tom-extensions`, and `tom-cli`. `tom-cli` + `tom-tui` are what make
+`tom` the real thing rather than a reimplementation.
+
+Two adaptations were required to live in this workspace:
+
+- They stay on Rust edition 2021 (the rest of the workspace is on 2024), because
+  the code predates edition 2024's `unsafe` requirement on `std::env::set_var`.
+- `tom-ai` and `tom-tools` were ported from the `jsonschema` 0.18 API
+  (`JSONSchema::compile`/`validate`) to 0.37 (`validator_for`/`iter_errors`), the
+  version this workspace already depends on.
+
+`tom-cli` gained one hook: when `--theme` and the saved `theme` setting are both
+absent, it reads `TERRY_AGENT_THEME`. That is the only source change; the CLI's
+own behaviour is untouched.
+
+Run their tests with `cargo test -p tom-cli -p tom-tui -p tom-harness -p tom-ai -p tom-tools -p tom-agent`.
+
 ## Project layout
 
 ```
 src/                 # App entry, terminal/file panels, menus
 crates/              # Shared libraries (GPUI, terminal, agent, settings, …)
+crates/tom-*         # Vendored tom agent runtime + CLI (MIT) — `tom` is built in
 agent_ui / crates/agent_ui
 assets/              # Icons, default settings, themes
 script/              # Packaging scripts

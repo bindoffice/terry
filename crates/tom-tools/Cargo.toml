@@ -1,0 +1,54 @@
+[package]
+name = "tom-tools"
+# Vendored from the tom workspace, which targets edition 2021 (the code
+# predates the edition-2024 `unsafe` requirements on `std::env::set_var`).
+edition = "2021"
+publish.workspace = true
+license = "MIT"
+version = "0.16.0"
+description = "Built-in agent tools (read, write, edit, bash, grep, find) and the ExecutionEnv abstraction"
+readme = "README.md"
+keywords = ["agent", "llm", "tools", "shell"]
+categories = ["api-bindings", "development-tools"]
+
+[dependencies]
+tom-agent = { workspace = true }
+tom-ai = { workspace = true }
+tom-plugin-sdk = { workspace = true, features = ["process"] }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jsonschema = { workspace = true }
+schemars = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+base64 = { workspace = true }
+tempfile = { workspace = true }
+uuid = { workspace = true }
+
+# Pinned to 5.x (the rest of the workspace uses 6.x): the vendored code
+# calls `dirs::home_dir()` and both versions can coexist.
+dirs = "5"
+similar = { workspace = true }
+unicode-normalization = { workspace = true }
+# Shell output that is not UTF-8: the Windows console code page (GBK etc.).
+encoding_rs = { workspace = true }
+codepage = { workspace = true }
+regex = { workspace = true }
+globset = { workspace = true }
+# Image processing (resize, convert, EXIF). Image's default features minus
+# `avif`: tom never encodes AVIF, and the AVIF encoder stack (ravif -> rav1e)
+# needs Rust 1.85+ and stays in Cargo.lock even when unused.
+image = { workspace = true }
+
+[features]
+# Enables WebP decode in the read tool's image processor (off by default: the
+# `image` crate's WebP decoder is always compiled in, this only gates the
+# advertised MIME type).
+webp = []
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["process", "signal"] }

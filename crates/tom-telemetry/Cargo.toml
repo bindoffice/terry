@@ -1,0 +1,22 @@
+[package]
+name = "tom-telemetry"
+# Vendored from the tom workspace, which targets edition 2021 (the code
+# predates the edition-2024 `unsafe` requirements on `std::env::set_var`).
+edition = "2021"
+publish.workspace = true
+license = "MIT"
+version = "0.16.0"
+description = "Telemetry interface and span/event contract for the embedded tom agent runtime"
+readme = "README.md"
+keywords = ["telemetry", "agent", "llm"]
+categories = ["development-tools"]
+
+[features]
+# `testing` exposes the in-memory recorder used by downstream test suites.
+testing = []
+
+[dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
