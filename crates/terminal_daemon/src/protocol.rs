@@ -68,6 +68,13 @@ pub struct SessionInfo {
     /// Seconds since the last output. Used to avoid reaping live sessions.
     #[serde(default)]
     pub idle_secs: u64,
+    /// The coding agent running in this session, when one was reported.
+    ///
+    /// The reaper uses this: an agent that is thinking (or waiting for a human)
+    /// produces no output, so it looks exactly like an abandoned session. Killing
+    /// it loses work the user cannot get back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 /// Client -> daemon.
@@ -93,6 +100,15 @@ pub enum Request {
         session: String,
         cols: u16,
         rows: u16,
+        /// Never resize the PTY from this connection, not even through `Resize`.
+        ///
+        /// A phone watching a session that the desktop is also displaying must
+        /// not impose its own grid: the two would fight, and whichever attached
+        /// last would reflow the program the other one is using. A mirror client
+        /// renders at the session's size instead (see the `Attached` reply) and
+        /// simply scales or scrolls.
+        #[serde(default)]
+        readonly: bool,
     },
     List,
     Kill {
@@ -105,6 +121,17 @@ pub enum Request {
     },
     /// Attach mode only: leave the session running and close this connection.
     Detach,
+    /// Read a session's screen without attaching to it.
+    ///
+    /// `lines: Some(n)` returns the last `n` non-empty lines as plain text
+    /// (`Reply::Text`); `None` returns the styled viewport (`Reply::Screen`).
+    /// Reading needs no attach, so a client that only follows agent state never
+    /// takes over the input side or touches the PTY size.
+    ReadScreen {
+        session: String,
+        #[serde(default)]
+        lines: Option<usize>,
+    },
 }
 
 /// Daemon -> client.
@@ -126,6 +153,15 @@ pub enum Reply {
     },
     Exited {
         code: i32,
+    },
+    /// A styled viewport, encoded exactly like the GUI's `/api/screen` payload
+    /// (`terminal_core::screen_json`), so a client can talk to either host.
+    Screen {
+        screen: serde_json::Value,
+    },
+    /// The last non-empty lines of a session, oldest first.
+    Text {
+        lines: Vec<String>,
     },
     Error {
         message: String,
@@ -158,6 +194,19 @@ mod tests {
         let mut buffer = Vec::new();
         let payload = vec![0u8; MAX_FRAME_BYTES as usize + 1];
         assert!(write_frame(&mut buffer, TAG_OUTPUT, &payload).is_err());
+    }
+
+    #[test]
+    fn attach_readonly_defaults_to_false() {
+        let request: Request =
+            serde_json::from_str(r#"{"op":"attach","session":"s","cols":80,"rows":24}"#).unwrap();
+        match request {
+            Request::Attach { readonly, .. } => assert!(
+                !readonly,
+                "an old client that does not send the flag must still be able to resize"
+            ),
+            other => panic!("expected Attach, got {other:?}"),
+        }
     }
 
     #[test]

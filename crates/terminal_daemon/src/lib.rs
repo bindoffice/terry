@@ -19,6 +19,8 @@
 //! (named pipes + ConPTY) is not implemented yet; the non-Unix build exposes
 //! stubs that return errors so the workspace still compiles.
 
+pub mod agents;
+pub mod http;
 pub mod protocol;
 
 #[cfg(unix)]
@@ -34,6 +36,14 @@ pub use stub::*;
 use std::path::PathBuf;
 
 pub use protocol::SessionInfo;
+
+/// A fresh session id.
+///
+/// Same shape the GUI uses (`t-<uuid>`), so a session started over HTTP and one
+/// started from the desktop look alike in `terry daemon list`.
+pub fn new_session_id() -> String {
+    format!("t-{}", uuid::Uuid::new_v4())
+}
 
 /// File name of the daemon socket inside the app data directory.
 pub const SOCKET_FILE_NAME: &str = "terminal-daemon.sock";

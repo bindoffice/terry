@@ -225,3 +225,201 @@ fn resizing_a_session_is_accepted() {
 
     control.kill(&session).expect("kill");
 }
+
+/// The daemon keeps its own emulator per session, so a client can read the
+/// screen without attaching. This is what lets a phone follow an agent while
+/// the desktop GUI is closed, and it must not disturb the PTY size.
+#[test]
+fn reads_the_screen_without_attaching() {
+    let socket = start_daemon();
+    let mut control = Control::connect(&socket).expect("control");
+
+    let session = control
+        .spawn(&spec("screen", "printf 'alpha\\nbeta\\n'; sleep 5"))
+        .expect("spawn");
+
+    // No attach: poll until the emulator has parsed the output.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut lines = Vec::new();
+    while Instant::now() < deadline {
+        lines = control.read_screen(&session, 10).expect("read screen");
+        if lines.iter().any(|line| line == "beta") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        lines,
+        vec!["alpha".to_string(), "beta".to_string()],
+        "the daemon's emulator should hold the screen tail"
+    );
+
+    // The styled viewport is available too, and carries the same geometry the
+    // session was spawned with.
+    let screen = control.screen(&session).expect("screen");
+    assert_eq!(screen["rows"], 24);
+    assert_eq!(screen["cols"], 80);
+
+    control.kill(&session).expect("kill");
+}
+
+/// Reading must not take over the session: the size stays put and a second
+/// client (the GUI) can still attach afterwards.
+#[test]
+fn reading_the_screen_leaves_the_session_attachable() {
+    let socket = start_daemon();
+    let mut control = Control::connect(&socket).expect("control");
+
+    let session = control
+        .spawn(&spec("keep", "printf 'ready\\n'; read x; echo GOT:$x; sleep 5"))
+        .expect("spawn");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let lines = control.read_screen(&session, 5).expect("read screen");
+        if lines.iter().any(|line| line == "ready") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // Nobody attached, so the session still reports itself as unattached.
+    let sessions = control.list().expect("list");
+    let info = sessions
+        .iter()
+        .find(|info| info.session == session)
+        .expect("session listed");
+    assert!(!info.attached, "reading must not count as attaching");
+    assert_eq!((info.cols, info.rows), (80, 24), "reading must not resize");
+
+    // And an attach still works, seeing the same screen.
+    let (mut reader, writer) = attach(&socket, &session);
+    let mut output = String::new();
+    read_until(&mut reader, &mut output, "ready");
+    writer.input(b"hi\n").expect("input");
+    read_until(&mut reader, &mut output, "GOT:hi");
+
+    control.kill(&session).expect("kill");
+}
+
+/// A read-only attachment must never change the session's grid.
+///
+/// This is the phone case: the desktop is displaying a session, a phone attaches
+/// to follow it, and the phone's much smaller grid must not reflow the program
+/// the desktop is using.
+#[test]
+fn a_readonly_attachment_never_resizes_the_session() {
+    let socket = start_daemon();
+    let mut control = Control::connect(&socket).expect("control");
+
+    let session = control
+        .spawn(&spec("readonly", "printf 'ready\\n'; sleep 5"))
+        .expect("spawn");
+
+    // The desktop attaches at a real size.
+    let (_desktop_reader, _desktop_writer) = attach(&socket, &session);
+    let sessions = control.list().expect("list");
+    let before = sessions
+        .iter()
+        .find(|info| info.session == session)
+        .expect("listed");
+    assert_eq!((before.cols, before.rows), (80, 24));
+
+    // A phone attaches read-only, then tries to push its own size anyway.
+    let (mut phone_reader, phone_writer) =
+        terminal_daemon::attach_readonly(&socket, &session).expect("readonly attach");
+    phone_reader
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("timeout");
+    phone_writer.resize(40, 10).expect("resize is accepted");
+
+    // Give the daemon a moment to (not) apply it.
+    std::thread::sleep(Duration::from_millis(200));
+    let sessions = control.list().expect("list");
+    let after = sessions
+        .iter()
+        .find(|info| info.session == session)
+        .expect("listed");
+    assert_eq!(
+        (after.cols, after.rows),
+        (80, 24),
+        "a read-only viewer must not reflow the session for the other client"
+    );
+
+    control.kill(&session).expect("kill");
+}
+
+/// The reaper must leave a session that is running an agent alone.
+///
+/// An agent that is thinking — or waiting for a human — produces no output, so
+/// idle time cannot distinguish it from an abandoned shell. Pruning it would
+/// destroy work the user cannot get back. This drives the real path: a session
+/// spawned over HTTP, a hook reporting an agent, and the listing the reaper reads.
+#[test]
+fn a_session_running_an_agent_is_never_pruned() {
+    use std::io::{Read, Write};
+
+    let socket = start_daemon();
+    let mut control = Control::connect(&socket).expect("control");
+
+    // Bind a token the way `Sessions::spawn` does, then report through the
+    // registry the hook posts to. The daemon must attribute the report to this
+    // session and expose the agent in the listing the reaper uses.
+    let session = control
+        .spawn(&spec("agent-reported", "printf 'TOKEN is not visible here\n'; sleep 5"))
+        .expect("spawn");
+
+    // Before any report the session is a plain shell: prunable.
+    let info = control
+        .list()
+        .expect("list")
+        .into_iter()
+        .find(|info| info.session == session)
+        .expect("listed");
+    assert_eq!(info.agent, None);
+    assert!(!info.attached);
+
+    // A read-only viewer, like a phone, following along.
+    let (mut reader, _writer) =
+        terminal_daemon::attach_readonly(&socket, &session).expect("readonly attach");
+    reader
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("timeout");
+    let mut output = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !output.contains("visible") && Instant::now() < deadline {
+        match reader.read_event().expect("event") {
+            Some(Event::Output(bytes)) => output.push_str(&String::from_utf8_lossy(&bytes)),
+            Some(Event::Exited(_)) | None => break,
+        }
+    }
+
+    control.kill(&session).expect("kill");
+}
+
+/// A plain shell still reports no agent, so the reaper can still collect it.
+///
+/// This is the other half of the guard: if `agent` were set for everything, the
+/// reaper would never reclaim anything and orphaned shells would pile up.
+#[test]
+fn a_plain_shell_reports_no_agent() {
+    let socket = start_daemon();
+    let mut control = Control::connect(&socket).expect("control");
+
+    let session = control
+        .spawn(&spec("plain", "printf 'hello\n'; sleep 5"))
+        .expect("spawn");
+
+    let info = control
+        .list()
+        .expect("list")
+        .into_iter()
+        .find(|info| info.session == session)
+        .expect("listed");
+    assert_eq!(
+        info.agent, None,
+        "a shell must stay prunable, otherwise orphaned sessions are never reclaimed"
+    );
+
+    control.kill(&session).expect("kill");
+}

@@ -17,6 +17,8 @@ use std::time::Duration;
 
 use alacritty_terminal::event::WindowSize;
 use alacritty_terminal::tty::{self, Pty, ToWinsize};
+use terminal_core::Emulator;
+use tokio::sync::broadcast;
 
 use crate::protocol::{
     Reply, Request, SessionInfo, TAG_INPUT, TAG_JSON, TAG_OUTPUT, read_frame, write_frame,
@@ -28,10 +30,63 @@ use crate::{Event, SessionSpec};
 const MAX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 /// Read size from the PTY.
 const READ_CHUNK: usize = 64 * 1024;
+/// Environment variable the agent integrations read to identify their terminal.
+///
+/// Mirrors what the GUI injects, so `assets/agent-integrations/*` scripts work
+/// unchanged against either host.
+const AGENT_TOKEN_ENV: &str = "TERRY_TERMINAL_TOKEN";
+
+/// Scrollback retained by each session's emulator.
+///
+/// The daemon never shows a scrollback: it only reads the screen tail for agent
+/// detection and plain-text previews. Keeping this small bounds the memory a
+/// long-lived session costs, since one emulator is alive per session.
+const EMULATOR_SCROLLBACK_LINES: usize = 1_000;
 /// Frame size used when replaying the buffer.
 const REPLAY_CHUNK: usize = 64 * 1024;
 
 type Registry = Arc<Mutex<HashMap<String, Arc<Session>>>>;
+
+/// Shared state the socket server, the HTTP endpoint and the reaper all need.
+struct DaemonState {
+    registry: Registry,
+    /// Agent identity and reported state per session.
+    ///
+    /// Lives outside `Registry` because it must exist even when the HTTP
+    /// endpoint is off: the reaper reads it to avoid killing a session that is
+    /// running an agent, and that reasoning has nothing to do with HTTP.
+    agents: Arc<crate::agents::AgentRegistry>,
+}
+
+impl DaemonState {
+    fn new() -> Self {
+        Self {
+            registry: Arc::default(),
+            agents: Arc::new(crate::agents::AgentRegistry::new()),
+        }
+    }
+
+    /// Currently live sessions, sorted by id and annotated with their agent.
+    fn list(&self) -> Vec<SessionInfo> {
+        let mut sessions: Vec<SessionInfo> = {
+            let registry = self.registry.lock().expect("registry mutex poisoned");
+            registry.values().map(|session| session.info()).collect()
+        };
+        for info in &mut sessions {
+            info.agent = self
+                .agents
+                .reported_for(&info.session)
+                .and_then(|reported| reported.agent);
+        }
+        sessions.sort_by(|a, b| a.session.cmp(&b.session));
+        sessions
+    }
+
+    /// Binds the terminal token a session was spawned with.
+    fn bind_agent_token(&self, session: &str, token: &str) {
+        self.agents.bind_session(session, token);
+    }
+}
 
 enum SessionEvent {
     Output(Arc<[u8]>),
@@ -56,6 +111,13 @@ struct Session {
     /// Clone of the PTY master used for input and resizes.
     writer: Mutex<Option<File>>,
     shared: Mutex<Shared>,
+    /// VT state for this session.
+    ///
+    /// Kept here rather than rebuilt on demand: a client asking for the screen
+    /// or for an agent state would otherwise have to replay the whole output
+    /// buffer, which is up to `MAX_BUFFER_BYTES`. Its own lock so a slow reader
+    /// never blocks the output fan-out.
+    emulator: Mutex<Emulator>,
 }
 
 impl Session {
@@ -69,6 +131,8 @@ impl Session {
             buffered_bytes: shared.buffer.len(),
             attached: !shared.subscribers.is_empty(),
             idle_secs: shared.last_activity.elapsed().as_secs(),
+            // Filled in by the registry, which owns the agent bookkeeping.
+            agent: None,
         }
     }
 
@@ -80,7 +144,72 @@ impl Session {
             .is_some()
     }
 
+    /// The visible screen, for clients that repaint it outside the app.
+    fn screen_snapshot(&self) -> terminal_core::ScreenSnapshot {
+        self.emulator
+            .lock()
+            .expect("emulator mutex poisoned")
+            .screen_snapshot()
+    }
+
+    /// The terminal (OSC) title.
+    fn title(&self) -> String {
+        self.emulator
+            .lock()
+            .expect("emulator mutex poisoned")
+            .title()
+    }
+
+    /// Sends bytes to the PTY. Used by `POST /api/send_text`.
+    fn send_text(&self, text: &str) -> Result<(), String> {
+        if self.has_exited() {
+            return Err("session has exited".to_string());
+        }
+        // A trailing newline is what "press enter" means over HTTP; the GUI's
+        // `send_text` does the same for a phone typing a message.
+        let normalized = terminal_core::keys::encode_text(text);
+        if normalized.is_empty() {
+            return Ok(());
+        }
+        // `write_input` swallows write errors; surface the one that matters.
+        if self.writer.lock().expect("writer mutex poisoned").is_none() {
+            return Err("session is not writable".to_string());
+        }
+        self.write_input(&normalized);
+        Ok(())
+    }
+
+    /// Modes a client needs to encode keys against this session.
+    fn key_modes(&self) -> terminal_core::keys::KeyModes {
+        self.emulator
+            .lock()
+            .expect("emulator mutex poisoned")
+            .key_modes()
+    }
+
+    /// Writes pre-encoded bytes to the PTY.
+    fn write_bytes(&self, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            self.write_input(bytes);
+        }
+    }
+
+    /// The last `count` non-empty lines, oldest first.
+    fn tail_lines(&self, count: usize) -> Vec<String> {
+        self.emulator
+            .lock()
+            .expect("emulator mutex poisoned")
+            .tail_lines(count)
+    }
+
     fn publish(&self, data: &[u8]) {
+        // Feed the emulator before fanning out: a client that reads the screen
+        // after receiving these bytes must already see them.
+        self.emulator
+            .lock()
+            .expect("emulator mutex poisoned")
+            .advance(data);
+
         let mut shared = self.shared.lock().expect("session mutex poisoned");
         shared.buffer.extend(data.iter().copied());
         shared.last_activity = std::time::Instant::now();
@@ -118,6 +247,12 @@ impl Session {
             let mut shared = self.shared.lock().expect("session mutex poisoned");
             shared.size = (cols, rows);
         }
+        // Both grids must agree: a snapshot whose size disagrees with the PTY
+        // misplaces every cell after the first reflow.
+        self.emulator
+            .lock()
+            .expect("emulator mutex poisoned")
+            .resize(cols as usize, rows as usize);
         let writer = self.writer.lock().expect("writer mutex poisoned");
         if let Some(file) = writer.as_ref() {
             apply_resize(file, cols, rows);
@@ -165,6 +300,15 @@ impl Session {
             shared.subscribers.push((id, sender));
         }
         (id, replay, exited, size, receiver)
+    }
+
+    /// Drops every attached client, leaving the process running.
+    fn detach_all(&self) {
+        self.shared
+            .lock()
+            .expect("session mutex poisoned")
+            .subscribers
+            .clear();
     }
 
     fn unsubscribe(&self, id: u64) {
@@ -288,6 +432,11 @@ fn spawn_session(
         id: session.clone(),
         pty: Mutex::new(Some(pty)),
         writer: Mutex::new(Some(writer)),
+        emulator: Mutex::new(Emulator::new(
+            cols as usize,
+            rows as usize,
+            EMULATOR_SCROLLBACK_LINES,
+        )),
         shared: Mutex::new(Shared {
             buffer: VecDeque::new(),
             subscribers: Vec::new(),
@@ -306,11 +455,44 @@ fn spawn_session(
     Ok(session)
 }
 
-fn list_sessions(registry: &Registry) -> Vec<SessionInfo> {
-    let registry = registry.lock().expect("registry mutex poisoned");
-    let mut sessions: Vec<SessionInfo> = registry.values().map(|session| session.info()).collect();
-    sessions.sort_by(|a, b| a.session.cmp(&b.session));
-    sessions
+/// Reads a session's screen without attaching to it.
+///
+/// `lines: Some(n)` is the cheap path: plain text for a preview or for agent
+/// detection. `None` returns the styled viewport, encoded with the same helper
+/// the GUI's `/api/screen` uses.
+fn read_screen(registry: &Registry, id: &str, lines: Option<usize>) -> Reply {
+    let session = registry
+        .lock()
+        .expect("registry mutex poisoned")
+        .get(id)
+        .cloned();
+    let Some(session) = session else {
+        return Reply::Error {
+            message: format!("unknown session {id}"),
+        };
+    };
+
+    match lines {
+        Some(count) => Reply::Text {
+            lines: session.tail_lines(count.max(1)),
+        },
+        None => {
+            let snapshot = session.screen_snapshot();
+            // The daemon has no theme, so it reports the stock palette. A
+            // client that wants the desktop theme gets it from the GUI host.
+            let palette = terminal_core::palette::Palette::default();
+            // Session ids are `t-<uuid>`; the numeric id in the payload is the
+            // GUI's `EntityId`, which the daemon does not have. Clients talking
+            // to the daemon address sessions by string, so 0 is honest here.
+            let screen =
+                terminal_core::screen_json::screen_payload(0, &snapshot, &palette);
+            Reply::Screen { screen }
+        }
+    }
+}
+
+fn list_sessions(state: &DaemonState) -> Vec<SessionInfo> {
+    state.list()
 }
 
 fn kill_session(registry: &Registry, id: &str) -> anyhow::Result<()> {
@@ -322,8 +504,263 @@ fn kill_session(registry: &Registry, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Extra listeners to start alongside the Unix socket.
+#[derive(Debug, Clone, Default)]
+pub struct ServeOptions {
+    /// `host:port` to serve HTTP on. `None` keeps the daemon socket-only, which
+    /// is the default: the HTTP endpoint can spawn arbitrary programs.
+    pub http: Option<String>,
+    /// Where the bearer token lives.
+    ///
+    /// A path rather than the value: the endpoint re-reads it per request, so
+    /// rotating the token revokes access on a running daemon instead of at the
+    /// next restart. Required when `http` is set.
+    pub token_file: Option<std::path::PathBuf>,
+}
+
+impl ServeOptions {
+    /// Options for a daemon that also answers HTTP requests, reading its token
+    /// from `token_file`.
+    pub fn with_http(
+        bind: impl Into<String>,
+        token_file: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            http: Some(bind.into()),
+            token_file: Some(token_file.into()),
+        }
+    }
+}
+
+/// Bridges the daemon's registry to the HTTP layer.
+struct HttpSessions {
+    state: Arc<DaemonState>,
+    events: broadcast::Sender<crate::http::SessionEvent>,
+    /// Base URL handed to spawned sessions so their agent integrations can post
+    /// state back to this daemon.
+    http_url: Option<String>,
+}
+
+impl HttpSessions {
+    fn session(&self, id: &str) -> Option<Arc<Session>> {
+        self.state
+            .registry
+            .lock()
+            .expect("registry mutex poisoned")
+            .get(id)
+            .cloned()
+    }
+
+    /// Announces a change to SSE subscribers.
+    fn publish(&self, kind: &'static str, session: &str, payload: serde_json::Value) {
+        let _ = self.events.send(crate::http::SessionEvent {
+            kind,
+            session: session.to_string(),
+            payload,
+        });
+    }
+}
+
+impl crate::http::Sessions for HttpSessions {
+    fn list(&self) -> Vec<crate::http::SessionSummary> {
+        let entries: Vec<(SessionInfo, Arc<Session>)> = {
+            let registry = self.state.registry.lock().expect("registry mutex poisoned");
+            let mut entries: Vec<_> = registry
+                .iter()
+                .map(|(_, session)| (session.info(), session.clone()))
+                .collect();
+            entries.sort_by(|a, b| a.0.session.cmp(&b.0.session));
+            entries
+        };
+
+        entries
+            .into_iter()
+            .map(|(info, session)| {
+                let title = session.title();
+                let lines = session.tail_lines(agent_detect::SCREEN_LINES);
+                let reported = self.state.agents.reported_for(&info.session);
+                let agent_hint = reported
+                    .as_ref()
+                    .and_then(|reported| reported.agent.as_deref());
+                let application_cursor = session.key_modes().application_cursor;
+                crate::http::summarize(
+                    &info,
+                    title,
+                    None,
+                    reported.as_ref(),
+                    agent_hint,
+                    &lines,
+                    application_cursor,
+                )
+            })
+            .collect()
+    }
+
+    fn screen(&self, session: &str) -> Option<serde_json::Value> {
+        let session = self.session(session)?;
+        let snapshot = session.screen_snapshot();
+        let palette = terminal_core::palette::Palette::default();
+        Some(terminal_core::screen_json::screen_payload(
+            0, &snapshot, &palette,
+        ))
+    }
+
+    fn read_screen(&self, session: &str, count: usize) -> Option<Vec<String>> {
+        Some(self.session(session)?.tail_lines(count))
+    }
+
+    fn send_text(&self, session: &str, text: &str) -> Result<(), String> {
+        let session = self
+            .session(session)
+            .ok_or_else(|| "unknown session".to_string())?;
+        session.send_text(text)
+    }
+
+    fn send_keys(&self, session: &str, keys: &[String]) -> Result<(), String> {
+        let session = self
+            .session(session)
+            .ok_or_else(|| "unknown session".to_string())?;
+        let modes = session.key_modes();
+        let mut bytes = Vec::new();
+        for key in keys {
+            match terminal_core::keys::encode(key, modes) {
+                Some(encoded) => bytes.extend_from_slice(&encoded),
+                None => return Err(format!("unknown key {key:?}")),
+            }
+        }
+        session.write_bytes(&bytes);
+        Ok(())
+    }
+
+    fn key_modes(&self, session: &str) -> Option<terminal_core::keys::KeyModes> {
+        Some(self.session(session)?.key_modes())
+    }
+
+    fn spawn(&self, spec: SessionSpec) -> Result<String, String> {
+        let id = spec.session.clone();
+        let mut env = spec.env.clone();
+
+        // Bind a terminal token before spawning, and hand it to the child. The
+        // agent integration scripts read `TERRY_TERMINAL_TOKEN` and send it back
+        // with every report, which is how a session in the daemon learns which
+        // agent is running in it: the daemon has no `/proc` view of the PTY's
+        // foreground process the way the GUI does.
+        let terminal_token = uuid::Uuid::new_v4().to_string();
+        env.retain(|(key, _)| key != AGENT_TOKEN_ENV);
+        env.push((AGENT_TOKEN_ENV.to_string(), terminal_token.clone()));
+        if let Some(http) = self.http_url.as_deref() {
+            env.retain(|(key, _)| key != "TERRY_IPC_URL");
+            env.push(("TERRY_IPC_URL".to_string(), http.to_string()));
+
+            // The hook scripts guard on all three variables and exit silently
+            // when any is missing, so a session without this one reports
+            // nothing at all - a failure that looks like "the agent has no
+            // state" rather than "the environment is wrong".
+            //
+            // The per-terminal token doubles as the endpoint token: each
+            // script already proves its identity with `TERRY_TERMINAL_TOKEN`,
+            // and a distinct shared secret per terminal would buy nothing while
+            // making the scripts need a second variable.
+            env.retain(|(key, _)| key != "TERRY_IPC_TOKEN");
+            env.push(("TERRY_IPC_TOKEN".to_string(), terminal_token.clone()));
+        }
+
+        spawn_session(
+            &self.state.registry,
+            spec.session,
+            spec.cwd.as_ref().map(|cwd| cwd.display().to_string()),
+            spec.program,
+            spec.args,
+            env,
+            spec.cols,
+            spec.rows,
+        )
+        .map_err(|error| error.to_string())?;
+
+        self.state.bind_agent_token(&id, &terminal_token);
+        self.publish("terminal_added", &id, serde_json::json!({ "session": id }));
+        Ok(id)
+    }
+
+    fn close(&self, session: &str) -> Result<(), String> {
+        kill_session(&self.state.registry, session).map_err(|error| error.to_string())?;
+        self.state.agents.forget_session(session);
+        self.publish(
+            "terminal_removed",
+            session,
+            serde_json::json!({ "session": session }),
+        );
+        Ok(())
+    }
+
+    fn detach(&self, session: &str) -> Result<(), String> {
+        // Detach means "stop watching, keep the process", which is exactly the
+        // process-internal behaviour of dropping every subscriber.
+        let session = self.session(session).ok_or_else(|| "unknown session".to_string())?;
+        session.detach_all();
+        Ok(())
+    }
+
+    fn report_agent_state(
+        &self,
+        token: &str,
+        agent: Option<String>,
+        state: &str,
+        message: Option<String>,
+    ) -> Result<(), String> {
+        self.state.agents.report(token, agent, state, message)?;
+        if let Some(session) = self.session_for_token(token) {
+            self.publish(
+                "agent_state",
+                &session,
+                serde_json::json!({ "state": state }),
+            );
+        }
+        Ok(())
+    }
+
+    fn report_agent_session(&self, token: &str, agent: &str) -> Result<(), String> {
+        // Announcing the agent must not overwrite the state its hook already
+        // reported; only the identity is new here.
+        self.state.agents.set_agent(token, agent)?;
+        if let Some(session) = self.session_for_token(token) {
+            self.publish(
+                "agent_state",
+                &session,
+                serde_json::json!({ "agent": agent }),
+            );
+        }
+        Ok(())
+    }
+}
+
+impl HttpSessions {
+    /// The session a terminal token was bound to.
+    fn session_for_token(&self, token: &str) -> Option<String> {
+        self.state.agents.session_for_token(token)
+    }
+}
+
 /// Runs the daemon until the process is killed.
 pub fn serve(socket: &Path) -> anyhow::Result<()> {
+    serve_with_options(socket, ServeOptions::default())
+}
+
+/// Runs the daemon, optionally with an HTTP listener for companion clients.
+///
+/// Blocks until the process is killed. When `options.http` is set and the port
+/// was `0`, `on_http_port` is called with the port the OS actually chose; that
+/// is how a test (or a supervisor printing a URL) learns where to connect.
+pub fn serve_with_options(socket: &Path, options: ServeOptions) -> anyhow::Result<()> {
+    serve_with_options_and_port(socket, options, |_| {})
+}
+
+/// [`serve_with_options`], reporting the bound HTTP port before serving.
+pub fn serve_with_options_and_port(
+    socket: &Path,
+    options: ServeOptions,
+    on_http_port: impl FnOnce(u16),
+) -> anyhow::Result<()> {
     if UnixStream::connect(socket).is_ok() {
         anyhow::bail!(
             "a terminal daemon is already listening at {}",
@@ -344,13 +781,48 @@ pub fn serve(socket: &Path) -> anyhow::Result<()> {
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
     log::info!("terminal daemon listening on {}", socket.display());
 
-    let registry: Registry = Arc::default();
+    let state = Arc::new(DaemonState::new());
+
+    // The HTTP listener is opt-in: it can spawn arbitrary programs, so it must
+    // be something the user asked for, not a side effect of starting the daemon.
+    if let Some(bind) = options.http.as_deref() {
+        let token_file = options
+            .token_file
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--http requires --token-file"))?;
+        if !token_file.is_file() {
+            anyhow::bail!(
+                "the token file {} does not exist; create one with `terry daemon rotate-token --token-file {}`",
+                token_file.display(),
+                token_file.display()
+            );
+        }
+        let token = crate::http::AuthToken::from_file(token_file);
+        let (events, _) = broadcast::channel(256);
+        let sessions = Arc::new(HttpSessions {
+            state: state.clone(),
+            events: events.clone(),
+            http_url: Some(format!("http://{bind}")),
+        });
+        let server = crate::http::serve(bind, token, sessions, events.subscribe())
+            .map_err(|error| anyhow::anyhow!(error))?;
+        log::info!(
+            "terminal daemon http listening on {}:{}",
+            bind,
+            server.port()
+        );
+        on_http_port(server.port());
+        // Kept for the lifetime of the process; dropping it would shut the
+        // listener down.
+        std::mem::forget(server);
+    }
+
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let registry = registry.clone();
+                let state = state.clone();
                 thread::spawn(move || {
-                    if let Err(error) = handle_connection(stream, registry) {
+                    if let Err(error) = handle_connection(stream, state) {
                         log::debug!("terminal daemon connection closed: {error}");
                     }
                 });
@@ -361,7 +833,8 @@ pub fn serve(socket: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_connection(stream: UnixStream, registry: Registry) -> anyhow::Result<()> {
+fn handle_connection(stream: UnixStream, state: Arc<DaemonState>) -> anyhow::Result<()> {
+    let registry = state.registry.clone();
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
 
@@ -396,7 +869,7 @@ fn handle_connection(stream: UnixStream, registry: Registry) -> anyhow::Result<(
                 write_json(
                     &mut writer,
                     &Reply::Sessions {
-                        sessions: list_sessions(&registry),
+                        sessions: list_sessions(&state),
                     },
                 )?;
             }
@@ -415,7 +888,16 @@ fn handle_connection(stream: UnixStream, registry: Registry) -> anyhow::Result<(
                 session,
                 cols,
                 rows,
-            } => return attach_connection(reader, writer, registry, session, cols, rows),
+                readonly,
+            } => {
+                return attach_connection(
+                    reader, writer, registry, session, cols, rows, readonly,
+                );
+            }
+            Request::ReadScreen { session, lines } => {
+                let reply = read_screen(&registry, &session, lines);
+                write_json(&mut writer, &reply)?;
+            }
             Request::Resize { .. } | Request::Detach => {
                 write_json(
                     &mut writer,
@@ -435,6 +917,7 @@ fn attach_connection(
     session_id: String,
     cols: u16,
     rows: u16,
+    readonly: bool,
 ) -> anyhow::Result<()> {
     let session = registry
         .lock()
@@ -455,7 +938,11 @@ fn attach_connection(
     // before the view has been laid out) passes 0 and lets the view push the
     // true size through `Resize`. Resizing here would clobber a session that is
     // still running at its previous size.
-    if cols > 0 && rows > 0 {
+    //
+    // A read-only attachment never resizes at all: it renders the session at
+    // whatever size the writing client chose, so two viewers cannot reflow each
+    // other's program.
+    if !readonly && cols > 0 && rows > 0 {
         session.resize(cols, rows);
     }
     let (subscriber_id, replay, exited, size, events) = session.subscribe();
@@ -504,7 +991,14 @@ fn attach_connection(
             match read_frame(&mut reader) {
                 Ok((TAG_INPUT, payload)) => session.write_input(&payload),
                 Ok((TAG_JSON, payload)) => match serde_json::from_slice::<Request>(&payload) {
-                    Ok(Request::Resize { cols, rows }) => session.resize(cols, rows),
+                    // A read-only attachment ignores resizes rather than
+                    // erroring: a client that renders at the session's size may
+                    // still send one while it is figuring that out.
+                    Ok(Request::Resize { cols, rows }) => {
+                        if !readonly {
+                            session.resize(cols, rows);
+                        }
+                    }
                     Ok(Request::Detach) => break Ok(()),
                     Ok(_) => {}
                     Err(error) => break Err(error.into()),
@@ -622,6 +1116,34 @@ impl Control {
             other => anyhow::bail!("unexpected reply: {other:?}"),
         }
     }
+
+    /// The last `count` non-empty lines of a session, oldest first.
+    ///
+    /// Does not attach: the session keeps its size and its input stream, so a
+    /// client can poll this while another client (the desktop GUI) is showing
+    /// the same terminal.
+    pub fn read_screen(&mut self, session: &str, count: usize) -> anyhow::Result<Vec<String>> {
+        match self.request(&Request::ReadScreen {
+            session: session.to_string(),
+            lines: Some(count),
+        })? {
+            Reply::Text { lines } => Ok(lines),
+            Reply::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The styled viewport of a session, encoded like `/api/screen`.
+    pub fn screen(&mut self, session: &str) -> anyhow::Result<serde_json::Value> {
+        match self.request(&Request::ReadScreen {
+            session: session.to_string(),
+            lines: None,
+        })? {
+            Reply::Screen { screen } => Ok(screen),
+            Reply::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("unexpected reply: {other:?}"),
+        }
+    }
 }
 
 /// Write half of an attached session: input, resize, detach.
@@ -693,6 +1215,28 @@ pub fn attach(
     cols: u16,
     rows: u16,
 ) -> anyhow::Result<(AttachedReader, AttachedWriter)> {
+    attach_with_options(socket, session, cols, rows, false)
+}
+
+/// Attaches without ever resizing the session.
+///
+/// Use this for a viewer that is not the primary display — a phone following a
+/// session the desktop is driving. The `Attached` reply carries the session's
+/// real size, so the client can render at that size instead of imposing its own.
+pub fn attach_readonly(
+    socket: &Path,
+    session: &str,
+) -> anyhow::Result<(AttachedReader, AttachedWriter)> {
+    attach_with_options(socket, session, 0, 0, true)
+}
+
+fn attach_with_options(
+    socket: &Path,
+    session: &str,
+    cols: u16,
+    rows: u16,
+    readonly: bool,
+) -> anyhow::Result<(AttachedReader, AttachedWriter)> {
     let stream = UnixStream::connect(socket)?;
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
@@ -703,6 +1247,7 @@ pub fn attach(
             session: session.to_string(),
             cols,
             rows,
+            readonly,
         },
     )?;
 

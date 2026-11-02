@@ -17,10 +17,20 @@ name = "terry-daemon"
 path = "src/main.rs"
 
 [dependencies]
+agent_catalog.workspace = true
+agent_detect.workspace = true
 alacritty_terminal.workspace = true
 anyhow.workspace = true
+axum = "0.8.9"
+futures.workspace = true
 libc.workspace = true
 log.workspace = true
 paths.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+terminal_core.workspace = true
+uuid.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }
