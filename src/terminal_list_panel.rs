@@ -315,6 +315,18 @@ fn coding_agents() -> &'static [AgentCli] {
             past: None,
             fork: None,
         },
+        // Terry's built-in coding agent. It is the `tom` subcommand of Terry's
+        // own binary, so the shim on PATH is what runs. `-c` continues the most
+        // recent session for the working directory, which is what a reopened
+        // tab wants.
+        AgentCli {
+            id: "tom",
+            names: &["tom"],
+            bin: "tom",
+            resume: Some("{bin} -c"),
+            past: Some("{bin} -r"),
+            fork: None,
+        },
         AgentCli {
             id: "crush",
             names: &["crush"],
@@ -539,6 +551,8 @@ fn agent_session_resume_command(agent_id: &str, session: &str) -> Option<String>
         "kimi" => "{bin} --session {session}",
         "qwen" => "{bin} --resume {session}",
         "codex" => "{bin} resume {session}",
+        // tom resumes a specific session by id.
+        "tom" => "{bin} -r {session}",
         _ => return None,
     };
     let agent = agent_by_id(agent_id)?;
@@ -699,6 +713,9 @@ fn agent_style(agent: &AgentCli) -> (Color, IconName) {
         "antigravity" => (Color::Info, IconName::AiGoogle),
         "cursor" | "aider" => (Color::Modified, IconName::Code),
         "kimi" => (Color::Accent, IconName::Star),
+        // Terry's built-in agent: its own mark, tinted like the terminal it
+        // runs in rather than borrowing another vendor's logo.
+        "tom" => (Color::Accent, IconName::Terminal),
         _ => (Color::Accent, IconName::Sparkle),
     }
 }
@@ -722,6 +739,11 @@ fn title_looks_busy(text: &str) -> bool {
         .chars()
         .any(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch))
     {
+        return true;
+    }
+    // tom marks an in-flight turn in the window title with `⟳` (and `↻` while
+    // retrying), which is more precise than the word markers below.
+    if text.contains('⟳') || text.contains('↻') {
         return true;
     }
     let lower = text.to_lowercase();

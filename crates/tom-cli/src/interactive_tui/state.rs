@@ -1684,7 +1684,60 @@ impl TuiState {
         true
     }
 
+    /// Whether a modal (selector, form, or `ask_user` dialog) currently owns
+    /// the input slot.
+    ///
+    /// A modal means the run is waiting on the user, which outranks whatever the
+    /// turn is doing: the user cannot make progress until they answer.
+    pub(super) fn modal_open(&self) -> bool {
+        self.active_selector
+            .lock()
+            .map(|selector| selector.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Reports a modal opening/closing to the host terminal.
+    ///
+    /// Called from the selector open/close choke points, which is where every
+    /// interactive prompt is routed.
+    pub(super) fn report_modal(&self, open: bool) {
+        if open {
+            crate::host_state::report(crate::host_state::AgentRunState::Blocked, None);
+        } else {
+            // Closing a modal returns to whatever the run was doing.
+            let status = self
+                .status
+                .lock()
+                .map(|status| *status)
+                .unwrap_or(RunStatus::Idle);
+            crate::host_state::report(
+                match status {
+                    RunStatus::Idle => crate::host_state::AgentRunState::Idle,
+                    RunStatus::Working | RunStatus::Aborting => {
+                        crate::host_state::AgentRunState::Working
+                    }
+                },
+                None,
+            );
+        }
+    }
+
     pub(super) fn apply_status(&self, status: RunStatus) {
+        // Tell the host terminal what the run is doing, so its sidebar shows
+        // the exact state instead of inferring it from the screen. A modal takes
+        // precedence (see `set_modal_open`), so a run that is waiting on the
+        // user stays `blocked` even while the turn is still technically live.
+        if !self.modal_open() {
+            crate::host_state::report(
+                match status {
+                    RunStatus::Idle => crate::host_state::AgentRunState::Idle,
+                    RunStatus::Working | RunStatus::Aborting => {
+                        crate::host_state::AgentRunState::Working
+                    }
+                },
+                None,
+            );
+        }
         match status {
             RunStatus::Working => {
                 // The status dock already shows the active loader. Keep the

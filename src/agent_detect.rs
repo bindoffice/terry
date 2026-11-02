@@ -129,6 +129,7 @@ fn rules_for(agent_id: &str) -> Option<&'static [CompiledRule]> {
         "qwen" => qwen_rules(),
         "copilot" => copilot_rules(),
         "pi" => pi_rules(),
+        "tom" => tom_rules(),
         "grok" => grok_rules(),
         "droid" => droid_rules(),
         "kimi" => kimi_rules(),
@@ -826,6 +827,99 @@ static PI_RULES: &[Rule] = &[
         matcher: Matcher::Any(&[
             Matcher::LineRegex(&[r"^── [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working ─+$"]),
             Matcher::LineRegex(&[r"^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working$"]),
+        ]),
+    },
+];
+
+fn tom_rules() -> &'static [CompiledRule] {
+    static RULES: OnceLock<Vec<CompiledRule>> = OnceLock::new();
+    RULES.get_or_init(|| compile(TOM_RULES))
+}
+
+/// Terry's built-in coding agent (`tom`).
+///
+/// Signals are read from tom's own renderer rather than guessed:
+///
+/// - while a turn runs, the editor's top border carries
+///   `⠋ Working… 12s` (spinner frames are `loader::SPINNER_FRAMES`), and the
+///   window title becomes `▃ ▅ ▂ tom ⟳` (or `↻` while retrying);
+/// - `Aborting…` appears in the footer during a cancel;
+/// - interactive pickers (`/model`, `/session`, `/tree`) replace the editor
+///   with a titled select list, which is waiting on the user;
+/// - an extension's `ask_user` dialog renders a question with its options;
+/// - otherwise the prompt box is simply present.
+static TOM_RULES: &[Rule] = &[
+    // Highest priority: a modal is up and the run is waiting for an answer.
+    // Checked before the working rules, because the working indicator stays
+    // visible in the editor border behind an open picker.
+    Rule {
+        state: AgentState::Blocked,
+        priority: 1300,
+        region: Region::Title,
+        matcher: Matcher::Any(&[
+            Matcher::Contains(&["action required"]),
+            Matcher::Contains(&["needs input"]),
+        ]),
+    },
+    Rule {
+        state: AgentState::Blocked,
+        priority: 1290,
+        region: Region::BottomNonEmpty(14),
+        matcher: Matcher::Any(&[
+            // Selector titles from `interactive_tui/selectors.rs`.
+            Matcher::Contains(&["select model"]),
+            Matcher::Contains(&["resume session"]),
+            Matcher::Contains(&["session tree"]),
+            Matcher::Contains(&["compaction summary"]),
+            Matcher::Contains(&["branch summary"]),
+            // An extension's `ask_user` prompt.
+            Matcher::Contains(&["ask user"]),
+        ]),
+    },
+    // Retrying after a provider failure: still working, never idle.
+    Rule {
+        state: AgentState::Working,
+        priority: 1150,
+        region: Region::Title,
+        matcher: Matcher::Contains(&["↻"]),
+    },
+    Rule {
+        state: AgentState::Working,
+        priority: 1140,
+        region: WHOLE_RECENT,
+        matcher: Matcher::Contains(&["aborting…"]),
+    },
+    // The in-flight indicator tom draws inside the editor's top border:
+    // `─ ⠋ Working… 3s ─────`. Match the spinner frame class so any frame
+    // counts, and require the ellipsis form tom actually renders.
+    Rule {
+        state: AgentState::Working,
+        priority: 1100,
+        region: Region::BottomNonEmpty(14),
+        matcher: Matcher::LineRegex(&[r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Working…"]),
+    },
+    // Fallback working signal: the title marker alone. Kept below the border
+    // rule so a stale title cannot outvote a visible prompt.
+    Rule {
+        state: AgentState::Working,
+        priority: 900,
+        region: Region::Title,
+        matcher: Matcher::Contains(&["⟳"]),
+    },
+    // Idle: no working indicator and no modal. tom's prompt box always renders
+    // a bottom border, so an empty match here just means "nothing is happening";
+    // it is deliberately the last rule so it cannot mask the states above.
+    Rule {
+        state: AgentState::Idle,
+        priority: 100,
+        region: Region::BottomNonEmpty(6),
+        matcher: Matcher::Not(&[
+            Matcher::Contains(&["working…"]),
+            Matcher::Contains(&["aborting…"]),
+            Matcher::Contains(&["select model"]),
+            Matcher::Contains(&["resume session"]),
+            Matcher::Contains(&["session tree"]),
+            Matcher::Contains(&["ask user"]),
         ]),
     },
 ];
@@ -1781,6 +1875,75 @@ mod tests {
             lines: lines.iter().map(|line| line.to_string()).collect(),
             title: title.to_string(),
         }
+    }
+
+    // ---- tom (Terry's built-in coding agent) ----
+
+    #[test]
+    fn tom_working_border_indicator_is_working() {
+        // Exactly what `tom-tui`'s editor draws in its top border.
+        let screen = screen(&["─ ⠋ Working… 3s ──────────", "❯ "], "▃ ▅ ▂ tom ⟳");
+        assert_eq!(detect("tom", &screen), Some(AgentState::Working));
+    }
+
+    #[test]
+    fn tom_every_spinner_frame_counts() {
+        for frame in ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] {
+            let line = format!("─ {frame} Working… 12s ────");
+            let screen = screen(&[&line], "▃ ▅ ▂ tom ⟳");
+            assert_eq!(
+                detect("tom", &screen),
+                Some(AgentState::Working),
+                "frame {frame} should be working"
+            );
+        }
+    }
+
+    #[test]
+    fn tom_retrying_title_is_working() {
+        let screen = screen(&["some output"], "▃ ▅ ▂ tom ↻");
+        assert_eq!(detect("tom", &screen), Some(AgentState::Working));
+    }
+
+    #[test]
+    fn tom_aborting_is_working() {
+        let screen = screen(&["Aborting…"], "▃ ▅ ▂ tom ⟳");
+        assert_eq!(detect("tom", &screen), Some(AgentState::Working));
+    }
+
+    #[test]
+    fn tom_model_picker_is_blocked() {
+        // The picker replaces the editor, so no working indicator is present.
+        let screen = screen(&["Select model", "  gpt-4.1", "  claude-sonnet"], "▃ ▅ ▂ tom");
+        assert_eq!(detect("tom", &screen), Some(AgentState::Blocked));
+    }
+
+    #[test]
+    fn tom_picker_outranks_a_stale_working_title() {
+        // The run keeps the working title while a picker is open; the picker is
+        // what the user must act on, so blocked wins.
+        let screen = screen(&["Session tree", "  ├ user: hi"], "▃ ▅ ▂ tom ⟳");
+        assert_eq!(detect("tom", &screen), Some(AgentState::Blocked));
+    }
+
+    #[test]
+    fn tom_ask_user_dialog_is_blocked() {
+        let screen = screen(
+            &["Ask user", "Which database?", "  > postgres", "    sqlite"],
+            "▃ ▅ ▂ tom",
+        );
+        assert_eq!(detect("tom", &screen), Some(AgentState::Blocked));
+    }
+
+    #[test]
+    fn tom_idle_prompt_is_idle() {
+        let screen = screen(&["some earlier output", "╭────────────╮", "❯ "], "▃ ▅ ▂ tom");
+        assert_eq!(detect("tom", &screen), Some(AgentState::Idle));
+    }
+
+    #[test]
+    fn tom_is_a_supported_agent() {
+        assert!(supports("tom"));
     }
 
     #[test]

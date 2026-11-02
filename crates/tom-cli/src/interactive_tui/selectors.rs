@@ -77,6 +77,9 @@ pub(super) fn open_selector_with_view<V: Component + 'static>(
 ) {
     // Dispatch ui_prompt_start event
     dispatch_ui_prompt_event(state);
+    // A modal is now waiting on the user: tell the host terminal, so its
+    // sidebar shows `blocked` rather than guessing from the screen.
+    state.report_modal(true);
 
     // Unfocus the editor so its cursor marker doesn't render behind the list.
     editor.set_focused(false);
@@ -102,6 +105,7 @@ pub(super) fn close_selector(
 ) {
     // Dispatch ui_prompt_end event
     dispatch_ui_prompt_event_end(state);
+    state.report_modal(false);
 
     editor_container.clear();
     editor_container.add_child(editor.clone());

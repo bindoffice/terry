@@ -300,6 +300,21 @@ color scheme and light/dark switches — to
 it. `tom` treats that as a fallback: an explicit `--theme` or a saved `theme`
 setting still wins, so a hand-tuned theme is never overridden.
 
+### Agent state
+
+Terry's sidebar marks each coding agent as working, waiting for input, or idle.
+For most agents that is inferred from the bottom of the terminal screen; `tom`
+reports it exactly instead, because it *is* the agent: it POSTs to the same
+local IPC endpoint (`/api/report_agent_state`) the installed integrations for
+other agents use, which Terry already wires into every terminal it spawns. A
+running turn reports `working`, an open picker or `ask_user` dialog reports
+`blocked`, and closing the turn reports `idle`. The reported session id also
+lets a reopened tab resume with `tom -r <id>`.
+
+Reporting is fire-and-forget and disabled when the `TERRY_*` variables are
+absent, so `tom` behaves identically outside Terry. The screen-based rules
+remain as a fallback, and cover the case where reporting is unavailable.
+
 ### Conversation history
 
 Sessions are stored as JSONL files written by `tom-harness`, under the directory

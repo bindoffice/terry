@@ -258,6 +258,18 @@ tom --model openai-compatible/gpt-4.1
 `TERRY_AGENT_THEME` 指向它。`tom` 只把它当作兜底：显式 `--theme` 或已保存的 `theme`
 设置优先，因此手工调好的主题不会被覆盖。
 
+### 助手状态
+
+Terry 侧边栏会把每个 coding agent 标记为「工作中 / 等待输入 / 空闲」。多数 agent 是由
+终端底部屏幕内容推断的；`tom` 则直接上报精确状态 —— 因为它本身就是那个 agent：它向
+`/api/report_agent_state` 这个本地 IPC 接口 POST，而 Terry 已经把它注入到每个它启动的
+终端里（其它 agent 的集成脚本用的也是同一接口）。运行中上报 `working`，打开选择器或
+`ask_user` 对话框时上报 `blocked`，回合结束上报 `idle`。上报的会话 id 还让重新打开的
+标签页可以用 `tom -r <id>` 接着上次继续。
+
+上报是即发即忘的，且在没有 `TERRY_*` 变量时自动关闭，因此在 Terry 之外 `tom` 行为完全一致。
+基于屏幕的识别规则仍然保留作为兜底，覆盖上报不可用的情况。
+
 ### 对话历史
 
 会话以 `tom-harness` 写入的 JSONL 文件保存，位置就是 tom 自己使用的目录

@@ -1047,6 +1047,9 @@ pub async fn interactive_tui(
     // `ReloadContext`) so in-flight prompts survive a `/reload`.
     let ask_user_bridge = AskUserBridge::new(reload_context.ui_dialog.clone());
     ask_user_bridge.attach();
+    // Tell the host terminal which session this is, so a restart can resume it
+    // (`tom -r <id>`) instead of starting over.
+    crate::host_state::report_session(&harness.session().storage().metadata().id);
     tui.set_main_screen_mode(matches!(args.tui_mode, crate::args::TuiMode::Regular));
 
     let chat_container = Arc::new(Container::new());
