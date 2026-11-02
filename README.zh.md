@@ -35,7 +35,7 @@
 - **会话恢复** — 重启后恢复分组、分屏布局、工作目录、标题、Profile 配色、每终端字号缩放，以及 Profile / SSH / tmux 启动方式
 - **持久会话（可选）** — 开启 `terminal.persistent_sessions` 后，终端由后台 daemon 持有：退出 Terry 或关闭窗口后进程继续运行，重新打开时自动重连并回放 scrollback。关闭单个标签页会分离（首次会提示），可用「重新打开已关闭的终端」恢复，或运行 `terry daemon kill` 结束。目前仅支持 Unix
 - **Hints** — `Ctrl+Shift+E` 列出可见的 URL、路径、git hash、UUID、IP 与自定义正则匹配；可键盘选择打开、复制、粘贴或选中。自定义规则写在 `terminal.hints`，例如 `{ "regex": "#\\d+", "action": "copy" }`
-- **内置编码助手** — [tom](https://github.com/bigfish1913/tom) 已随 Terry 一起发布：在任意终端里输入 `tom` 即可获得完整的终端编码助手，可读写文件、执行 Shell 命令。它继承终端配色、保留 JSONL 会话，无需单独安装。见[编码助手](#编码助手)。
+- **内置编码助手** — [tom](https://github.com/solos/tom) 已随 Terry 一起发布：在任意终端里输入 `tom` 即可获得完整的终端编码助手，可读写文件、执行 Shell 命令。它继承终端配色、保留 JSONL 会话，无需单独安装。见[编码助手](#编码助手)。
 - **AI Agent** — 侧边栏与大模型对话，通过可配置的 Profile 调用命令与工具；侧边栏还会标记运行中的 coding agent 是「工作中 / 等待输入 / 空闲」（基于终端底部屏幕内容识别，支持 Claude、Codex、Gemini、OpenCode、Cursor、Qwen、Copilot、Grok、Kimi、Amp、Hermes、Qoder、Antigravity 等）
 - **MCP** — 接入 Model Context Protocol 服务器，扩展 Agent 能力
 - **文件面板** — 在终端旁浏览项目目录树
@@ -148,6 +148,31 @@ Kitten 是放在 `$TERRY_KITTEN_PATH`、Terry 配置目录下 `kittens/` 或数�
 这个端点是**明文 HTTP + Bearer 令牌**，等价于远程命令执行，请只通过私有网络访问：
 
 - **Tailscale / WireGuard**（推荐）：手机加入同一个 tailnet，然后直接访问 `http://<这台机器的 tailnet IP>:47823`。设置页会列出探测到的地址。
+
+#### 手机控制台（关掉桌面 GUI 也能用）
+
+上面的监听器跑在 Terry 的 GUI 进程里，所以关掉 Terry 就没了。如果需要**桌面关掉之后手机仍然能用**，改用终端 daemon 的 HTTP 端点，它自带走一个手机网页客户端：
+
+```sh
+# 令牌默认与桌面「远程控制」共用，所以设备只需配对一次
+terry daemon serve --http 0.0.0.0:47823
+
+# 手机浏览器打开 http://<这台机器的 tailnet IP>:47823/ 即可。
+# 不需要另装 App 或另起服务器。
+```
+
+页面提供三屏：agent 列表（`working` / `blocked` / `idle` 状态点、cwd、最后一行输出）、会话详情（屏幕文本 + 快捷键条 `Esc` `Tab` `^C` 方向键等 + 输入框）、以及按 agent id 新建任务。加到主屏后可以全屏运行。
+
+相关端点：`/api/list_agent_states`、`/api/list_sessions`、`/api/read_screen`、`/api/screen`、`/api/send_text`、`/api/send_keys`、`/api/new_tab`、`/api/list_agents`、`/api/close_session`、`/api/detach_session`、`/api/events`（SSE）。除 `/api/health` 与网页静态资源外都需要 `Authorization: Bearer <令牌>`。
+
+撤销访问：
+
+```sh
+terry daemon rotate-token          # 换掉共用令牌，已配对设备立即失效
+terry daemon rotate-token --token-file <路径>   # 换掉某个 daemon 专用的令牌
+```
+
+令牌是**每次请求时从文件重新读取**的，所以在 daemon 运行中轮换会立即生效，不需要重启。
 - **只走本机 + `tailscale serve`**：把 `bind` 保持为 `127.0.0.1`，再运行 `tailscale serve --bg http://127.0.0.1:47823`，由 Tailscale 提供 TLS 和 `*.ts.net` 域名。
 - 不要把端口直接映射到公网。
 
@@ -233,7 +258,7 @@ script/package-linux.sh
 
 ## 编码助手
 
-Terry 内置 [tom](https://github.com/bigfish1913/tom) 作为编码助手。它不是一个侧栏面板 ——
+Terry 内置 [tom](https://github.com/solos/tom) 作为编码助手。它不是一个侧栏面板 ——
 它是一个完整的终端程序，在 Terry 打开的每个终端里都能直接用 `tom` 启动：
 
 ```sh

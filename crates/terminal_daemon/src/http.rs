@@ -12,10 +12,14 @@
 //!
 //! # Security
 //!
-//! Every route requires the bearer token except `/api/health`. The endpoint can
-//! spawn arbitrary programs, so it is exactly as sensitive as a shell: it is
-//! off unless `--http` is passed, and it should only be reached over a private
-//! network (Tailscale, WireGuard or the LAN), never the public internet.
+//! Every `/api` route requires the bearer token except `/api/health`. The
+//! embedded client's static assets do not, since they are what a device loads
+//! before it has a token and they expose no session data.
+//!
+//! The endpoint can spawn arbitrary programs, so it is exactly as sensitive as
+//! a shell: it is off unless `--http` is passed, and it should only be reached
+//! over a private network (Tailscale, WireGuard or the LAN), never the public
+//! internet.
 
 use std::convert::Infallible;
 use std::path::PathBuf;

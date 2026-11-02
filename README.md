@@ -35,7 +35,7 @@ Group shells, browse files, and keep an AI agent beside you — built for people
 - **Session restore** — groups, split layouts, working directories, titles, per-profile color schemes, per-terminal font zoom, and profile/SSH/tmux launches are restored on restart
 - **Persistent sessions (opt-in)** — with `terminal.persistent_sessions` enabled, terminals are owned by a background daemon: they keep running after you quit Terry or close the window, and reattach with their scrollback when you come back. Closing a single tab detaches it (you are told once); reopen it with "Reopen Closed Terminal" or end it with `terry daemon kill`. Unix only for now
 - **Hints** — `Ctrl+Shift+E` lists visible URLs, paths, git hashes, UUIDs, IPs, and custom regex matches; choose one with the keyboard to open, copy, paste, or select. Add custom rules under `terminal.hints`, for example `{ "regex": "#\\d+", "action": "copy" }`
-- **Built-in coding agent** — [tom](https://github.com/bigfish1913/tom) ships inside Terry: type `tom` in any terminal to get a full terminal coding agent that reads, edits, and writes files and runs shell commands. It inherits the terminal's colors, keeps durable JSONL sessions, and needs no separate install. See [Coding agent](#coding-agent).
+- **Built-in coding agent** — [tom](https://github.com/solos/tom) ships inside Terry: type `tom` in any terminal to get a full terminal coding agent that reads, edits, and writes files and runs shell commands. It inherits the terminal's colors, keeps durable JSONL sessions, and needs no separate install. See [Coding agent](#coding-agent).
 - **AI Agent** — Chat with LLMs in a side panel; run commands and tools with configurable profiles. The side panel also marks running coding agents as working, waiting for input, or idle, detected from the bottom of the terminal screen (Claude, Codex, Gemini, OpenCode, Cursor, Qwen, Copilot, Grok, Kimi, Amp, Hermes, Qoder, Antigravity, and more)
 - **MCP** — Connect Model Context Protocol servers to extend agent capabilities
 - **Files panel** — Browse the project tree alongside your terminals
@@ -178,6 +178,43 @@ command execution, so only expose it on a private network:
 - **Loopback plus `tailscale serve`**: keep `bind` at `127.0.0.1` and run
   `tailscale serve --bg http://127.0.0.1:47823`, letting Tailscale terminate TLS
   on a `*.ts.net` name.
+
+#### Mobile console (works with the desktop app closed)
+
+The listener above lives in Terry's GUI process, so quitting Terry stops it. If
+the phone has to keep working **after the desktop app is closed**, use the
+terminal daemon's HTTP endpoint instead. It serves a phone client that needs no
+install:
+
+```sh
+# The token defaults to the same one the desktop "remote control" uses, so a
+# device only pairs once.
+terry daemon serve --http 0.0.0.0:47823
+
+# Then open http://<this machine's tailnet IP>:47823/ on the phone.
+# No separate server or app install.
+```
+
+The page has three screens: the agent list (`working` / `blocked` / `idle` state
+dot, cwd, last output line), a session view (screen text, a key bar with `Esc`
+`Tab` `^C` and the arrows, plus a text input), and "start a task" by agent id.
+Adding it to the home screen runs it full screen.
+
+Endpoints: `/api/list_agent_states`, `/api/list_sessions`, `/api/read_screen`,
+`/api/screen`, `/api/send_text`, `/api/send_keys`, `/api/new_tab`,
+`/api/list_agents`, `/api/close_session`, `/api/detach_session`, `/api/events`
+(SSE). All but `/api/health` and the static page require
+`Authorization: Bearer <token>`.
+
+Revoking access:
+
+```sh
+terry daemon rotate-token                        # rotate the shared token
+terry daemon rotate-token --token-file <path>    # rotate a daemon-only token
+```
+
+The token is re-read from disk on every request, so rotating takes effect
+immediately on a running daemon — no restart needed.
 - Never forward the port to the public internet.
 
 Smoke test (replace `<address>` and `<token>` with the values from settings):
@@ -270,7 +307,7 @@ Artifacts are written under `target/release/`.
 
 ## Coding agent
 
-Terry ships [tom](https://github.com/bigfish1913/tom) as its built-in coding
+Terry ships [tom](https://github.com/solos/tom) as its built-in coding
 agent. It is not a panel — it is a full terminal program, available as `tom`
 inside every terminal Terry opens:
 
