@@ -253,7 +253,7 @@ fn run_agent_integration_cli(args: &[String]) -> i32 {
 fn run_daemon_cli(args: &[String]) -> i32 {
     let Some(command) = args.first().map(String::as_str) else {
         eprintln!(
-            "用法: terry daemon list | kill SESSION | prune [--dry-run] [--min-idle-secs N] | serve [--socket PATH] [--http ADDR] [--token-file PATH]"
+            "用法: terry daemon list | kill SESSION | prune [--dry-run] [--min-idle-secs N] | rotate-token | serve [--socket PATH] [--http ADDR] [--token-file PATH]"
         );
         return 2;
     };
@@ -261,7 +261,7 @@ fn run_daemon_cli(args: &[String]) -> i32 {
     match command {
         "help" | "--help" | "-h" => {
             println!(
-                "用法: terry daemon list | kill SESSION | prune [--dry-run] [--min-idle-secs N] | serve [--socket PATH] [--http ADDR] [--token-file PATH]"
+                "用法: terry daemon list | kill SESSION | prune [--dry-run] [--min-idle-secs N] | rotate-token | serve [--socket PATH] [--http ADDR] [--token-file PATH]"
             );
             0
         }
@@ -314,6 +314,7 @@ fn run_daemon_cli(args: &[String]) -> i32 {
             }
         }
         "serve" => run_daemon_serve(&args[1..]),
+        "rotate-token" => run_daemon_rotate_token(&args[1..]),
         "prune" => {
             let dry_run = args.iter().any(|arg| arg == "--dry-run");
             let min_idle_secs = args
@@ -394,28 +395,140 @@ fn run_coding_agent(args: &[String]) -> i32 {
     runtime.block_on(tom_cli::app::run_with_args(args.to_vec()))
 }
 
+/// Replaces the shared bearer token, unpairing every device at once.
+///
+/// This is the recovery action when a phone is lost or a token leaked: it is the
+/// only way to revoke access without stopping the daemon. A running listener
+/// keeps the token it was started with, so the caller is told to restart it —
+/// silently leaving the old token valid would defeat the point.
+fn run_daemon_rotate_token(args: &[String]) -> i32 {
+    let token_file = args
+        .iter()
+        .position(|arg| arg == "--token-file")
+        .and_then(|index| args.get(index + 1))
+        .map(PathBuf::from)
+        .or_else(|| {
+            args.iter()
+                .find_map(|arg| arg.strip_prefix("--token-file=").map(PathBuf::from))
+        });
+
+    match token_file {
+        // A custom token file belongs to one daemon started with `--token-file`;
+        // rotate that file rather than the shared desktop token.
+        Some(path) => {
+            let token = uuid::Uuid::new_v4().to_string();
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            crate::remote_control::write_token_file(&path, &token);
+            println!("{token}");
+            println!();
+            println!(
+                "已写入 {}。重启 daemon（terry daemon serve --token-file {}）后生效。",
+                path.display(),
+                path.display()
+            );
+            0
+        }
+        None => {
+            let token = crate::remote_control::write_new_token();
+            println!("{token}");
+            println!();
+            println!("已让所有已配对设备失效。");
+            println!("桌面端的「远程控制」会自动换用新令牌；");
+            println!("daemon 的 HTTP 端点需要重启 `terry daemon serve` 才会使用它。");
+            0
+        }
+    }
+}
+
 fn run_daemon_serve(args: &[String]) -> i32 {
     let mut socket = terminal_daemon::socket_path();
+    let mut http: Option<String> = None;
+    let mut token_file: Option<PathBuf> = None;
+
     let mut index = 0;
     while index < args.len() {
-        if args[index] == "--socket" {
-            if let Some(value) = args.get(index + 1) {
-                socket = PathBuf::from(value);
+        let arg = &args[index];
+        let mut take_value = |name: &str| -> Option<String> {
+            if arg == name {
+                let value = args.get(index + 1).cloned();
                 index += 1;
+                value
+            } else {
+                arg.strip_prefix(&format!("{name}=")).map(str::to_string)
             }
-        } else if let Some(value) = args[index].strip_prefix("--socket=") {
+        };
+
+        if let Some(value) = take_value("--socket") {
             socket = PathBuf::from(value);
+        } else if let Some(value) = take_value("--http") {
+            http = Some(value);
+        } else if let Some(value) = take_value("--token-file") {
+            token_file = Some(PathBuf::from(value));
+        } else if arg == "--help" || arg == "-h" {
+            println!(
+                "用法: terry daemon serve [--socket PATH] [--http ADDR] [--token-file PATH]\n\n\
+                 --http 会额外启动一个 HTTP 端点给手机等外部客户端使用。\n\
+                 这个端点等同于远程执行：只在私有网络（Tailscale / WireGuard / 局域网）上开。\n\
+                 令牌默认与桌面端「远程控制」共用同一个文件。"
+            );
+            return 0;
         }
         index += 1;
     }
 
-    match terminal_daemon::serve(&socket) {
+    let options = match http {
+        Some(bind) => {
+            // Pass the path, not the value: the endpoint re-reads it per request,
+            // so `terry daemon rotate-token` revokes a leaked token immediately
+            // instead of at the next restart.
+            let path = match token_file {
+                Some(path) => {
+                    read_or_create_token_file(&path);
+                    path
+                }
+                // Share the desktop token so a device only pairs once.
+                None => {
+                    let path = crate::remote_control::token_path();
+                    crate::remote_control::load_or_create_token();
+                    path
+                }
+            };
+            terminal_daemon::ServeOptions::with_http(bind, path)
+        }
+        None => {
+            if token_file.is_some() {
+                eprintln!("terry daemon: --token-file 只在配合 --http 时有意义");
+                return 2;
+            }
+            terminal_daemon::ServeOptions::default()
+        }
+    };
+
+    match terminal_daemon::serve_with_options(&socket, options) {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("terry daemon: {error}");
             1
         }
     }
+}
+
+/// Reads a bearer token from `path`, creating one on first use.
+fn read_or_create_token_file(path: &Path) -> String {
+    if let Ok(token) = std::fs::read_to_string(path) {
+        let token = token.trim().to_string();
+        if !token.is_empty() {
+            return token;
+        }
+    }
+    let token = uuid::Uuid::new_v4().to_string();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    crate::remote_control::write_token_file(path, &token);
+    token
 }
 
 fn run_session_cli(args: &[String]) -> i32 {
