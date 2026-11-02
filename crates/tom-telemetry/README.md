@@ -48,5 +48,5 @@ assertions in tests.
 
 ## License
 
-MIT. See [LICENSE](https://github.com/bigfish1913/tom/blob/main/LICENSE)
-and [NOTICE](https://github.com/bigfish1913/tom/blob/main/NOTICE).
+MIT. See [LICENSE](https://github.com/solos/tom/blob/main/LICENSE)
+and [NOTICE](https://github.com/solos/tom/blob/main/NOTICE).

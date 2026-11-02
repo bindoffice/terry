@@ -73,17 +73,17 @@ cargo run -p tui
 
 Interactive demo with a scrollable transcript, an editor and keyboard
 navigation — the source is at
-[`examples/tui`](https://github.com/bigfish1913/tom/tree/main/examples/tui).
+[`examples/tui`](https://github.com/solos/tom/tree/main/examples/tui).
 
 ## Documentation
 
 - Crate docs: <https://docs.rs/tom-tui>
-- [TUI gap analysis](https://github.com/bigfish1913/tom/blob/main/docs/README.md)
+- [TUI gap analysis](https://github.com/solos/tom/blob/main/docs/README.md)
 
 ## License
 
-MIT. See [LICENSE](https://github.com/bigfish1913/tom/blob/main/LICENSE)
-and [NOTICE](https://github.com/bigfish1913/tom/blob/main/NOTICE).
+MIT. See [LICENSE](https://github.com/solos/tom/blob/main/LICENSE)
+and [NOTICE](https://github.com/solos/tom/blob/main/NOTICE).
 
 `TuiAltScreen::set_scroll_to_end_indicator` accepts an optional label callback.
 It displays the label on the last visible row of a follow-end primary

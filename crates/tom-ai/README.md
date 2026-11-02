@@ -120,7 +120,7 @@ let model = provider.default_model().clone();
 
 A tool call followed by a text turn is enough to exercise the whole
 tool → result → follow-up cycle offline. See
-[`examples/tools`](https://github.com/bigfish1913/tom/tree/main/examples/tools).
+[`examples/tools`](https://github.com/solos/tom/tree/main/examples/tools).
 
 ## Related crates
 
@@ -133,9 +133,9 @@ tool → result → follow-up cycle offline. See
 ## Documentation
 
 - Crate docs: <https://docs.rs/tom-ai>
-- Architecture: [docs/architecture/overview.md](https://github.com/bigfish1913/tom/blob/main/docs/architecture/overview.md)
+- Architecture: [docs/architecture/overview.md](https://github.com/solos/tom/blob/main/docs/architecture/overview.md)
 
 ## License
 
-MIT. See [LICENSE](https://github.com/bigfish1913/tom/blob/main/LICENSE)
-and [NOTICE](https://github.com/bigfish1913/tom/blob/main/NOTICE).
+MIT. See [LICENSE](https://github.com/solos/tom/blob/main/LICENSE)
+and [NOTICE](https://github.com/solos/tom/blob/main/NOTICE).

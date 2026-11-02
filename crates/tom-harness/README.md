@@ -134,7 +134,7 @@ policy and the current tool declaration say the call is safe) or records the
 outcome as unknown. Retrying is bounded by a resume budget.
 
 The end-to-end expectations are pinned in
-[`crates/tom-harness/tests/harness_run_e2e.rs`](https://github.com/bigfish1913/tom/blob/main/crates/tom-harness/tests/harness_run_e2e.rs),
+[`crates/tom-harness/tests/harness_run_e2e.rs`](https://github.com/solos/tom/blob/main/crates/tom-harness/tests/harness_run_e2e.rs),
 including one test per crash point.
 
 ## Related crates
@@ -148,9 +148,9 @@ including one test per crash point.
 ## Documentation
 
 - Crate docs: <https://docs.rs/tom-harness>
-- Design notes: [docs/architecture/overview.md](https://github.com/bigfish1913/tom/blob/main/docs/architecture/overview.md)
+- Design notes: [docs/architecture/overview.md](https://github.com/solos/tom/blob/main/docs/architecture/overview.md)
 
 ## License
 
-MIT. See [LICENSE](https://github.com/bigfish1913/tom/blob/main/LICENSE)
-and [NOTICE](https://github.com/bigfish1913/tom/blob/main/NOTICE).
+MIT. See [LICENSE](https://github.com/solos/tom/blob/main/LICENSE)
+and [NOTICE](https://github.com/solos/tom/blob/main/NOTICE).

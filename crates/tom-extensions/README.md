@@ -79,14 +79,14 @@ tom dev                                   # build + watch + live reload
 ## Docs
 
 - Crate docs: <https://docs.rs/tom-extensions>
-- [Extension authoring guide](https://github.com/bigfish1913/tom/blob/main/docs/extensions/authoring.md)
+- [Extension authoring guide](https://github.com/solos/tom/blob/main/docs/extensions/authoring.md)
 - [Plugin ABI contract](https://docs.rs/tom-plugin-sdk)
 - [Ready-to-install extensions](https://github.com/tom/tom-package)
 
 ## License
 
-MIT. See [LICENSE](https://github.com/bigfish1913/tom/blob/main/LICENSE)
-and [NOTICE](https://github.com/bigfish1913/tom/blob/main/NOTICE).
+MIT. See [LICENSE](https://github.com/solos/tom/blob/main/LICENSE)
+and [NOTICE](https://github.com/solos/tom/blob/main/NOTICE).
 
 Plugins may register the optional two-phase lifecycle hooks. Reload calls
 `begin_shutdown` outside session locks to cancel work and reject new requests.

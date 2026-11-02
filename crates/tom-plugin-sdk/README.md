@@ -317,11 +317,11 @@ Rebuild extensions when the SDK contract they require changes.
 
 ## Examples and docs
 
-- [`examples/plugin-stub`](https://github.com/bigfish1913/tom/tree/main/examples/plugin-stub) —
+- [`examples/plugin-stub`](https://github.com/solos/tom/tree/main/examples/plugin-stub) —
   a complete plugin registering an `echo` tool with the full four-function
   lifecycle (`execute` → `poll` → `cancel` → `destroy`), an event handler, and a
   resource-discovery handler.
-- [Extension authoring guide](https://github.com/bigfish1913/tom/blob/main/docs/extensions/authoring.md) —
+- [Extension authoring guide](https://github.com/solos/tom/blob/main/docs/extensions/authoring.md) —
   templates, safety rules, testing and release checklist.
 - Host-side loader: [`tom-extensions`](https://crates.io/crates/tom-extensions).
 - Ready-to-install extensions:
@@ -329,8 +329,8 @@ Rebuild extensions when the SDK contract they require changes.
 
 ## License
 
-MIT. See [LICENSE](https://github.com/bigfish1913/tom/blob/main/LICENSE)
-and [NOTICE](https://github.com/bigfish1913/tom/blob/main/NOTICE).
+MIT. See [LICENSE](https://github.com/solos/tom/blob/main/LICENSE)
+and [NOTICE](https://github.com/solos/tom/blob/main/NOTICE).
 
 ## Exclusive stdio servers
 

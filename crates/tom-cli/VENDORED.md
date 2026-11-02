@@ -1,6 +1,6 @@
 # Vendored crate
 
-This crate is vendored from the [tom](https://github.com/bigfish1913/tom)
+This crate is vendored from the [tom](https://github.com/solos/tom)
 workspace so that Terry can embed the tom agent runtime without publishing the
 crates or tracking an external version.
 

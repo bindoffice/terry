@@ -2,11 +2,11 @@
 
 [![crates.io](https://img.shields.io/crates/v/tom-cli.svg)](https://crates.io/crates/tom-cli)
 [![docs.rs](https://docs.rs/tom-cli/badge.svg)](https://docs.rs/tom-cli)
-[![CI](https://github.com/bigfish1913/tom/actions/workflows/ci.yml/badge.svg)](https://github.com/bigfish1913/tom/actions)
+[![CI](https://github.com/solos/tom/actions/workflows/ci.yml/badge.svg)](https://github.com/solos/tom/actions)
 
 The terminal coding-agent CLI — the `tom` binary — built on the `tom-*` library
 crates. It is the ready-to-run surface of the
-[tom](https://github.com/bigfish1913/tom) project: an interactive TUI, a
+[tom](https://github.com/solos/tom) project: an interactive TUI, a
 one-shot `-p` mode, a JSON event mode, durable sessions, and Rust `cdylib`
 plugin loading.
 
@@ -105,7 +105,7 @@ tom --connect host:port --token T # zero-local-resource TUI client
 
 The client holds no local provider, tools, extensions or session files; all
 agent work happens on the server. See
-[docs/remote/user-guide.md](https://github.com/bigfish1913/tom/blob/main/docs/remote/user-guide.md).
+[docs/remote/user-guide.md](https://github.com/solos/tom/blob/main/docs/remote/user-guide.md).
 
 ## Default tools
 
@@ -126,7 +126,7 @@ tom-cli = "0.3"
 For building your own agent, depend on
 [`tom-agent`](https://crates.io/crates/tom-agent) and
 [`tom-harness`](https://crates.io/crates/tom-harness) directly instead — see
-[docs/agent/project-structure.md](https://github.com/bigfish1913/tom/blob/main/docs/agent/project-structure.md).
+[docs/agent/project-structure.md](https://github.com/solos/tom/blob/main/docs/agent/project-structure.md).
 
 ## RPC message identity, images and client text files
 
@@ -177,14 +177,14 @@ Plugin ABI compatibility alone does not establish this query capability.
 ## Documentation
 
 - User guide: <https://tom.bigfisharc.cn/docs.html>
-- Architecture: [docs/architecture/overview.md](https://github.com/bigfish1913/tom/blob/main/docs/architecture/overview.md)
-- Extension authoring: [docs/extensions/authoring.md](https://github.com/bigfish1913/tom/blob/main/docs/extensions/authoring.md)
-- Changelog: [CHANGELOG.md](https://github.com/bigfish1913/tom/blob/main/CHANGELOG.md)
+- Architecture: [docs/architecture/overview.md](https://github.com/solos/tom/blob/main/docs/architecture/overview.md)
+- Extension authoring: [docs/extensions/authoring.md](https://github.com/solos/tom/blob/main/docs/extensions/authoring.md)
+- Changelog: [CHANGELOG.md](https://github.com/solos/tom/blob/main/CHANGELOG.md)
 
 ## License
 
-MIT. See [LICENSE](https://github.com/bigfish1913/tom/blob/main/LICENSE)
-and [NOTICE](https://github.com/bigfish1913/tom/blob/main/NOTICE).
+MIT. See [LICENSE](https://github.com/solos/tom/blob/main/LICENSE)
+and [NOTICE](https://github.com/solos/tom/blob/main/NOTICE).
 
 This crate is part of a Rust port of the MIT-licensed TypeScript `pi` SDK
 (© Mario Zechner).
