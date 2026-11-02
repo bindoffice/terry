@@ -1,6 +1,5 @@
 #![recursion_limit = "512"]
 
-mod agent_detect;
 mod agent_integrations;
 mod agent_switcher;
 mod app_icon;

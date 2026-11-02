@@ -1177,7 +1177,12 @@ pub(super) fn make_content(term: &mut Term<ZedListener>, last_content: &Content)
 ///
 /// Unlike [`make_content`], this reads the live grid and keeps every cell,
 /// blank ones included, so a client can rebuild an exact grid.
-pub(super) fn make_screen_snapshot(term: &Term<ZedListener>) -> ScreenSnapshot {
+///
+/// This is a pure function of the emulator state: it never touches the window,
+/// the layout or the theme, so it can be used from outside the GUI. Colors are
+/// left as unresolved ANSI values; resolving them against a theme is the
+/// caller's job.
+pub fn make_screen_snapshot<L: EventListener>(term: &Term<L>) -> ScreenSnapshot {
     let content = term.renderable_content();
     let rows = term.screen_lines();
     let columns = term.grid().columns();
@@ -1313,7 +1318,12 @@ pub(super) fn full_content_range(term: &Term<ZedListener>) -> Range {
     Range::from_alacritty(start..=end)
 }
 
-pub(super) fn last_non_empty_lines(term: &Term<ZedListener>, line_count: usize) -> Vec<String> {
+/// Returns the last `line_count` non-empty lines of the buffer, oldest first.
+///
+/// Rows that continue a soft-wrapped logical line are joined, and trailing
+/// whitespace is stripped. Used by the agent state detector and by callers that
+/// only need plain text. Pure function of the emulator state.
+pub fn last_non_empty_lines<L: EventListener>(term: &Term<L>, line_count: usize) -> Vec<String> {
     let grid = term.grid();
     let mut lines = Vec::new();
 

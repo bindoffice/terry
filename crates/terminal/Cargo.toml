@@ -58,6 +58,7 @@ paths.workspace = true
 windows.workspace = true
 
 [dev-dependencies]
+agent_detect.workspace = true
 tempfile.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 rand.workspace = true

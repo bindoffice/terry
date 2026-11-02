@@ -73,18 +73,24 @@ pub use crate::alacritty::{OutputSink, ResizeSink};
 pub use crate::hints::{HintKind, HintMatch};
 pub use crate::terminal_settings::HintAction;
 
+// Pure emulator -> snapshot helpers, re-exported so a caller that is not the
+// GUI (the IPC endpoints, the terminal daemon, tests) can repaint a terminal
+// without going through a window. Both only need a `Term` and never touch the
+// window, the layout or the theme.
+pub use crate::alacritty::{last_non_empty_lines, make_screen_snapshot};
+
 use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, OutputTap, PtySender, RegexSearches,
     ResizeTap, append_text_to_term, apply_config, clear_saved_screen, columns, content_text,
     display_offset, display_only_term_config, find_all_visible_links, find_from_terminal_point,
     full_content_range, last_command_input_text, last_command_output_range,
-    last_command_output_text, last_non_empty_lines, last_prompt_mark as last_term_prompt_mark,
-    make_content, make_screen_snapshot, new_term, open_pty, prompt_marks as term_prompt_marks,
-    pty_options, pty_term_config, resize, screen_lines, scroll_display, scroll_to_point,
-    scroll_to_point_aligned, search_matches, selection_text, set_default_cursor_style,
-    set_selection as set_term_selection, set_text_options, shrink_to_used, smart_selection_range,
-    spawn_event_loop, synchronized_updates, toggle_vi_mode as toggle_term_vi_mode, total_lines,
+    last_command_output_text, last_prompt_mark as last_term_prompt_mark, make_content, new_term,
+    open_pty, prompt_marks as term_prompt_marks, pty_options, pty_term_config, resize,
+    screen_lines, scroll_display, scroll_to_point, scroll_to_point_aligned, search_matches,
+    selection_text, set_default_cursor_style, set_selection as set_term_selection,
+    set_text_options, shrink_to_used, smart_selection_range, spawn_event_loop,
+    synchronized_updates, toggle_vi_mode as toggle_term_vi_mode, total_lines,
     update_selection as update_term_selection, update_selection_to_vi_cursor,
     update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
 };

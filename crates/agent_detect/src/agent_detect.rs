@@ -1914,7 +1914,10 @@ mod tests {
     #[test]
     fn tom_model_picker_is_blocked() {
         // The picker replaces the editor, so no working indicator is present.
-        let screen = screen(&["Select model", "  gpt-4.1", "  claude-sonnet"], "▃ ▅ ▂ tom");
+        let screen = screen(
+            &["Select model", "  gpt-4.1", "  claude-sonnet"],
+            "▃ ▅ ▂ tom",
+        );
         assert_eq!(detect("tom", &screen), Some(AgentState::Blocked));
     }
 
@@ -1937,7 +1940,10 @@ mod tests {
 
     #[test]
     fn tom_idle_prompt_is_idle() {
-        let screen = screen(&["some earlier output", "╭────────────╮", "❯ "], "▃ ▅ ▂ tom");
+        let screen = screen(
+            &["some earlier output", "╭────────────╮", "❯ "],
+            "▃ ▅ ▂ tom",
+        );
         assert_eq!(detect("tom", &screen), Some(AgentState::Idle));
     }
 

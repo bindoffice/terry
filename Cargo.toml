@@ -24,6 +24,7 @@ minimum_system_version = "11.0"
 
 [dependencies]
 anyhow.workspace = true
+agent_detect.workspace = true
 assets.workspace = true
 client.workspace = true
 collections.workspace = true
@@ -109,6 +110,7 @@ members = [
     "crates/acp_thread",
     "crates/action_log",
     "crates/agent",
+    "crates/agent_detect",
     "crates/agent_servers",
     "crates/agent_settings",
     "crates/agent_skills",
@@ -324,6 +326,7 @@ acp_thread = { path = "crates/acp_thread" }
 action_log = { path = "crates/action_log" }
 activity_indicator = { path = "crates/activity_indicator" }
 agent = { path = "crates/agent" }
+agent_detect = { path = "crates/agent_detect" }
 agent_servers = { path = "crates/agent_servers" }
 agent_settings = { path = "crates/agent_settings" }
 agent_skills = { path = "crates/agent_skills" }

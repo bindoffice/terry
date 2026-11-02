@@ -23,8 +23,9 @@ use zed_actions::terminal_list_panel::{
     ToggleFocus,
 };
 
-use crate::agent_detect::{self, AgentState};
 use crate::persistent_sessions;
+
+use agent_detect::AgentState;
 
 use serde::{Deserialize, Serialize};
 use settings::Settings;
