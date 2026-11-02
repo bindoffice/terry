@@ -966,6 +966,26 @@ pub(crate) enum PersistedLaunch {
     },
 }
 
+impl PersistedLaunch {
+    /// Destination of an SSH connection this launch opens, if it opens one.
+    ///
+    /// Used to mark the terminal as remote before the remote shell has reported
+    /// anything: session-host-backed terminals expose no foreground `ssh` process
+    /// to inspect.
+    pub(crate) fn ssh_destination(&self) -> Option<String> {
+        let Self::Command { program, args, .. } = self else {
+            return None;
+        };
+        // `SshSession::from_argv` recognises the `ssh` command itself
+        // (including a full path or `.exe` suffix), so no extra check is needed.
+        let argv = std::iter::once(program.as_str())
+            .chain(args.iter().map(String::as_str))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        terminal::SshSession::from_argv(&argv).map(|session| session.destination)
+    }
+}
+
 /// Restore hints passed through the async spawn path. Indexed separately from
 /// the spawn arguments because async completion can reorder terminals.
 #[derive(Clone, Default)]
@@ -5048,6 +5068,10 @@ impl TerminalListPanel {
                 name: profile.name.clone(),
             })
         });
+        // A terminal launched straight into `ssh` (the host picker, or a
+        // restored session) knows it is remote even when its processes belong to
+        // a session host, which the panel cannot inspect.
+        let ssh_destination = launch.as_ref().and_then(PersistedLaunch::ssh_destination);
         let project = self.project.clone();
         let workspace = self.workspace.clone();
         // A profile describes the whole launch environment; don't inherit the
@@ -5227,6 +5251,13 @@ impl TerminalListPanel {
                 let Some(workspace) = this.workspace.upgrade() else {
                     return;
                 };
+                // Program launches are the only place the panel knows a terminal
+                // is remote before the remote shell says anything.
+                if let Some(destination) = ssh_destination.clone() {
+                    terminal.update(cx, |terminal, _cx| {
+                        terminal.set_ssh_destination(Some(destination));
+                    });
+                }
                 let weak_workspace = workspace.read(cx).weak_handle();
                 let workspace_id = workspace.read(cx).database_id();
                 let weak_project = workspace.read(cx).project().downgrade();
@@ -8762,11 +8793,15 @@ impl Panel for TerminalListPanel {
 
 /// Sidebar label: custom title, else cwd basename — never appends the shell
 /// name (`dir — zsh`).
+///
+/// For an SSH terminal the label follows the *remote* directory the remote shell
+/// integration reports over `OSC 7`, so the tab is named after the folder the
+/// user is actually working in instead of the local launch directory.
 fn sidebar_terminal_name(tv: &Entity<TerminalView>, cx: &App) -> SharedString {
     let view = tv.read(cx);
     let terminal = view.terminal().read(cx);
     let title = terminal.title(true);
-    let working_directory = terminal.working_directory();
+    let working_directory = terminal.display_working_directory();
     sidebar_label(view.custom_title(), working_directory.as_deref(), &title)
 }
 
@@ -10126,6 +10161,126 @@ mod tests {
         assert_eq!(
             panel.read_with(cx, |_, cx| sidebar_terminal_name(&view, cx)),
             SharedString::from("other")
+        );
+    }
+
+    /// An SSH terminal reports its directory from the *remote* host, so the
+    /// sidebar name has to follow that instead of the local launch directory.
+    #[gpui::test]
+    async fn sidebar_name_follows_the_remote_ssh_directory(cx: &mut TestAppContext) {
+        ensure_test_data_dir();
+
+        let params = cx.update(AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let project = Project::test(params.fs.clone(), [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+
+        let panel = window_handle
+            .update(cx, |mw, window, cx| {
+                let workspace = mw.workspace().clone();
+                let project = workspace.read(cx).project().clone();
+                let display_pane = workspace.read(cx).active_pane().clone();
+                let panel = cx.new(|cx| {
+                    TerminalListPanel::new(
+                        workspace.clone(),
+                        display_pane,
+                        project,
+                        None,
+                        window,
+                        cx,
+                    )
+                });
+                workspace.update(cx, |workspace, cx| {
+                    workspace.add_panel(panel.clone(), window, cx);
+                });
+                panel
+            })
+            .unwrap();
+
+        seed_group(&panel, &workspace, &project, &window_handle, cx);
+        let view = panel.read_with(cx, |panel, _| panel.groups[0].terminals[0].clone());
+        let terminal = view.read_with(cx, |view, cx| view.terminal().clone());
+
+        // The local shell reports a local directory first.
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]7;file:///work/local-project\x07", cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |_, cx| sidebar_terminal_name(&view, cx)),
+            SharedString::from("local-project")
+        );
+
+        // The remote shell integration reports from the remote host. This
+        // terminal was launched as `ssh web`, so it is known to be remote.
+        terminal.update(cx, |terminal, _cx| {
+            terminal.set_ssh_destination(Some("web".to_string()));
+        });
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]7;file://build-box/srv/www\x07", cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            panel.read_with(cx, |_, cx| sidebar_terminal_name(&view, cx)),
+            SharedString::from("www"),
+            "the sidebar should be named after the remote folder"
+        );
+        terminal.update(cx, |terminal, cx| {
+            assert_eq!(
+                terminal.ssh_session().map(|session| session.destination),
+                Some("build-box".to_string())
+            );
+            assert_eq!(
+                terminal.remote_working_directory(),
+                Some(PathBuf::from("/srv/www"))
+            );
+            assert_eq!(
+                terminal.display_working_directory(),
+                Some(PathBuf::from("/srv/www"))
+            );
+        });
+    }
+
+    #[test]
+    fn persisted_ssh_launches_report_their_destination() {
+        let launch = PersistedLaunch::Command {
+            program: "ssh".to_string(),
+            args: vec![
+                "-o".to_string(),
+                "ControlMaster=auto".to_string(),
+                "-t".to_string(),
+                "alice@web".to_string(),
+                "sh -c true".to_string(),
+            ],
+            title: Some("web".to_string()),
+        };
+        assert_eq!(launch.ssh_destination().as_deref(), Some("alice@web"));
+
+        // Non-SSH launches and profiles are not remote.
+        let tmux = PersistedLaunch::Command {
+            program: "tmux".to_string(),
+            args: vec![
+                "new".to_string(),
+                "-A".to_string(),
+                "-s".to_string(),
+                "work".to_string(),
+            ],
+            title: None,
+        };
+        assert_eq!(tmux.ssh_destination(), None);
+        assert_eq!(
+            PersistedLaunch::Profile {
+                name: "dev".to_string()
+            }
+            .ssh_destination(),
+            None
         );
     }
 }

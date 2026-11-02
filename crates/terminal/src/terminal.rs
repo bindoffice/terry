@@ -880,8 +880,16 @@ pub(crate) enum TerminalBackendEvent {
     Title(String),
     ResetTitle,
     Notification(Option<String>, Option<String>, Option<i64>),
-    ResizeWindow { columns: usize, rows: usize },
-    Cwd(PathBuf),
+    ResizeWindow {
+        columns: usize,
+        rows: usize,
+    },
+    /// Working directory reported via `OSC 7`, with the URI authority (the host
+    /// the shell ran on) when the shell provided one.
+    Cwd {
+        path: PathBuf,
+        host: Option<String>,
+    },
     ClipboardStore(String),
     ClipboardLoad(ClipboardFormatter),
     ColorRequest(usize, ColorFormatter),
@@ -908,7 +916,10 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::ResizeWindow { columns, rows } => {
                 write!(f, "ResizeWindow({columns}x{rows})")
             }
-            Self::Cwd(path) => write!(f, "Cwd({})", path.display()),
+            Self::Cwd { path, host } => match host {
+                Some(host) => write!(f, "Cwd({} on {host})", path.display()),
+                None => write!(f, "Cwd({})", path.display()),
+            },
             Self::ClipboardStore(data) => write!(f, "ClipboardStore({data})"),
             Self::ClipboardLoad(_) => f.write_str("ClipboardLoad"),
             Self::ColorRequest(index, _) => write!(f, "ColorRequest({index})"),
@@ -1187,6 +1198,10 @@ impl TerminalBuilder {
             vi_mode_enabled: false,
             is_remote_terminal: false,
             osc7_cwd: None,
+            osc7_host: None,
+            ssh_destination: None,
+            remote_osc7_seen: false,
+            local_osc7_after_remote: false,
             block_selection_pressed: false,
             last_exit_code: None,
             last_mouse_move_time: Instant::now(),
@@ -1523,6 +1538,10 @@ impl TerminalBuilder {
                 vi_mode_enabled: false,
                 is_remote_terminal,
                 osc7_cwd: None,
+                osc7_host: None,
+                ssh_destination: None,
+                remote_osc7_seen: false,
+                local_osc7_after_remote: false,
                 block_selection_pressed: false,
                 last_exit_code: None,
                 last_mouse_move_time: Instant::now(),
@@ -1720,6 +1739,19 @@ pub struct Terminal {
     /// Working directory reported by the shell via `OSC 7`. Used for remote
     /// terminals where the client cannot inspect the remote shell's process.
     osc7_cwd: Option<PathBuf>,
+    /// Host the shell that reported `osc7_cwd` ran on. A remote (SSH) connection
+    /// reports the remote host here, which is how callers tell a remote
+    /// directory from a local one.
+    osc7_host: Option<String>,
+    /// Destination of the SSH connection this terminal was launched with, for
+    /// terminals whose processes are not visible from here (session hosts).
+    ssh_destination: Option<String>,
+    /// Whether `OSC 7` has ever reported a directory from another host, i.e. the
+    /// remote shell is known to be running.
+    remote_osc7_seen: bool,
+    /// Whether a *local* directory was reported after the remote one, i.e. the
+    /// SSH connection has been closed and the shell is local again.
+    local_osc7_after_remote: bool,
     /// Exit code of the most recently finished shell-integration command
     /// (`OSC 133;D`), if the shell reported one.
     last_exit_code: Option<i64>,
@@ -1837,9 +1869,25 @@ impl Terminal {
             TerminalBackendEvent::ResizeWindow { columns, rows } => {
                 cx.emit(Event::ResizeWindow { columns, rows });
             }
-            TerminalBackendEvent::Cwd(path) => {
-                if self.osc7_cwd.as_ref() != Some(&path) {
+            TerminalBackendEvent::Cwd { path, host } => {
+                let host_changed = self.osc7_host != host;
+                let path_changed = self.osc7_cwd.as_ref() != Some(&path);
+                match host.as_deref() {
+                    // A report from another machine means the remote shell is
+                    // up; a report from this one means the SSH connection is
+                    // gone (or has not started yet).
+                    Some(host) if !is_local_hostname(host) => {
+                        self.remote_osc7_seen = true;
+                        self.local_osc7_after_remote = false;
+                    }
+                    _ if self.remote_osc7_seen => self.local_osc7_after_remote = true,
+                    _ => {}
+                }
+                self.osc7_host = host;
+                if path_changed {
                     self.osc7_cwd = Some(path);
+                }
+                if path_changed || host_changed {
                     cx.emit(Event::CwdChanged);
                 }
             }
@@ -3436,6 +3484,17 @@ impl Terminal {
         }
     }
 
+    /// The directory to *show* for this terminal: the remote shell's directory
+    /// while an SSH connection is active, otherwise the local one.
+    ///
+    /// Kept separate from [`Terminal::working_directory`], which stays local on
+    /// purpose: it feeds process spawning and session persistence, where a
+    /// remote path would point at a directory that does not exist here.
+    pub fn display_working_directory(&self) -> Option<PathBuf> {
+        self.remote_working_directory()
+            .or_else(|| self.working_directory())
+    }
+
     /// Seeds the working directory before the shell reports one via `OSC 7`,
     /// e.g. the directory a daemon-backed session was spawned in.
     ///
@@ -3514,6 +3573,88 @@ impl Terminal {
         }
     }
 
+    /// The SSH session the focused terminal is running, if any.
+    ///
+    /// The connection runs *inside* the local shell, so the local side still
+    /// sees a local shell. A local PTY reports the `ssh` foreground process; for
+    /// daemon-backed terminals, whose processes live outside this process, the
+    /// command the terminal was spawned with and the remote directory its shell
+    /// reports over `OSC 7` identify the connection instead.
+    pub fn ssh_session(&self) -> Option<SshSession> {
+        if self.has_exited() {
+            return None;
+        }
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => {
+                // The foreground process is authoritative here: it is `ssh`
+                // exactly while the connection is up, so a stale `OSC 7` report
+                // cannot keep the session alive after it closes.
+                let current = info.current.read();
+                let process = current.as_ref()?;
+                ssh_destination_from_argv(&process.argv)
+                    .map(|destination| SshSession { destination })
+            }
+            TerminalType::DisplayOnly => {
+                // No process to inspect. The destination recorded at spawn time
+                // keeps the marker until the shell reports that it is local
+                // again, and a remote `OSC 7` report both proves the connection
+                // is up and names the remote host.
+                if self.local_osc7_after_remote {
+                    return None;
+                }
+                self.remote_osc7_host()
+                    .or_else(|| self.ssh_destination.clone())
+                    .map(|destination| SshSession { destination })
+            }
+        }
+    }
+
+    /// Records the destination of an SSH connection this terminal was launched
+    /// with.
+    ///
+    /// Needed for daemon-backed terminals: their processes belong to the session
+    /// host, so the GUI cannot inspect the foreground process to notice `ssh`.
+    /// The value is dropped again once the remote session reports that it is
+    /// back at a local prompt.
+    pub fn set_ssh_destination(&mut self, destination: Option<String>) {
+        self.ssh_destination = destination
+            .map(|destination| destination.trim().to_string())
+            .filter(|destination| !destination.is_empty());
+        self.remote_osc7_seen = false;
+        self.local_osc7_after_remote = false;
+    }
+
+    /// The directory the *remote* shell reported over `OSC 7`.
+    ///
+    /// Only meaningful while [`Terminal::ssh_session`] is active: before the
+    /// connection is established (and after it returns to the local prompt)
+    /// `OSC 7` describes the local shell's directory instead. The report also
+    /// has to come from another host, otherwise an SSH login whose remote shell
+    /// happens to have the same name as this machine would be taken for a local
+    /// one.
+    pub fn remote_working_directory(&self) -> Option<PathBuf> {
+        self.ssh_session()?;
+        // A launch-time destination without a remote report yet has no remote
+        // directory to show.
+        self.remote_osc7_host()?;
+        if self.local_osc7_after_remote {
+            return None;
+        }
+        self.osc7_cwd
+            .clone()
+            .filter(|cwd| !cwd.as_os_str().is_empty())
+    }
+
+    /// Host of the last `OSC 7` report when it came from another machine.
+    ///
+    /// Shell integration reports `file://$HOSTNAME/...`. A host that is neither
+    /// this machine nor a loopback alias means the report came from a remote
+    /// shell (SSH) rather than the local one.
+    fn remote_osc7_host(&self) -> Option<String> {
+        let host = self.osc7_host.as_deref()?;
+        (!is_local_hostname(host)).then(|| host.to_string())
+    }
+
     /// Script path passed to a `node`/`bun`/`deno` foreground process, if any.
     ///
     /// npm-installed CLIs run as `node .../node_modules/<package>/dist/cli.js`,
@@ -3590,38 +3731,45 @@ impl Terminal {
                 .as_ref()
                 .map(|title_override| title_override.to_string())
                 .unwrap_or_else(|| match &self.terminal_type {
-                    TerminalType::Pty { info, .. } => info
-                        .current
-                        .read()
-                        .as_ref()
-                        .map(|fpi| {
-                            let process_file = fpi
-                                .cwd
-                                .file_name()
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .unwrap_or_default();
+                    // Computed before taking the process lock: the display
+                    // directory reads the same process info.
+                    TerminalType::Pty { info, .. } => {
+                        let display_cwd = self.display_working_directory();
+                        info.current
+                            .read()
+                            .as_ref()
+                            .map(|fpi| {
+                                // An SSH terminal shows the remote directory it
+                                // is in, not the local one the client sits in.
+                                let process_file = display_cwd
+                                    .clone()
+                                    .unwrap_or_else(|| fpi.cwd.clone())
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
 
-                            let argv = fpi.argv.as_slice();
-                            let process_name = format!(
-                                "{}{}",
-                                fpi.name,
-                                if !argv.is_empty() {
-                                    format!(" {}", (argv[1..]).join(" "))
+                                let argv = fpi.argv.as_slice();
+                                let process_name = format!(
+                                    "{}{}",
+                                    fpi.name,
+                                    if !argv.is_empty() {
+                                        format!(" {}", (argv[1..]).join(" "))
+                                    } else {
+                                        "".to_string()
+                                    }
+                                );
+                                let (process_file, process_name) = if truncate {
+                                    (
+                                        truncate_and_trailoff(&process_file, MAX_CHARS),
+                                        truncate_and_trailoff(&process_name, MAX_CHARS),
+                                    )
                                 } else {
-                                    "".to_string()
-                                }
-                            );
-                            let (process_file, process_name) = if truncate {
-                                (
-                                    truncate_and_trailoff(&process_file, MAX_CHARS),
-                                    truncate_and_trailoff(&process_name, MAX_CHARS),
-                                )
-                            } else {
-                                (process_file, process_name)
-                            };
-                            format!("{process_file} — {process_name}")
-                        })
-                        .unwrap_or_else(|| "Terminal".to_string()),
+                                    (process_file, process_name)
+                                };
+                                format!("{process_file} — {process_name}")
+                            })
+                            .unwrap_or_else(|| "Terminal".to_string())
+                    }
                     TerminalType::DisplayOnly => self
                         .osc7_cwd
                         .as_ref()
@@ -4093,6 +4241,124 @@ fn foreground_process_command_from_argv(argv: &[String]) -> Option<String> {
         .filter_map(|argument| normalize_script_command_name(argument))
         .next()
         .or(command)
+}
+
+/// An SSH connection opened from a terminal.
+///
+/// The destination is what the status bar shows (`alice@web`), i.e. the host
+/// argument of the local `ssh` process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshSession {
+    /// `[user@]host` the connection points at, as typed on the command line.
+    pub destination: String,
+}
+
+impl SshSession {
+    /// The SSH session an argv starts, e.g. `["ssh", "-t", "web"]`.
+    ///
+    /// Terminal owners call this for the command they spawn, so a session that
+    /// lives behind a session host (where the foreground process is not visible)
+    /// is still recognised.
+    pub fn from_argv(argv: &[String]) -> Option<Self> {
+        ssh_destination_from_argv(argv).map(|destination| Self { destination })
+    }
+}
+
+/// Destination of an SSH argv (`ssh [-options] destination [command...]`).
+///
+/// Returns `None` when the process is not `ssh`, so callers can pass any
+/// foreground argv without checking the command name first.
+fn ssh_destination_from_argv(argv: &[String]) -> Option<String> {
+    let command = argv.first()?;
+    let base = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    let base = base.strip_suffix(".exe").unwrap_or(base);
+    if !base.eq_ignore_ascii_case("ssh") {
+        return None;
+    }
+    ssh_destination(argv)
+}
+
+/// Finds the destination argument in an OpenSSH argv, skipping options and
+/// their values so `ssh -p 2222 alice@example.com` reports the host rather
+/// than `2222`.
+fn ssh_destination(argv: &[String]) -> Option<String> {
+    let mut args = argv.iter().skip(1);
+    while let Some(argument) = args.next() {
+        if argument == "--" {
+            return args.next().filter(|value| !value.is_empty()).cloned();
+        }
+        if !argument.starts_with('-') || argument == "-" {
+            return (!argument.is_empty()).then(|| argument.clone());
+        }
+        if argument.starts_with("--") {
+            continue;
+        }
+
+        let options = &argument[1..];
+        let takes_separate_value =
+            options.chars().any(ssh_option_takes_argument) && options.chars().count() == 1;
+        if takes_separate_value {
+            args.next();
+        }
+    }
+    None
+}
+
+fn ssh_option_takes_argument(option: char) -> bool {
+    matches!(
+        option,
+        'B' | 'b'
+            | 'c'
+            | 'D'
+            | 'E'
+            | 'e'
+            | 'F'
+            | 'I'
+            | 'i'
+            | 'J'
+            | 'L'
+            | 'l'
+            | 'm'
+            | 'O'
+            | 'o'
+            | 'p'
+            | 'Q'
+            | 'R'
+            | 'S'
+            | 'W'
+            | 'w'
+    )
+}
+
+/// Whether `host` names this machine, so an `OSC 7` report from it describes a
+/// local directory.
+fn is_local_hostname(host: &str) -> bool {
+    let host = host.trim();
+    let host = host.strip_suffix('.').unwrap_or(host);
+    if host.is_empty()
+        || host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+    {
+        return true;
+    }
+
+    static LOCAL: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let local = LOCAL.get_or_init(|| {
+        let mut names = Vec::new();
+        if let Some(name) = sysinfo::System::host_name() {
+            names.push(name.to_lowercase());
+        }
+        names
+    });
+    let host = host.to_lowercase();
+    if local.iter().any(|name| *name == host) {
+        return true;
+    }
+    // `host.example.com` is this machine when only the short name is known.
+    local
+        .iter()
+        .any(|name| host.split('.').next() == Some(name.as_str()))
 }
 
 /// Returns the script argument of a JavaScript/TypeScript runtime, e.g.
@@ -6463,6 +6729,123 @@ mod tests {
             );
             assert_eq!(terminal.title(true), "terry");
         });
+    }
+
+    #[gpui::test]
+    async fn test_display_only_terminal_reports_remote_ssh_directory(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        // The local shell reports its own directory first: this is not a remote
+        // terminal yet.
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]7;file://localhost/home/solos\x07", cx);
+        });
+        cx.run_until_parked();
+        terminal.update(cx, |terminal, _cx| {
+            assert_eq!(terminal.ssh_session(), None);
+            assert_eq!(terminal.remote_working_directory(), None);
+            assert_eq!(
+                terminal.display_working_directory(),
+                Some(PathBuf::from("/home/solos"))
+            );
+        });
+
+        // The remote shell's integration reports from the remote host.
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]7;file://build-box/srv/www\x07", cx);
+        });
+        cx.run_until_parked();
+        terminal.update(cx, |terminal, _cx| {
+            assert_eq!(
+                terminal.ssh_session(),
+                Some(SshSession {
+                    destination: "build-box".into()
+                })
+            );
+            assert_eq!(
+                terminal.remote_working_directory(),
+                Some(PathBuf::from("/srv/www"))
+            );
+            // Both the sidebar and the tab name follow the remote folder.
+            assert_eq!(
+                terminal.display_working_directory(),
+                Some(PathBuf::from("/srv/www"))
+            );
+            assert_eq!(terminal.title(true), "www");
+        });
+    }
+
+    #[test]
+    fn ssh_destination_skips_option_values() {
+        let argv = [
+            "ssh",
+            "-o",
+            "ServerAliveInterval=30",
+            "-p",
+            "2222",
+            "-i",
+            "/home/solos/.ssh/id_web",
+            "-t",
+            "alice@web",
+            "tmux",
+            "attach",
+        ]
+        .map(str::to_string);
+        assert_eq!(
+            ssh_destination_from_argv(&argv).as_deref(),
+            Some("alice@web")
+        );
+    }
+
+    #[test]
+    fn ssh_destination_handles_compact_options_and_separator() {
+        let argv = [
+            "ssh",
+            "-vvv",
+            "-p2222",
+            "-i~/.ssh/id_web",
+            "--",
+            "-remote-host",
+        ]
+        .map(str::to_string);
+        assert_eq!(ssh_destination(&argv).as_deref(), Some("-remote-host"));
+    }
+
+    #[test]
+    fn ssh_destination_ignores_non_ssh_processes() {
+        let argv = ["zsh"].map(str::to_string);
+        assert_eq!(ssh_destination_from_argv(&argv), None);
+        // An `ssh.exe` path on Windows is still recognised.
+        let argv = ["C:\\Windows\\System32\\OpenSSH\\ssh.exe", "web"].map(str::to_string);
+        assert_eq!(ssh_destination_from_argv(&argv).as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn local_hostnames_are_not_remote() {
+        assert!(is_local_hostname("localhost"));
+        assert!(is_local_hostname("127.0.0.1"));
+        assert!(is_local_hostname(""));
+        if let Some(host) = sysinfo::System::host_name() {
+            assert!(is_local_hostname(&host));
+            // A fully qualified name of this machine is local too.
+            assert!(is_local_hostname(&format!("{host}.example.com")));
+        }
+        assert!(!is_local_hostname("build-box"));
     }
 
     #[gpui::test]

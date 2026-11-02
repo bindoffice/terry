@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gpui::{
     App, Context, Empty, Entity, EventEmitter, IntoElement, ParentElement, Render, SharedString,
@@ -175,9 +175,15 @@ impl StatusItemView for ActiveTerminalContext {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SshSession {
     destination: String,
+    /// Directory the remote shell reported, if it has one yet.
+    remote_cwd: Option<PathBuf>,
 }
 
 /// Status-bar item: indicates when the focused terminal is connected over SSH.
+///
+/// The SSH connection runs inside the terminal's local shell, so nothing about
+/// the tab looks remote on its own. This item makes it explicit: the host, and
+/// the remote working directory once the remote shell integration reports one.
 pub struct ActiveTerminalSsh {
     active_terminal: Option<WeakEntity<TerminalView>>,
     session: Option<SshSession>,
@@ -215,6 +221,7 @@ impl ActiveTerminalSsh {
                     event,
                     TerminalEvent::TitleChanged
                         | TerminalEvent::BreadcrumbsChanged
+                        | TerminalEvent::CwdChanged
                         | TerminalEvent::CommandStarted
                         | TerminalEvent::LastCommandFinished(_)
                 ) {
@@ -237,10 +244,14 @@ impl Render for ActiveTerminalSsh {
             return Empty.into_any_element();
         };
         let destination = format_ssh_destination(&session.destination);
+        let label = match &session.remote_cwd {
+            Some(cwd) => format!("SSH · {destination} · {}", format_remote_cwd(cwd)),
+            None => format!("SSH · {destination}"),
+        };
 
         div()
             .child(
-                Button::new("active-terminal-ssh", format!("SSH · {destination}"))
+                Button::new("active-terminal-ssh", label)
                     .label_size(LabelSize::Small)
                     .color(Color::Accent)
                     .start_icon(
@@ -248,10 +259,14 @@ impl Render for ActiveTerminalSsh {
                             .size(IconSize::XSmall)
                             .color(Color::Accent),
                     )
-                    .tooltip(Tooltip::text(format!(
-                        "SSH remote session · {}",
-                        session.destination
-                    ))),
+                    .tooltip(Tooltip::text(match &session.remote_cwd {
+                        Some(cwd) => format!(
+                            "Remote SSH session · {}\n{}",
+                            session.destination,
+                            cwd.display()
+                        ),
+                        None => format!("Remote SSH session · {}", session.destination),
+                    })),
             )
             .into_any_element()
     }
@@ -296,16 +311,31 @@ impl ActiveTerminalCwd {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let cwd = self.active_terminal.as_ref().and_then(|tv| {
-            let tv = tv.upgrade()?;
-            tv.read(cx).terminal().read(cx).working_directory()
-        });
+        let (cwd, remote) = self
+            .active_terminal
+            .as_ref()
+            .and_then(|tv| {
+                let tv = tv.upgrade()?;
+                let terminal = tv.read(cx).terminal().read(cx);
+                let remote = terminal.remote_working_directory().is_some();
+                Some((terminal.display_working_directory(), remote))
+            })
+            .unwrap_or((None, false));
 
         match cwd {
             Some(path) => {
-                let (display, full) = format_cwd(&path);
-                self.display = Some(display);
-                self.full = Some(full);
+                if remote {
+                    // Local-path formatting (`~` compaction) does not apply to a
+                    // remote path, and the label has to say it is remote.
+                    let full: SharedString =
+                        format!("{} ({})", path.display(), i18n::t("remote")).into();
+                    self.display = Some(format_remote_cwd(&path));
+                    self.full = Some(full);
+                } else {
+                    let (display, full) = format_cwd(&path);
+                    self.display = Some(display);
+                    self.full = Some(full);
+                }
             }
             None => self.clear(),
         }
@@ -328,7 +358,9 @@ impl ActiveTerminalCwd {
             cx.subscribe(&terminal, |this, _, event, cx| {
                 if matches!(
                     event,
-                    TerminalEvent::TitleChanged | TerminalEvent::BreadcrumbsChanged
+                    TerminalEvent::TitleChanged
+                        | TerminalEvent::BreadcrumbsChanged
+                        | TerminalEvent::CwdChanged
                 ) {
                     this.refresh(cx);
                 }
@@ -547,75 +579,35 @@ fn format_cwd(path: &Path) -> (SharedString, SharedString) {
     (display.into(), full)
 }
 
+/// SSH state of `terminal`, if it is connected to a remote host.
 fn ssh_session_for_terminal(terminal: &terminal::Terminal) -> Option<SshSession> {
-    if terminal.has_exited() {
-        return None;
-    }
-    let command = terminal.foreground_process_command_name()?;
-    let argv = terminal.foreground_process_argv()?;
-    ssh_session_for_process(&command, &argv)
+    let session = terminal.ssh_session()?;
+    Some(SshSession {
+        destination: session.destination,
+        remote_cwd: terminal.remote_working_directory(),
+    })
 }
 
-fn ssh_session_for_process(command: &str, argv: &[String]) -> Option<SshSession> {
-    let base = command.rsplit(['/', '\\']).next().unwrap_or(command);
-    let base = base.strip_suffix(".exe").unwrap_or(base);
-    if !base.eq_ignore_ascii_case("ssh") {
-        return None;
+/// The remote directory's last components, for the status bar.
+///
+/// Remote paths are not under the local home directory, so they are shown as
+/// they are (only shortened) rather than `~`-compact.
+fn format_remote_cwd(path: &Path) -> SharedString {
+    const REMOTE_CWD_MAX_CHARS: usize = 32;
+    let full = path.display().to_string();
+    if full.chars().count() <= REMOTE_CWD_MAX_CHARS {
+        return full.into();
     }
 
-    ssh_destination(argv).map(|destination| SshSession { destination })
-}
-
-/// Finds the destination argument in an OpenSSH argv, skipping options and
-/// their values so `ssh -p 2222 alice@example.com` reports the host rather
-/// than `2222`.
-fn ssh_destination(argv: &[String]) -> Option<String> {
-    let mut args = argv.iter().skip(1);
-    while let Some(argument) = args.next() {
-        if argument == "--" {
-            return args.next().filter(|value| !value.is_empty()).cloned();
-        }
-        if !argument.starts_with('-') || argument == "-" {
-            return (!argument.is_empty()).then(|| argument.clone());
-        }
-        if argument.starts_with("--") {
-            continue;
-        }
-
-        let options = &argument[1..];
-        let takes_separate_value =
-            options.chars().any(ssh_option_takes_argument) && options.chars().count() == 1;
-        if takes_separate_value {
-            args.next();
-        }
+    let tail = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or(full);
+    if tail.chars().count() + 2 > REMOTE_CWD_MAX_CHARS {
+        let truncated: String = tail.chars().take(REMOTE_CWD_MAX_CHARS - 1).collect();
+        return format!("{truncated}…").into();
     }
-    None
-}
-
-fn ssh_option_takes_argument(option: char) -> bool {
-    matches!(
-        option,
-        'B' | 'b'
-            | 'c'
-            | 'D'
-            | 'E'
-            | 'e'
-            | 'F'
-            | 'I'
-            | 'i'
-            | 'J'
-            | 'L'
-            | 'l'
-            | 'm'
-            | 'O'
-            | 'o'
-            | 'p'
-            | 'Q'
-            | 'R'
-            | 'S'
-            | 'W'
-            | 'w'
-    )
+    format!("…/{tail}").into()
 }
 
 fn format_ssh_destination(destination: &str) -> SharedString {
@@ -658,47 +650,15 @@ mod tests {
     }
 
     #[test]
-    fn detects_an_ssh_process_and_its_destination() {
-        let argv = [
-            "ssh",
-            "-o",
-            "ServerAliveInterval=30",
-            "-p",
-            "2222",
-            "-i",
-            "~/.ssh/id_web",
-            "-t",
-            "alice@web",
-            "tmux",
-            "attach",
-        ]
-        .map(str::to_string);
+    fn remote_cwd_is_shortened_for_the_status_bar() {
         assert_eq!(
-            ssh_session_for_process("ssh", &argv),
-            Some(SshSession {
-                destination: "alice@web".into()
-            })
+            format_remote_cwd(Path::new("/srv/www")),
+            SharedString::from("/srv/www")
         );
-    }
-
-    #[test]
-    fn finds_ssh_destination_with_compact_options_and_separator() {
-        let argv = [
-            "ssh",
-            "-vvv",
-            "-p2222",
-            "-i~/.ssh/id_web",
-            "--",
-            "-remote-host",
-        ]
-        .map(str::to_string);
-        assert_eq!(ssh_destination(&argv).as_deref(), Some("-remote-host"));
-    }
-
-    #[test]
-    fn ignores_non_ssh_foreground_processes() {
-        let argv = ["zsh"].map(str::to_string);
-        assert_eq!(ssh_session_for_process("zsh", &argv), None);
+        let long = format_remote_cwd(Path::new(
+            "/var/lib/a/very/long/remote/directory/structure/project",
+        ));
+        assert_eq!(long, SharedString::from("…/project"));
     }
 
     #[test]

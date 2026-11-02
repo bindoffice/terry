@@ -29,7 +29,7 @@
 - **粘贴安全** — 多行粘贴默认先确认；在弹窗中选择「粘贴，不再询问」即可关闭，也可用 `"terminal": { "confirm_multiline_paste": false }` 关闭
 - **Shell 集成** — zsh / fish 开箱即用：提示符标记（OSC 133 / VS Code OSC 633）与工作目录跟踪（OSC 7）；`ctrl-shift-up` / `ctrl-shift-down` 在各条命令的提示符之间跳转
 - **终端配置档** — 命名 Profile 可覆盖 Shell、环境变量与工作目录，并在 Shell 启动后执行命令（例如 `tmux` 或激活项目虚拟环境）；可在分组右键菜单中选择，或用 `default_profile` 设为默认
-- **SSH 主机** — 从 `~/.ssh/config` 与 `terminal.ssh_hosts` 生成主机选择器；连接会复用 60 秒（`ControlMaster`），同一主机的第二个终端瞬间打开。普通 SSH 会话会自动为远端 zsh、fish 和 bash 安装 Shell 集成。「通过 tmux 连接」会在远端 attach 或新建 tmux 会话
+- **SSH 主机** — 从 `~/.ssh/config` 与 `terminal.ssh_hosts` 生成主机选择器；连接会复用 60 秒（`ControlMaster`），同一主机的第二个终端瞬间打开。普通 SSH 会话会自动为远端 zsh、fish 和 bash 安装 Shell 集成，状态栏会标注这是远程终端（主机名 + 远端目录），侧栏与标签名也会跟随远端文件夹。「通过 tmux 连接」会在远端 attach 或新建 tmux 会话
 - **tmux 会话** — 选择器可直接 attach 或新建本地 tmux 会话；远端等价于 `ssh … tmux new -A -s <名称>`。选择「原生分屏」后会通过 tmux **control mode**（`tmux -CC`）把每个 tmux window 映射成 Terry 分组、每个 pane 映射成原生分屏，输入、布局变化、窗口重命名与断线重连都会同步；不选原生分屏时会话仍运行在单个终端里
 - **终端配色方案** — 内置配色库（Dracula、Nord、Solarized、Gruvbox、One Dark、Tokyo Night、Catppuccin、Rosé Pine 等），只改变终端颜色；可按终端、按 Profile 或用 `terminal.color_scheme` 选择。可从「终端」菜单导入 Alacritty `.toml`、iTerm2 `.itermcolors` 或 Terry JSON
 - **会话恢复** — 重启后恢复分组、分屏布局、工作目录、标题、Profile 配色、每终端字号缩放，以及 Profile / SSH / tmux 启动方式
@@ -57,7 +57,9 @@ Terry 解析 **OSC 133** 提示符标记（含 VS Code 的 **OSC 633** 变体）
 
 通过主机选择器打开的 SSH 会话会把同一套集成脚本安装到远端 zsh、fish 或
 bash 登录 Shell。远端需要 `base64` 和可写的缓存目录，否则 Terry 会静默启动
-普通登录 Shell。手动在终端里输入 `ssh`、远端 tmux 会话以及任务运行（task）
+普通登录 Shell。当远端 Shell 报告自己的目录后（OSC 7 来自另一个主机名），
+状态栏会标注该终端为远程终端，侧栏与标签名也会改为远端文件夹而不是本地目录。
+手动在终端里输入 `ssh`、远端 tmux 会话以及任务运行（task）
 不会自动注入集成。
 
 ## 命令行

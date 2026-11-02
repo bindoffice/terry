@@ -2335,9 +2335,12 @@ impl<T: EventListener> Handler for Term<T> {
             return;
         };
         match parse_cwd_uri(&uri) {
-            Some(path) => {
-                trace!("Current working directory: {}", path.display());
-                self.event_proxy.send_event(Event::Cwd(path));
+            Some((path, host)) => {
+                trace!(
+                    "Current working directory: {} (host {host:?})",
+                    path.display()
+                );
+                self.event_proxy.send_event(Event::Cwd { path, host });
             }
             None => debug!("Ignoring malformed OSC 7 working directory URI: {uri}"),
         }
@@ -3082,21 +3085,27 @@ fn parse_text_sizing(metadata: &str) -> Option<CellTextSizing> {
     Some(sizing)
 }
 
-fn parse_cwd_uri(uri: &str) -> Option<PathBuf> {
+/// Parsed `OSC 7` payload: the reported directory and the URI authority.
+///
+/// The authority is the hostname the shell ran on (`file://host/path`). Shells
+/// commonly report `localhost` or a bare hostname, which is what lets a caller
+/// distinguish a remote shell from the local one.
+fn parse_cwd_uri(uri: &str) -> Option<(PathBuf, Option<String>)> {
     // RFC 8089: `file://` followed by an optional authority (host) then path.
     let rest = uri.strip_prefix("file://")?;
 
     // `file://host/path`: split the authority at the first `/`. `file:///path`
     // already starts with `/`, so the whole remainder is the path.
-    let path = match rest.find('/') {
-        Some(idx) => &rest[idx..],
+    let (host, path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
         None => return None,
     };
     if path == "/" {
         return None;
     }
 
-    Some(PathBuf::from(percent_decode(path)))
+    let host = (!host.is_empty()).then(|| percent_decode(host));
+    Some((PathBuf::from(percent_decode(path)), host))
 }
 
 /// Decode `%XX` escape sequences, leaving all other bytes untouched.
@@ -5127,11 +5136,17 @@ mod tests {
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 2);
         match &events[0] {
-            Event::Cwd(path) => assert_eq!(path, &PathBuf::from("/home/user name")),
+            Event::Cwd { path, host } => {
+                assert_eq!(path, &PathBuf::from("/home/user name"));
+                assert_eq!(host.as_deref(), None);
+            }
             other => panic!("unexpected event: {other:?}"),
         }
         match &events[1] {
-            Event::Cwd(path) => assert_eq!(path, &PathBuf::from("/srv/www")),
+            Event::Cwd { path, host } => {
+                assert_eq!(path, &PathBuf::from("/srv/www"));
+                assert_eq!(host.as_deref(), Some("ssh-host"));
+            }
             other => panic!("unexpected event: {other:?}"),
         }
     }
@@ -5140,15 +5155,15 @@ mod tests {
     fn parse_cwd_uri_handles_rfc8089_forms() {
         assert_eq!(
             parse_cwd_uri("file:///home/user"),
-            Some(PathBuf::from("/home/user"))
+            Some((PathBuf::from("/home/user"), None))
         );
         assert_eq!(
             parse_cwd_uri("file://host/home/user"),
-            Some(PathBuf::from("/home/user"))
+            Some((PathBuf::from("/home/user"), Some("host".to_string())))
         );
         assert_eq!(
             parse_cwd_uri("file:///home/user%20name"),
-            Some(PathBuf::from("/home/user name"))
+            Some((PathBuf::from("/home/user name"), None))
         );
         assert_eq!(parse_cwd_uri("file://host"), None);
         assert_eq!(parse_cwd_uri("https://example.com/x"), None);

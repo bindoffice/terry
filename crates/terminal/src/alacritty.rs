@@ -524,7 +524,7 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
             AlacTermEvent::Notification(title, body, progress) => {
                 Self::Notification(title, body, progress)
             }
-            AlacTermEvent::Cwd(path) => Self::Cwd(path),
+            AlacTermEvent::Cwd { path, host } => Self::Cwd { path, host },
             AlacTermEvent::ClipboardStore(_, data) => Self::ClipboardStore(data),
             AlacTermEvent::ClipboardLoad(_, format) => Self::ClipboardLoad(format),
             AlacTermEvent::ColorRequest(index, format) => Self::ColorRequest(index, format),

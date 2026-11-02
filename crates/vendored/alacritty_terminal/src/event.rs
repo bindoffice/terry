@@ -23,7 +23,10 @@ pub enum Event {
     ResetTitle,
 
     /// Working directory reported via `OSC 7`.
-    Cwd(PathBuf),
+    ///
+    /// `host` is the authority of the `file://` URI as reported by the shell. A
+    /// host that is not the local machine identifies a remote (SSH) shell.
+    Cwd { path: PathBuf, host: Option<String> },
 
     /// Show a desktop notification (`OSC 9`).
     ///
@@ -96,7 +99,10 @@ impl Debug for Event {
             Event::Notification(title, body, progress) => {
                 write!(f, "Notification({title:?}, {body:?}, {progress:?})")
             }
-            Event::Cwd(path) => write!(f, "Cwd({})", path.display()),
+            Event::Cwd { path, host } => match host {
+                Some(host) => write!(f, "Cwd({} on {host})", path.display()),
+                None => write!(f, "Cwd({})", path.display()),
+            },
             Event::CursorBlinkingChange => write!(f, "CursorBlinkingChange"),
             Event::MouseCursorDirty => write!(f, "MouseCursorDirty"),
             Event::ResetTitle => write!(f, "ResetTitle"),
