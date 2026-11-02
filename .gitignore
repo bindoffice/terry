@@ -21,6 +21,16 @@ target
 #.idea/
 .DS_Store
 
+# The built-in coding agent (`tom`) writes its session logs to
+# `<cwd>/.tom/sessions`, and reads project config (SYSTEM.md, skills, prompts,
+# extensions) from `.tom/`. Keep the working tree clean the same way tom's own
+# repository does, while still allowing a checked-in project config.
+.tom/*
+!.tom/skills/
+.tom/skills/*
+!.tom/SYSTEM.md
+!.tom/APPEND_SYSTEM.md
+
 # Local release artifacts
 /*.zip
 /dist/
