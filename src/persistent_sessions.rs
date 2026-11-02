@@ -173,6 +173,15 @@ pub fn spawn_env(
         }
     }
 
+    // The agent integration scripts (`assets/agent-integrations/*`) bail out
+    // unless all three of these are set. A terminal spawned the normal way gets
+    // them from `ipc::connection_env()`; a daemon-spawned one used to get none of
+    // them, which silently disabled agent state reporting - and with it the
+    // sidebar badge and every phone client - for every persistent terminal.
+    for (key, value) in crate::ipc::connection_env() {
+        env.insert(key, value);
+    }
+
     // A persistent terminal is still an interactive shell: expose the running
     // binary so `terry` / `terry-daemon` resolve there too.
     if let Err(error) = terminal::shell_integration::inject_cli_path_env(&mut env) {
@@ -280,8 +289,17 @@ fn collect_daemon_sessions(
 /// Kills daemon sessions that no session file references, that nobody is
 /// attached to, and that have been idle for at least `min_idle_secs`.
 ///
-/// The attached and idle guards keep a session alive while a window is still
-/// restoring, or while an agent is thinking without producing output.
+/// Three guards keep a session alive:
+///
+/// - **Attached**: a window is still restoring it, or a phone is watching it.
+/// - **Referenced**: a session file will reattach to it on the next launch.
+/// - **Running an agent**: an agent that is thinking, or waiting for a human to
+///   answer, produces no output at all, so it is indistinguishable from an
+///   abandoned shell by idleness alone. Killing it loses work the user cannot
+///   recover, and the user has no way to know it was about to happen.
+///
+/// The third guard is why a phone client needs no keep-alive heartbeat: the
+/// daemon knows a session has an agent in it, and leaves it alone.
 pub fn prune(
     referenced: &collections::HashSet<String>,
     min_idle_secs: u64,
@@ -291,7 +309,10 @@ pub fn prune(
         let sessions = control.list()?;
         let mut pruned = Vec::new();
         for info in sessions {
-            if info.attached || info.idle_secs < min_idle_secs || referenced.contains(&info.session)
+            if info.attached
+                || info.agent.is_some()
+                || info.idle_secs < min_idle_secs
+                || referenced.contains(&info.session)
             {
                 continue;
             }
@@ -453,5 +474,54 @@ mod tests {
             shell_program_for_integration(Some(""), Some("/bin/zsh")),
             "/bin/zsh"
         );
+    }
+
+    fn info(session: &str, attached: bool, idle_secs: u64, agent: Option<&str>) -> terminal_daemon::SessionInfo {
+        terminal_daemon::SessionInfo {
+            session: session.to_string(),
+            cols: 80,
+            rows: 24,
+            exited: None,
+            buffered_bytes: 0,
+            attached,
+            idle_secs,
+            agent: agent.map(str::to_string),
+        }
+    }
+
+    /// The decision the reaper makes, lifted out of the socket call so it can be
+    /// pinned without a live daemon.
+    fn should_prune(
+        info: &terminal_daemon::SessionInfo,
+        referenced: &collections::HashSet<String>,
+        min_idle_secs: u64,
+    ) -> bool {
+        !info.attached
+            && info.agent.is_none()
+            && info.idle_secs >= min_idle_secs
+            && !referenced.contains(&info.session)
+    }
+
+    #[test]
+    fn the_reaper_leaves_agent_sessions_alone() {
+        let none = collections::HashSet::default();
+
+        // An idle session with no agent is exactly what the reaper is for.
+        assert!(should_prune(&info("t-1", false, 7200, None), &none, 3600));
+
+        // The same session with an agent must survive: an agent that is thinking
+        // or waiting for a human produces no output, so idleness cannot tell it
+        // apart from an abandoned shell.
+        assert!(
+            !should_prune(&info("t-1", false, 7200, Some("claude")), &none, 3600),
+            "pruning an agent would destroy work the user cannot recover"
+        );
+
+        // The other guards still apply.
+        assert!(!should_prune(&info("t-1", true, 7200, None), &none, 3600));
+        assert!(!should_prune(&info("t-1", false, 60, None), &none, 3600));
+        let mut referenced = collections::HashSet::default();
+        referenced.insert("t-1".to_string());
+        assert!(!should_prune(&info("t-1", false, 7200, None), &referenced, 3600));
     }
 }

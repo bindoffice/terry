@@ -128,15 +128,26 @@ pub fn set_enabled(cx: &mut App, enabled: bool) {
 
 /// Replaces the token, so every paired device has to pair again.
 pub fn rotate_token(cx: &mut App) {
-    if let Some(parent) = token_path().parent() {
-        fs::create_dir_all(parent).ok();
-    }
-    write_private(&token_path(), &uuid::Uuid::new_v4().to_string());
-
+    write_new_token();
+    // Forget the applied config so the listener restarts with the new token.
     if cx.try_global::<RemoteControlState>().is_some() {
         cx.global_mut::<RemoteControlState>().applied = None;
     }
     apply(cx);
+}
+
+/// Writes a fresh token to the default location and returns it.
+///
+/// Split out from [`rotate_token`] because the CLI runs without an `App`: it
+/// needs to unpair every device, not to restart a listener that only exists in
+/// the GUI process.
+pub(crate) fn write_new_token() -> String {
+    let token = uuid::Uuid::new_v4().to_string();
+    if let Some(parent) = token_path().parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    write_private(&token_path(), &token);
+    token
 }
 
 /// Current endpoint configuration plus live state, for the settings page.
@@ -155,11 +166,11 @@ pub fn status(cx: &App) -> RemoteControlStatus {
     }
 }
 
-fn token_path() -> PathBuf {
+pub(crate) fn token_path() -> PathBuf {
     paths::data_dir().join(TOKEN_FILE)
 }
 
-fn read_token() -> Option<String> {
+pub(crate) fn read_token() -> Option<String> {
     read_token_at(&token_path())
 }
 
@@ -170,7 +181,7 @@ fn read_token_at(path: &Path) -> Option<String> {
 }
 
 /// Reads the paired-device token, creating one on first use.
-fn load_or_create_token() -> String {
+pub(crate) fn load_or_create_token() -> String {
     load_or_create_token_at(&token_path())
 }
 
@@ -185,6 +196,11 @@ fn load_or_create_token_at(path: &Path) -> String {
     }
     write_private(path, &token);
     token
+}
+
+/// Writes a bearer token to `path`, readable only by the current user.
+pub(crate) fn write_token_file(path: &Path, contents: &str) {
+    write_private(path, contents);
 }
 
 /// Writes a file that only the current user can read.
