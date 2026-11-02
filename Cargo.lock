@@ -15087,6 +15087,7 @@ dependencies = [
  "sysinfo 0.37.2",
  "task",
  "tempfile",
+ "terminal_core",
  "theme",
  "theme_settings",
  "thiserror 2.0.17",
@@ -15098,6 +15099,16 @@ dependencies = [
  "util_macros",
  "vte",
  "windows 0.61.3",
+]
+
+[[package]]
+name = "terminal_core"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "serde",
+ "serde_json",
+ "vte",
 ]
 
 [[package]]
@@ -15232,6 +15243,7 @@ dependencies = [
  "task",
  "tempfile",
  "terminal",
+ "terminal_core",
  "terminal_daemon",
  "terminal_view",
  "theme",

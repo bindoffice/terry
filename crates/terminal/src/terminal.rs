@@ -76,8 +76,9 @@ pub use crate::terminal_settings::HintAction;
 // Pure emulator -> snapshot helpers, re-exported so a caller that is not the
 // GUI (the IPC endpoints, the terminal daemon, tests) can repaint a terminal
 // without going through a window. Both only need a `Term` and never touch the
-// window, the layout or the theme.
-pub use crate::alacritty::{last_non_empty_lines, make_screen_snapshot};
+// window, the layout or the theme. They live in `terminal_core`, which has no
+// gpui dependency at all, so the terminal daemon can use the exact same code.
+pub use terminal_core::{last_non_empty_lines, make_screen_snapshot};
 
 use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
@@ -483,23 +484,21 @@ impl KeyEventType {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CursorShape {
-    Block,
-    Underline,
-    Bar,
-    HollowBlock,
-    Hidden,
-}
+/// Re-exported from `terminal_core` so the daemon resolves cursor shapes with
+/// the same enum. The `From` conversion stays here because it maps a
+/// settings type (which `terminal_core` must not depend on).
+pub use terminal_core::CursorShape;
 
-impl From<SettingsCursorShape> for CursorShape {
-    fn from(shape: SettingsCursorShape) -> Self {
-        match shape {
-            SettingsCursorShape::Block => Self::Block,
-            SettingsCursorShape::Underline => Self::Underline,
-            SettingsCursorShape::Bar => Self::Bar,
-            SettingsCursorShape::Hollow => Self::HollowBlock,
-        }
+/// Maps the settings type onto the shared snapshot enum.
+///
+/// A `From` impl is not possible: `CursorShape` now lives in `terminal_core`,
+/// which must not depend on `settings`, so neither type is local here.
+pub fn snapshot_cursor_shape(shape: SettingsCursorShape) -> CursorShape {
+    match shape {
+        SettingsCursorShape::Block => CursorShape::Block,
+        SettingsCursorShape::Underline => CursorShape::Underline,
+        SettingsCursorShape::Bar => CursorShape::Bar,
+        SettingsCursorShape::Hollow => CursorShape::HollowBlock,
     }
 }
 
@@ -604,56 +603,10 @@ pub struct HoveredWord {
     pub id: usize,
 }
 
-/// One cell of the visible screen, with enough styling for an out-of-process
-/// client to repaint it (the terminal's own renderer uses the same data).
-///
-/// Colors are unresolved ANSI values; callers that draw outside the app (for
-/// example the `/api/screen` IPC endpoint) resolve them against the theme.
-#[derive(Clone, Debug)]
-pub struct ScreenCell {
-    /// Row inside the viewport, `0` at the top, independent of scrollback.
-    pub row: usize,
-    /// Column inside the viewport.
-    pub column: usize,
-    /// The cell's text: its character plus any zero-width combiners.
-    pub text: String,
-    pub foreground: Color,
-    pub background: Color,
-    pub bold: bool,
-    pub italic: bool,
-    pub underline: bool,
-    pub undercurl: bool,
-    pub strikeout: bool,
-    pub dim: bool,
-    pub inverse: bool,
-    /// This cell only holds the trailing half of a wide character.
-    pub wide_char_spacer: bool,
-}
+/// The snapshot types live in `terminal_core` so the daemon can build them
+/// without gpui; they are re-exported here to keep `terminal::` paths working.
+pub use terminal_core::{ScreenCell, ScreenCursor, ScreenSnapshot};
 
-/// A snapshot of the visible screen, for clients that repaint the terminal
-/// outside the app.
-#[derive(Clone, Debug)]
-pub struct ScreenSnapshot {
-    pub rows: usize,
-    pub columns: usize,
-    /// Viewport-relative cursor, `None` when it is not on screen (for example
-    /// while the viewport is scrolled back into the history).
-    pub cursor: Option<ScreenCursor>,
-    pub alternate_screen: bool,
-    /// How far the viewport is scrolled back into the scrollback history.
-    pub display_offset: usize,
-    /// Cells in row-major order, one entry per grid cell.
-    pub cells: Vec<ScreenCell>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ScreenCursor {
-    pub row: usize,
-    pub column: usize,
-    pub shape: CursorShape,
-    /// Whether the terminal asked for the cursor to be drawn (`DECTCEM`).
-    pub visible: bool,
-}
 
 impl Default for Content {
     fn default() -> Self {

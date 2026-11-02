@@ -72,6 +72,7 @@ sysinfo.workspace = true
 task.workspace = true
 tab_switcher.workspace = true
 terminal.workspace = true
+terminal_core.workspace = true
 terminal_daemon.workspace = true
 terminal_view.workspace = true
 tom-cli.workspace = true
@@ -267,6 +268,7 @@ members = [
     "crates/telemetry",
     "crates/telemetry_events",
     "crates/terminal",
+    "crates/terminal_core",
     "crates/terminal_daemon",
     "crates/terminal_view",
     "crates/text",
@@ -327,6 +329,7 @@ action_log = { path = "crates/action_log" }
 activity_indicator = { path = "crates/activity_indicator" }
 agent = { path = "crates/agent" }
 agent_detect = { path = "crates/agent_detect" }
+terminal_core = { path = "crates/terminal_core" }
 agent_servers = { path = "crates/agent_servers" }
 agent_settings = { path = "crates/agent_settings" }
 agent_skills = { path = "crates/agent_skills" }

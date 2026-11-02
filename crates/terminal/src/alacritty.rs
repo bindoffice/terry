@@ -9,7 +9,7 @@ mod hyperlinks;
 use alacritty_terminal::{
     event::{Event as AlacTermEvent, EventListener, Notify, WindowSize},
     event_loop::{EventLoop, Msg, Notifier},
-    grid::{Dimensions, Grid, GridIterator, Row, Scroll as AlacScroll},
+    grid::{Dimensions, GridIterator, Scroll as AlacScroll},
     index::{Boundary, Column, Direction as AlacDirection, Line, Point as AlacPoint},
     selection::{
         Selection as AlacSelection, SelectionRange as AlacSelectionRange,
@@ -29,7 +29,6 @@ use alacritty_terminal::{
     },
 };
 use anyhow::{Context as _, Result};
-use async_channel::Sender;
 use util::paths::PathStyle;
 use vte::ansi::Handler;
 #[cfg(target_os = "windows")]
@@ -37,7 +36,7 @@ use windows::Win32::{Foundation::HANDLE, System::Threading::GetProcessId};
 
 use crate::{
     Cell, Color, Content, Cursor, CursorShape, Hyperlink, HyperlinkData, IndexedCell, IndexedImage,
-    Modes, Point, PtyEvent, Range, RenderableCells, ScreenCell, ScreenCursor, ScreenSnapshot,
+    Modes, Point, PtyEvent, Range, RenderableCells,
     Scroll, Search, Selection, SelectionRange, SelectionSide, SelectionType, TerminalBackendEvent,
     TerminalBounds, ViMotion,
     pty_info::ProcessIdGetter,
@@ -1173,87 +1172,6 @@ pub(super) fn make_content(term: &mut Term<ZedListener>, last_content: &Content)
     }
 }
 
-/// Builds a viewport snapshot for out-of-process clients.
-///
-/// Unlike [`make_content`], this reads the live grid and keeps every cell,
-/// blank ones included, so a client can rebuild an exact grid.
-///
-/// This is a pure function of the emulator state: it never touches the window,
-/// the layout or the theme, so it can be used from outside the GUI. Colors are
-/// left as unresolved ANSI values; resolving them against a theme is the
-/// caller's job.
-pub fn make_screen_snapshot<L: EventListener>(term: &Term<L>) -> ScreenSnapshot {
-    let content = term.renderable_content();
-    let rows = term.screen_lines();
-    let columns = term.grid().columns();
-
-    let mut cells = Vec::with_capacity(content.display_iter.size_hint().0);
-
-    // `display_iter` walks the visible grid top to bottom, but line numbers are
-    // absolute and go negative while scrolled back, so the viewport row comes
-    // from the order the lines are yielded in.
-    let mut current_line: Option<Line> = None;
-    let mut row = 0;
-    let mut first_line: Option<Line> = None;
-
-    for indexed in content.display_iter {
-        if current_line != Some(indexed.point.line) {
-            if current_line.is_some() {
-                row += 1;
-            }
-            current_line = Some(indexed.point.line);
-            first_line.get_or_insert(indexed.point.line);
-        }
-
-        let cell = &indexed.cell;
-        let mut text = String::new();
-        text.push(cell.c);
-        if let Some(zerowidth) = cell.zerowidth() {
-            text.extend(zerowidth.iter().copied());
-        }
-
-        cells.push(ScreenCell {
-            row,
-            column: indexed.point.column.0,
-            text,
-            foreground: cell.fg,
-            background: cell.bg,
-            bold: cell.flags.contains(Flags::BOLD),
-            italic: cell.flags.contains(Flags::ITALIC),
-            underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
-            undercurl: cell.flags.contains(Flags::UNDERCURL),
-            strikeout: cell.flags.contains(Flags::STRIKEOUT),
-            dim: cell.flags.contains(Flags::DIM),
-            inverse: cell.flags.contains(Flags::INVERSE),
-            wide_char_spacer: cell
-                .flags
-                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),
-        });
-    }
-
-    let cursor = first_line.and_then(|first_line| {
-        let cursor = content.cursor;
-        let cursor_row = cursor.point.line.0 - first_line.0;
-        (0..rows as i32)
-            .contains(&cursor_row)
-            .then(|| ScreenCursor {
-                row: cursor_row as usize,
-                column: cursor.point.column.0,
-                shape: terminal_cursor_shape_from_alacritty(cursor.shape),
-                visible: content.mode.contains(TermMode::SHOW_CURSOR),
-            })
-    });
-
-    ScreenSnapshot {
-        rows,
-        columns,
-        cursor,
-        alternate_screen: content.mode.contains(TermMode::ALT_SCREEN),
-        display_offset: content.display_offset,
-        cells,
-    }
-}
-
 pub(super) fn content_text(term: &Term<ZedListener>) -> String {
     let start = AlacPoint::new(term.topmost_line(), Column(0));
     let end = AlacPoint::new(term.bottommost_line(), term.last_column());
@@ -1318,33 +1236,6 @@ pub(super) fn full_content_range(term: &Term<ZedListener>) -> Range {
     Range::from_alacritty(start..=end)
 }
 
-/// Returns the last `line_count` non-empty lines of the buffer, oldest first.
-///
-/// Rows that continue a soft-wrapped logical line are joined, and trailing
-/// whitespace is stripped. Used by the agent state detector and by callers that
-/// only need plain text. Pure function of the emulator state.
-pub fn last_non_empty_lines<L: EventListener>(term: &Term<L>, line_count: usize) -> Vec<String> {
-    let grid = term.grid();
-    let mut lines = Vec::new();
-
-    let mut current_line = grid.bottommost_line().0;
-    let topmost_line = grid.topmost_line().0;
-
-    while current_line >= topmost_line && lines.len() < line_count {
-        let (logical_line_start, logical_line) =
-            logical_line_for_row(grid, current_line, topmost_line);
-
-        if let Some(line) = process_line(logical_line) {
-            lines.push(line);
-        }
-
-        current_line = logical_line_start - 1;
-    }
-
-    lines.reverse();
-    lines
-}
-
 pub(super) fn update_vi_cursor_for_scroll(term: &mut Term<ZedListener>, scroll: Scroll) {
     match scroll {
         Scroll::Delta(delta) => {
@@ -1387,43 +1278,9 @@ pub(super) fn find_from_terminal_point(
     hyperlinks::find_from_grid_point(term, point, regex_searches, path_style)
 }
 
-fn logical_line_for_row(grid: &Grid<AlacCell>, current: i32, topmost: i32) -> (i32, String) {
-    let start = find_logical_line_start(grid, current, topmost);
-    let mut line = String::new();
-    for row in start..=current {
-        line.push_str(&row_to_string(&grid[Line(row)]));
-    }
-    (start, line)
-}
 
-fn find_logical_line_start(grid: &Grid<AlacCell>, current: i32, topmost: i32) -> i32 {
-    let mut line_start = current;
-    while line_start > topmost {
-        let previous_line = Line(line_start - 1);
-        let last_cell = &grid[previous_line][Column(grid.columns() - 1)];
-        if !last_cell.flags.contains(Flags::WRAPLINE) {
-            break;
-        }
-        line_start -= 1;
-    }
-    line_start
-}
 
-fn row_to_string(row: &Row<AlacCell>) -> String {
-    row[..Column(row.len())]
-        .iter()
-        .map(|cell| cell.c)
-        .collect::<String>()
-}
 
-fn process_line(line: String) -> Option<String> {
-    let trimmed = line.trim_end().to_string();
-    if !trimmed.is_empty() {
-        Some(trimmed)
-    } else {
-        None
-    }
-}
 
 /// Appends a stringified task summary to the terminal, after its output.
 ///

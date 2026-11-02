@@ -42,6 +42,7 @@ smallvec.workspace = true
 sysinfo.workspace = true
 task.workspace = true
 theme.workspace = true
+terminal_core.workspace = true
 tom-tui.workspace = true
 theme_settings.workspace = true
 thiserror.workspace = true
