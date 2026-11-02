@@ -1,0 +1,410 @@
+/* Terry mobile console.
+ *
+ * Two constraints drive the layout:
+ *
+ * 1. `100dvh`, not `100vh`. On mobile Safari and Chrome `100vh` includes the
+ *    area behind the collapsing toolbar, so a `100vh` layout hides the input
+ *    row exactly when the keyboard opens.
+ * 2. Safe-area insets. The key bar sits at the bottom, where the home
+ *    indicator is, so it must be padded by `env(safe-area-inset-bottom)` or the
+ *    buttons become unreachable.
+ */
+
+:root {
+  --ink: #121815;
+  --paper: #eef2ec;
+  --line: #24322b;
+  --signal: #1fa870;
+  --signal-dim: #0f7a52;
+  --term: #0c1210;
+  --term-text: #c5d6c8;
+  --term-dim: #6f8576;
+  --danger: #d2564a;
+  --working: #d9a441;
+  --blocked: #d2564a;
+  --idle: #6f8576;
+  --font-body: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --font-display: "Bricolage Grotesque", var(--font-body);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--term);
+  color: var(--term-text);
+  font-family: var(--font-body);
+  /* Stop iOS from bouncing the whole page: the terminal scrolls, not the body. */
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: #16211b;
+  color: var(--term-text);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  /* 44px is the smallest tap target that is comfortable on a phone. */
+  min-height: 2.75rem;
+}
+
+button:active {
+  background: #1e2c25;
+}
+
+button.primary {
+  background: var(--signal-dim);
+  border-color: var(--signal);
+  color: #fff;
+  font-weight: 600;
+}
+
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+  min-width: 2.75rem;
+  font-size: 1.1rem;
+}
+
+.screen {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* ---------- pairing ---------- */
+
+#pairing {
+  justify-content: center;
+  padding-inline: 1.25rem;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.pair-card {
+  width: 100%;
+  max-width: 26rem;
+  margin-inline: auto;
+}
+
+.pair-card h1 {
+  font-family: var(--font-display);
+  font-size: 1.75rem;
+  margin: 0 0 0.5rem;
+}
+
+.pair-card label {
+  display: block;
+  margin-bottom: 0.9rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #46524a;
+}
+
+.pair-card input {
+  display: block;
+  width: 100%;
+  margin-top: 0.3rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid #b7c2b6;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+}
+
+.pair-card button.primary {
+  width: 100%;
+  margin-top: 0.4rem;
+  padding: 0.8rem;
+}
+
+.hint {
+  font-size: 0.85rem;
+  color: #46524a;
+  line-height: 1.5;
+}
+
+.hint code {
+  font-family: var(--font-mono);
+  font-size: 0.8em;
+  background: #dde5da;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+
+.warn,
+.error {
+  font-size: 0.78rem;
+  margin-top: 1rem;
+  line-height: 1.45;
+}
+
+.warn {
+  color: #8a5a20;
+}
+
+.error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* ---------- header ---------- */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  background: #101a15;
+  flex: 0 0 auto;
+}
+
+.bar h1 {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  margin: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* Connection state is deliberately understated: it should be readable at a
+   glance, but a reconnecting socket must not look like a catastrophe. */
+.conn {
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+  color: var(--term-dim);
+  padding-right: 0.25rem;
+}
+
+.conn[data-state="live"]::before {
+  content: "●";
+  color: var(--signal);
+  margin-right: 0.25em;
+}
+
+.conn[data-state="retry"]::before {
+  content: "◌";
+  color: var(--working);
+  margin-right: 0.25em;
+}
+
+.conn[data-state="off"]::before {
+  content: "○";
+  color: var(--danger);
+  margin-right: 0.25em;
+}
+
+/* ---------- agent list ---------- */
+
+.agents {
+  list-style: none;
+  margin: 0;
+  padding: 0.5rem;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  flex: 1 1 auto;
+}
+
+.agents li {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #131d18;
+}
+
+.agents li.active {
+  border-color: var(--signal-dim);
+}
+
+.agents .row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.agents .name {
+  font-weight: 600;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agents .cwd,
+.agents .preview {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--term-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agents .preview {
+  margin-top: 0.3rem;
+  color: #8fa494;
+}
+
+.dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--idle);
+}
+
+.dot[data-state="working"] {
+  background: var(--working);
+  /* Pulsing is the cheapest way to say "still running" without a spinner. */
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.dot[data-state="blocked"] {
+  background: var(--blocked);
+}
+
+.dot[data-state="idle"] {
+  background: var(--idle);
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.empty {
+  margin: 2rem 1rem;
+  text-align: center;
+  color: var(--term-dim);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+#shells-wrap {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--line);
+  padding: 0 0.5rem 0.5rem;
+}
+
+.section {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--term-dim);
+  margin: 0.6rem 0 0.4rem;
+  padding: 0 0.25rem;
+}
+
+/* ---------- detail ---------- */
+
+.detail {
+  height: 100%;
+}
+
+.output {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--term);
+  color: var(--term-text);
+}
+
+.keys {
+  display: flex;
+  gap: 0.3rem;
+  padding: 0.4rem 0.5rem;
+  overflow-x: auto;
+  border-top: 1px solid var(--line);
+  background: #101a15;
+  flex: 0 0 auto;
+  /* Momentum scrolling makes an overflowing key bar reachable. */
+  -webkit-overflow-scrolling: touch;
+}
+
+.keys button {
+  flex: 0 0 auto;
+  min-width: 2.5rem;
+  min-height: 2.4rem;
+  padding: 0.3rem 0.55rem;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.keys button.danger {
+  color: #ffb4ac;
+  border-color: #4a2622;
+}
+
+.send {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.5rem;
+  border-top: 1px solid var(--line);
+  background: #101a15;
+  flex: 0 0 auto;
+}
+
+.send input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #16211b;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  /* 16px avoids iOS zooming the viewport on focus. */
+  font-size: max(16px, 0.9rem);
+}
+
+.send input:focus {
+  outline: 2px solid var(--signal-dim);
+  outline-offset: -1px;
+}

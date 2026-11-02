@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!-- viewport-fit=cover + safe-area padding: the key bar must not hide behind
+         the home indicator, and the terminal must not be clipped by a notch. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0c1210" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>Terry — 手机控制台</title>
+    <link rel="icon" href="../assets/icon.png" type="image/png" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <!-- Screen: pairing. Nothing else renders until a token is stored. -->
+    <section id="pairing" class="screen" hidden>
+      <div class="pair-card">
+        <h1>连接 Terry</h1>
+        <p class="hint">
+          在电脑上执行 <code>terry daemon serve --http 0.0.0.0:47823</code>，
+          然后填入它显示的地址和令牌。
+        </p>
+        <label>
+          地址
+          <input
+            id="pair-url"
+            type="url"
+            inputmode="url"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+            placeholder="http://100.64.0.1:47823"
+          />
+        </label>
+        <label>
+          令牌
+          <input
+            id="pair-token"
+            type="password"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+            placeholder="remote-token 的内容"
+          />
+        </label>
+        <p id="pair-error" class="error" hidden></p>
+        <button id="pair-submit" class="primary">连接</button>
+        <p class="warn">
+          令牌等同于在你电脑上执行命令的权限。只用 Tailscale / WireGuard /
+          局域网连接，不要映射到公网。
+        </p>
+      </div>
+    </section>
+
+    <!-- Screen: the agent list. This is the default view. -->
+    <section id="list" class="screen" hidden>
+      <header class="bar">
+        <h1>Agents</h1>
+        <div class="bar-actions">
+          <span id="conn" class="conn" data-state="idle" aria-live="polite">—</span>
+          <button id="refresh" class="ghost" title="刷新">↻</button>
+          <button id="new" class="ghost" title="新建任务">＋</button>
+          <button id="unpair" class="ghost" title="断开配对">⎋</button>
+        </div>
+      </header>
+      <p id="list-empty" class="empty" hidden>
+        还没有终端。<br />点右上角 ＋ 启动一个。
+      </p>
+      <!-- Agent state changes are what a phone is usually opened for, so they
+           come first; plain shells follow in the same list style. -->
+      <ul id="agents" class="agents"></ul>
+      <section id="shells-wrap" hidden>
+        <h2 class="section">其它终端 <span id="shell-count"></span></h2>
+        <ul id="shells" class="agents"></ul>
+      </section>
+    </section>
+
+    <!-- Screen: one session. Plain text, plus the keys that matter. -->
+    <section id="detail" class="screen detail" hidden>
+      <header class="bar">
+        <button id="back" class="ghost" title="返回">‹ 返回</button>
+        <h1 id="detail-title">—</h1>
+        <span id="detail-state" class="dot" data-state="idle"></span>
+      </header>
+
+      <pre id="output" class="output" tabindex="0"></pre>
+
+      <!-- The key bar. Without it a soft keyboard cannot send Esc or Ctrl-C,
+           which is the difference between a usable client and a demo. -->
+      <div class="keys" role="toolbar" aria-label="快捷键">
+        <button data-key="escape">Esc</button>
+        <button data-key="tab">Tab</button>
+        <button data-key="ctrl-c" class="danger">^C</button>
+        <button data-key="up">↑</button>
+        <button data-key="down">↓</button>
+        <button data-key="left">←</button>
+        <button data-key="right">→</button>
+        <button data-key="enter">⏎</button>
+        <button data-key="backspace">⌫</button>
+        <button data-key="ctrl-d">^D</button>
+        <button data-key="ctrl-z">^Z</button>
+        <button data-key="ctrl-l">^L</button>
+      </div>
+
+      <form id="send" class="send">
+        <input
+          id="input"
+          type="text"
+          autocomplete="off"
+          autocapitalize="off"
+          autocorrect="off"
+          spellcheck="false"
+          placeholder="输入…"
+        />
+        <button type="submit" class="primary">发送</button>
+      </form>
+    </section>
+
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "name": "terry-webapp-test",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node interaction.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1"
+  }
+}
