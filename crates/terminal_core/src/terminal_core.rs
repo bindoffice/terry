@@ -9,6 +9,7 @@
 //! (which has no GUI at all) need to turn PTY bytes into cells and lines. They
 //! must agree on the result, so the code lives here instead of in either one.
 
+pub mod keys;
 pub mod palette;
 pub mod screen_json;
 
@@ -159,6 +160,18 @@ impl Emulator {
     /// The terminal (OSC 0/2) title, empty when unset.
     pub fn title(&self) -> String {
         self.title.title()
+    }
+
+    /// Modes that change how a client must encode keys.
+    ///
+    /// Surfaces `DECCKM` only: a client needs it to choose between `ESC [ A` and
+    /// `ESC O A`, and getting it wrong injects literal escape sequences into
+    /// whatever full-screen program is running.
+    pub fn key_modes(&self) -> crate::keys::KeyModes {
+        use alacritty_terminal::term::TermMode;
+        crate::keys::KeyModes {
+            application_cursor: self.term.mode().contains(TermMode::APP_CURSOR),
+        }
     }
 
     pub fn screen_snapshot(&self) -> ScreenSnapshot {
