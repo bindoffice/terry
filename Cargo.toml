@@ -23,6 +23,7 @@ category = "public.app-category.developer-tools"
 minimum_system_version = "11.0"
 
 [dependencies]
+agent_catalog.workspace = true
 anyhow.workspace = true
 agent_detect.workspace = true
 assets.workspace = true
@@ -111,6 +112,7 @@ members = [
     "crates/acp_thread",
     "crates/action_log",
     "crates/agent",
+    "crates/agent_catalog",
     "crates/agent_detect",
     "crates/agent_servers",
     "crates/agent_settings",
@@ -328,6 +330,7 @@ acp_thread = { path = "crates/acp_thread" }
 action_log = { path = "crates/action_log" }
 activity_indicator = { path = "crates/activity_indicator" }
 agent = { path = "crates/agent" }
+agent_catalog = { path = "crates/agent_catalog" }
 agent_detect = { path = "crates/agent_detect" }
 terminal_core = { path = "crates/terminal_core" }
 agent_servers = { path = "crates/agent_servers" }

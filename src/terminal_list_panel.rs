@@ -152,422 +152,23 @@ struct RememberedAgentSession {
 const PARKED_AGENT_SESSION_LIMIT: usize = 8;
 const REMEMBERED_AGENT_SESSION_LIMIT: usize = 8;
 
-/// Public CLI commands for continuing, listing, or forking a coding-agent
-/// session. `{bin}` is replaced with an allowlisted executable name.
-///
-/// Commands are only set when the CLI documents a one-shot flag or subcommand.
-/// Agents without a published command stay detected so a live process can be
-/// reattached, and do not get a guessed flag.
-struct AgentCli {
-    id: &'static str,
-    names: &'static [&'static str],
-    bin: &'static str,
-    resume: Option<&'static str>,
-    past: Option<&'static str>,
-    fork: Option<&'static str>,
-}
-
-fn coding_agents() -> &'static [AgentCli] {
-    &[
-        AgentCli {
-            id: "claude",
-            names: &["claude", "claude-code"],
-            bin: "claude",
-            resume: Some("{bin} --continue"),
-            past: Some("{bin} --resume"),
-            fork: Some("{bin} --continue --fork-session"),
-        },
-        AgentCli {
-            id: "codex",
-            names: &["codex"],
-            bin: "codex",
-            resume: Some("{bin} resume --last"),
-            past: Some("{bin} resume"),
-            fork: Some("{bin} fork"),
-        },
-        AgentCli {
-            id: "trae",
-            names: &["traecli", "trae", "traecode"],
-            bin: "traecli",
-            resume: Some("{bin} resume"),
-            past: None,
-            fork: Some("{bin} fork"),
-        },
-        AgentCli {
-            id: "opencode",
-            names: &["opencode"],
-            bin: "opencode",
-            resume: Some("{bin} --continue"),
-            past: None,
-            fork: Some("{bin} --continue --fork"),
-        },
-        AgentCli {
-            id: "omp",
-            names: &["omp", "oh-my-pi"],
-            bin: "omp",
-            resume: Some("{bin} --continue"),
-            past: Some("{bin} --resume"),
-            // `--fork` requires a session id, so there is no one-shot command.
-            fork: None,
-        },
-        AgentCli {
-            id: "qoder",
-            names: &["qoder", "qodercli"],
-            bin: "qoder",
-            resume: Some("{bin} -c"),
-            past: Some("{bin} -r"),
-            fork: Some("{bin} --fork-session -r"),
-        },
-        AgentCli {
-            id: "qoder-cn",
-            names: &["qoder-cn"],
-            bin: "qoder-cn",
-            resume: Some("{bin} -c"),
-            past: Some("{bin} -r"),
-            fork: Some("{bin} --fork-session -r"),
-        },
-        AgentCli {
-            id: "gemini",
-            names: &["gemini"],
-            bin: "gemini",
-            resume: Some("{bin} --resume"),
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "cursor",
-            names: &["cursor-agent", "cursor"],
-            bin: "cursor-agent",
-            resume: Some("{bin} --resume"),
-            past: None,
-            fork: None,
-        },
-        // Detected, and a still-running process is reattached. No documented
-        // one-shot resume, fork, or past-session command.
-        AgentCli {
-            id: "grok",
-            names: &["grok"],
-            bin: "grok",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "prime",
-            names: &["prime-agent", "prime"],
-            bin: "prime-agent",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "droid",
-            names: &["droid"],
-            bin: "droid",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "qwen",
-            names: &["qwen", "qwen-code"],
-            bin: "qwen",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "goose",
-            names: &["goose"],
-            bin: "goose",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "codebuddy",
-            names: &["codebuddy"],
-            bin: "codebuddy",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "copilot",
-            names: &["copilot"],
-            bin: "copilot",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "kimi",
-            names: &["kimi"],
-            bin: "kimi",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "pi",
-            names: &["pi"],
-            bin: "pi",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        // Terry's built-in coding agent. It is the `tom` subcommand of Terry's
-        // own binary, so the shim on PATH is what runs. `-c` continues the most
-        // recent session for the working directory, which is what a reopened
-        // tab wants.
-        AgentCli {
-            id: "tom",
-            names: &["tom"],
-            bin: "tom",
-            resume: Some("{bin} -c"),
-            past: Some("{bin} -r"),
-            fork: None,
-        },
-        AgentCli {
-            id: "crush",
-            names: &["crush"],
-            bin: "crush",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "antigravity",
-            names: &["agy", "antigravity"],
-            bin: "agy",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "aider",
-            names: &["aider"],
-            bin: "aider",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "amp",
-            names: &["amp"],
-            bin: "amp",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "auggie",
-            names: &["auggie"],
-            bin: "auggie",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "hermes",
-            names: &["hermes"],
-            bin: "hermes",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "vibe",
-            names: &["vibe"],
-            bin: "vibe",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "empryo",
-            names: &["empryo"],
-            bin: "empryo",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "cline",
-            names: &["cline"],
-            bin: "cline",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "devin",
-            names: &["devin", "devin-cli"],
-            bin: "devin",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "mastracode",
-            names: &["mastracode", "mastra-code"],
-            bin: "mastracode",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "kiro",
-            names: &["kiro", "kiro-cli"],
-            bin: "kiro-cli",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "kilo",
-            names: &["kilo", "kilo-code"],
-            bin: "kilo",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "letta",
-            names: &["letta", "letta-code"],
-            bin: "letta",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "maki",
-            names: &["maki"],
-            bin: "maki",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-        AgentCli {
-            id: "muse",
-            names: &["muse", "muse-code", "muse-cli"],
-            bin: "muse",
-            resume: None,
-            past: None,
-            fork: None,
-        },
-    ]
-}
-
-fn command_basename(name: &str) -> String {
-    let base = name
-        .rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(name);
-    let base = base
-        .strip_suffix(".exe")
-        .or_else(|| base.strip_suffix(".EXE"))
-        .unwrap_or(base);
-    base.to_ascii_lowercase()
-}
-
-fn agent_for_basename(base: &str) -> Option<&'static AgentCli> {
-    coding_agents().iter().find(|agent| {
-        agent.names.iter().any(|name| {
-            base == *name
-                || base.starts_with(&format!("{name}-"))
-                || base.starts_with(&format!("{name}_"))
-        })
-    })
-}
-
-/// Recognises coding agents installed as npm packages.
-///
-/// npm-installed CLIs run as `node .../node_modules/<package>/dist/cli.js`, so
-/// the foreground process name is the runtime (`node`) rather than the agent.
-/// Matching the package entry point keeps those terminals identifiable.
-fn agent_for_package_path(path: &str) -> Option<&'static AgentCli> {
-    let normalized = path.replace('\\', "/").to_ascii_lowercase();
-
-    const PACKAGES: &[(&str, &str)] = &[
-        (
-            "node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
-            "pi",
-        ),
-        (
-            "node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
-            "pi",
-        ),
-        ("node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js", "omp"),
-        ("node_modules/@moonshot-ai/kimi-code/dist/main.mjs", "kimi"),
-        ("node_modules/@qwen-code/qwen-code/dist/index.js", "qwen"),
-        ("node_modules/@qwen-code/qwen-code/dist/index.mjs", "qwen"),
-        ("node_modules/mastracode/dist/cli", "mastracode"),
-        ("node_modules/mastracode/dist/cli.js", "mastracode"),
-        ("node_modules/@letta-ai/letta-code/letta", "letta"),
-    ];
-
-    for (suffix, id) in PACKAGES {
-        if normalized.ends_with(suffix) {
-            return agent_by_id(id);
-        }
-    }
-    None
-}
+// The catalogue of coding agents -- which CLIs exist, how to launch them, and
+// how to recognise them -- lives in `agent_catalog`, which has no gpui
+// dependency. The terminal daemon needs the same answers for a phone client, so
+// duplicating the table here would let the two drift apart.
+use agent_catalog::{
+    AgentCli, agent_by_id, agent_command, agent_for_basename, agent_for_package_path,
+    agent_mentioned_in_text, coding_agents, invocation_bin, is_coding_agent_name,
+    session_resume_command, text_mentions_coding_agent,
+};
 
 /// Coding agent running in `terminal`, matching either the process name or the
 /// npm package entry point of a runtime-hosted CLI.
-fn coding_agent_for_terminal(terminal: &terminal::Terminal) -> Option<&'static AgentCli> {
-    if let Some(command) = terminal.foreground_process_command_name() {
-        let base = command_basename(&command);
-        if let Some(agent) = agent_for_basename(&base) {
-            return Some(agent);
-        }
-    }
-    terminal
-        .foreground_process_script_path()
-        .as_deref()
-        .and_then(agent_for_package_path)
-}
-
-fn invocation_bin(agent: &'static AgentCli, base: &str) -> &'static str {
-    agent
-        .names
-        .iter()
-        .copied()
-        .find(|name| *name == base)
-        .unwrap_or(agent.bin)
-}
-
-fn agent_command(template: &str, bin: &str) -> String {
-    template.replace("{bin}", bin)
-}
-
-/// One-shot resume command for a session reported by an integration.
-fn agent_session_resume_command(agent_id: &str, session: &str) -> Option<String> {
-    let template = match agent_id {
-        "pi" => "{bin} --session {session}",
-        "opencode" => "{bin} --session {session}",
-        "claude" => "{bin} --resume {session}",
-        "kimi" => "{bin} --session {session}",
-        "qwen" => "{bin} --resume {session}",
-        "codex" => "{bin} resume {session}",
-        // tom resumes a specific session by id.
-        "tom" => "{bin} -r {session}",
-        _ => return None,
-    };
-    let agent = agent_by_id(agent_id)?;
-    Some(
-        template
-            .replace("{bin}", agent.bin)
-            .replace("{session}", &shell_quote(session)),
-    )
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
+///
+/// This stays here rather than in `agent_catalog` because it reads a live
+/// `terminal::Terminal`: the daemon has a PTY master and no such view, and gets
+/// the agent from an integration report instead.
+/// Joins a program and its arguments into one shell command line.
 fn shell_command(shell_kind: task::ShellKind, program: &str, args: &[String]) -> String {
     let mut command = String::new();
     for arg in std::iter::once(program).chain(args.iter().map(String::as_str)) {
@@ -576,7 +177,7 @@ fn shell_command(shell_kind: task::ShellKind, program: &str, args: &[String]) ->
         }
         match shell_kind.try_quote(arg) {
             Some(quoted) => command.push_str(&quoted),
-            None => command.push_str(&shell_quote(arg)),
+            None => command.push_str(&agent_catalog::shell_quote(arg)),
         }
     }
     command
@@ -605,28 +206,17 @@ fn local_command_profile(
     }
 }
 
-fn agent_by_id(id: &str) -> Option<&'static AgentCli> {
-    coding_agents().iter().find(|agent| agent.id == id)
-}
-
-fn is_coding_agent_name(name: &str) -> bool {
-    agent_for_basename(&command_basename(name)).is_some()
-}
-
-fn text_mentions_coding_agent(text: &str) -> bool {
-    agent_mentioned_in_text(text).is_some()
-}
-
-fn agent_mentioned_in_text(text: &str) -> Option<(&'static AgentCli, &'static str)> {
-    // Short command names (pi, amp, omp, agy) match process names only.
-    // Matching them inside a title produces false positives.
-    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
-        .filter(|token| token.chars().count() >= 4)
-        .find_map(|token| {
-            let base = command_basename(token);
-            let agent = agent_for_basename(&base)?;
-            Some((agent, invocation_bin(agent, &base)))
-        })
+fn coding_agent_for_terminal(terminal: &terminal::Terminal) -> Option<&'static AgentCli> {
+    if let Some(command) = terminal.foreground_process_command_name() {
+        let base = agent_catalog::command_basename(&command);
+        if let Some(agent) = agent_for_basename(&base) {
+            return Some(agent);
+        }
+    }
+    terminal
+        .foreground_process_script_path()
+        .as_deref()
+        .and_then(agent_for_package_path)
 }
 
 fn coding_agent_from_view(
@@ -635,7 +225,7 @@ fn coding_agent_from_view(
 ) -> Option<(&'static AgentCli, &'static str)> {
     let terminal = view.read(cx).terminal().read(cx);
     if let Some(name) = terminal.foreground_process_command_name() {
-        let base = command_basename(&name);
+        let base = agent_catalog::command_basename(&name);
         if let Some(agent) = agent_for_basename(&base) {
             return Some((agent, invocation_bin(agent, &base)));
         }
@@ -3046,7 +2636,7 @@ impl TerminalListPanel {
             } = p_term;
             let init_command = agent_session
                 .as_ref()
-                .and_then(|session| agent_session_resume_command(&session.agent, &session.value));
+                .and_then(|session| session_resume_command(&session.agent, &session.value));
             // Replay the original launch (named profile, `ssh`, `tmux`, ...)
             // instead of opening a plain shell. A profile that no longer exists
             // falls back to the default shell rather than failing the restore.
@@ -4992,7 +4582,7 @@ impl TerminalListPanel {
         } = closed.terminal;
         let init_command = agent_session
             .as_ref()
-            .and_then(|session| agent_session_resume_command(&session.agent, &session.value));
+            .and_then(|session| session_resume_command(&session.agent, &session.value));
         let (profile, launch) = Self::resolve_persisted_launch(launch, cx);
         self.spawn_terminal(
             group_id,

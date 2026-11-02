@@ -1,0 +1,18 @@
+[package]
+name = "agent_catalog"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/agent_catalog.rs"
+doctest = false
+
+# Pure data plus string matching: no gpui, no terminal, no IO. Both the GUI
+# (which draws badges) and the terminal daemon (which has no window at all)
+# need to know how to launch and recognise an agent, and they must agree.
+[dependencies]
