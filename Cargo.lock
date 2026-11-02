@@ -15908,6 +15908,8 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "uuid",
+ "win32job",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -18019,6 +18021,16 @@ dependencies = [
  "quote",
  "syn 2.0.117",
  "wiggle-generate",
+]
+
+[[package]]
+name = "win32job"
+version = "2.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c6a6724ccfbf34154a8691bd868b0fcd2be2ca3f7b47b32614654f1a01b191c"
+dependencies = [
+ "thiserror 1.0.69",
+ "windows 0.61.3",
 ]
 
 [[package]]

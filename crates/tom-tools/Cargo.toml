@@ -50,5 +50,11 @@ image = { workspace = true }
 # advertised MIME type).
 webp = []
 
+[target.'cfg(windows)'.dependencies]
+# `CREATE_NO_WINDOW` / `CREATE_SUSPENDED` for the hidden shell and `chcp`
+# probes; the job object that reaps an MSYS shell's descendants.
+win32job = "2"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["process", "signal"] }
