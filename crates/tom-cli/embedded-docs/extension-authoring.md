@@ -607,7 +607,7 @@ Linux/macOS 使用冒号分隔。命令行和环境变量适合本机开发、CI
 新增供应商优先在包内添加模块；只有根模块导出一次 `export_plugin!`，各模块共用注册桥接。
 provider ID、目录与凭据继续独立。单 provider 教学样例才使用 `export_provider!`。
 
-完整规范：[Provider 接入规范](https://github.com/bigfish1913/tom/blob/feature-stream-porider/docs/extensions/provider-integration.md)。创建推理扩展时优先复制
+完整规范：[Provider 接入规范](https://github.com/solos/tom/blob/feature-stream-porider/docs/extensions/provider-integration.md)。创建推理扩展时优先复制
 正式 provider package 示例见 [tom-providers](https://github.com/tom/tom-package/tree/feature-1014/packages/tom-providers)，通用工具扩展再使用 `plugin-stub`。当前接入约定如下。
 
 ### 方式与目录

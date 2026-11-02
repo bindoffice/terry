@@ -5,9 +5,9 @@
 [![docs.rs](https://docs.rs/tom-cli/badge.svg)](https://docs.rs/tom-cli)
 [![license](https://img.shields.io/crates/l/tom-cli.svg)](#license)
 [![MSRV](https://img.shields.io/badge/MSRV-1.88-blue.svg)](#install)
-[![CI](https://github.com/bigfish1913/tom/actions/workflows/ci.yml/badge.svg)](https://github.com/bigfish1913/tom/actions/workflows/ci.yml)
-[![GitHub stars](https://img.shields.io/github/stars/bigfish1913/tom?style=flat)](https://github.com/bigfish1913/tom/stargazers)
-[![Latest release](https://img.shields.io/github/v/release/bigfish1913/tom)](https://github.com/bigfish1913/tom/releases/latest)
+[![CI](https://github.com/solos/tom/actions/workflows/ci.yml/badge.svg)](https://github.com/solos/tom/actions/workflows/ci.yml)
+[![GitHub stars](https://img.shields.io/github/stars/solos/tom?style=flat)](https://github.com/solos/tom/stargazers)
+[![Latest release](https://img.shields.io/github/v/release/solos/tom)](https://github.com/solos/tom/releases/latest)
 
 `tom` is a library-first coding-agent runtime written in Rust, plus a terminal
 agent built on top of it. Nine composable crates span provider adapters, a
@@ -17,7 +17,7 @@ the same code works as an embedded SDK or as a ready-to-run `tom` command.
 tom began as a Rust reimplementation of the [Pi TypeScript SDK](https://github.com/earendil-works/pi)
 by Mario Zechner. It now includes its own Rust-native plugin ABI and execution
 infrastructure. See [Acknowledgements](#acknowledgements) and the repository's
-[NOTICE](https://github.com/bigfish1913/tom/blob/main/NOTICE) for upstream attribution.
+[NOTICE](https://github.com/solos/tom/blob/main/NOTICE) for upstream attribution.
 
 Website: <https://tom.bigfisharc.cn/> · Docs: <https://tom.bigfisharc.cn/docs.html>
 
@@ -47,7 +47,7 @@ project layout.
 **Prebuilt binary** (no Rust toolchain needed):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bigfish1913/tom/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/solos/tom/main/scripts/install.sh | sh
 ```
 
 Verifies the published SHA-256 checksum and installs to `/usr/local/bin` or
@@ -76,7 +76,7 @@ review](https://github.com/microsoft/winget-pkgs/pull/444745).
 **From source:**
 
 ```bash
-git clone https://github.com/bigfish1913/tom.git
+git clone https://github.com/solos/tom.git
 cd tom && cargo run -p minimal   # offline agent, no API key required
 ```
 
@@ -367,7 +367,7 @@ fail explicitly rather than starting a subprocess with different defaults.
 
 The SDK entry point is `AgentHarness::create_child`; extensions use
 `GetExecutionContext` and `ChildAgent` runtime actions. See the
-[subagent protocol](https://github.com/bigfish1913/tom/blob/main/docs/extensions/subagents.md)
+[subagent protocol](https://github.com/solos/tom/blob/main/docs/extensions/subagents.md)
 for lifecycle, limits and compatibility details.
 
 ### Authoring an extension
@@ -404,7 +404,7 @@ machine. See [`docs/remote/user-guide.md`](docs/remote/user-guide.md).
 
 | | |
 | --- | --- |
-| Current release | **[0.16.0](https://github.com/bigfish1913/tom/releases)** (nine crates, published together) |
+| Current release | **[0.16.0](https://github.com/solos/tom/releases)** (nine crates, published together) |
 | Stability | `tom-ai`, `tom-agent`, `tom-tools`, `tom-harness`, `tom-plugin-sdk` are the intended stable surface |
 | MSRV | 1.88 |
 | Platforms | Linux, macOS, Windows (CI runs the suite on Linux) |
@@ -419,7 +419,7 @@ required and none is loaded.
 - [Architecture](docs/architecture/overview.md) — how the crates fit together and why
 - [Building an agent project](docs/agent/project-structure.md) — recommended structure
 - [Extension authoring](docs/extensions/authoring.md) — plugin templates and ABI rules
-- [Subagents](https://github.com/bigfish1913/tom/blob/main/docs/extensions/subagents.md) — configuration inheritance, permissions and lifecycle
+- [Subagents](https://github.com/solos/tom/blob/main/docs/extensions/subagents.md) — configuration inheritance, permissions and lifecycle
 - [Remote mode](docs/remote/user-guide.md) — protocol, tokens, limitations
 - [Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md)
 - [docs.rs](https://docs.rs/tom-cli) for per-crate API docs
@@ -469,4 +469,4 @@ The `tom-*` crates are a Rust-native coding-agent stack.
 
 ## Star history
 
-[![Star History Chart](https://api.star-history.com/svg?repos=bigfish1913/tom,tom/tom-package&type=Date)](https://www.star-history.com/#bigfish1913/tom&tom/tom-package&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=solos/tom,tom/tom-package&type=Date)](https://www.star-history.com/#solos/tom&tom/tom-package&Date)

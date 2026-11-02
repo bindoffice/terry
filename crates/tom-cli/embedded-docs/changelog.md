@@ -32,7 +32,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
   clipboard manager happened to take it over (LXQt/Openbox runs none), so the
   "Copied" toast was followed by an empty clipboard
 
-## [0.16.0](https://github.com/bigfish1913/tom/compare/v0.15.0...v0.16.0) - 2026-11-01
+## [0.16.0](https://github.com/solos/tom/compare/v0.15.0...v0.16.0) - 2026-11-01
 
 ### Added
 
@@ -87,7 +87,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - *(tui)* markdown table cells wrap without splitting a displayed Unicode sequence: `wrap_text_with_ansi`, `visible_width` and the per-column width floor now measure grapheme clusters (and whole ANSI-free spans) instead of summing scalars, so a ZWJ sequence (`👩‍💻`), a skin-tone modifier (`👍🏽`) or a VS16 sequence (`❤️`) stays on one row at ordinary and narrow terminal widths
 - *(tui)* pasted tab stops are measured on each complete tab-free span, so a tab after a width-sensitive Unicode sequence (`❤️`, `👩‍💻`, `👍🏽`) or a cross-grapheme ligature (Arabic Lam-Alef `لا`) lands on the same column the terminal shows instead of one or two columns off
 
-## [0.15.0](https://github.com/bigfish1913/tom/compare/v0.14.0...v0.15.0) - 2026-10-30
+## [0.15.0](https://github.com/solos/tom/compare/v0.14.0...v0.15.0) - 2026-10-30
 
 ### Added
 
@@ -136,7 +136,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Changed
 
-- **Breaking (RPC wire format):** `--mode rpc` now defaults to `compact-deltas`. Text, thinking, and tool-call delta updates omit the cumulative `message` and `assistantMessageEvent.partial` snapshots while retaining nested delta fields and the top-level `eventType`, `contentIndex`, and `delta` mirrors. `ready.semantics.messageUpdates` identifies the selected mode; a missing field means legacy `snapshot`. Upgrade remote clients and protocol adapters before deploying the new host. `--rpc-message-updates=snapshot` is an explicit, temporary migration fallback, not the long-term default. Structural events, authoritative final messages, settlement and canonical branch-query contracts, plugin serialization, and `--mode json` are unchanged. This is not a fully snapshot-free or lossless replay protocol. ([#171](https://github.com/bigfish1913/tom/issues/171))
+- **Breaking (RPC wire format):** `--mode rpc` now defaults to `compact-deltas`. Text, thinking, and tool-call delta updates omit the cumulative `message` and `assistantMessageEvent.partial` snapshots while retaining nested delta fields and the top-level `eventType`, `contentIndex`, and `delta` mirrors. `ready.semantics.messageUpdates` identifies the selected mode; a missing field means legacy `snapshot`. Upgrade remote clients and protocol adapters before deploying the new host. `--rpc-message-updates=snapshot` is an explicit, temporary migration fallback, not the long-term default. Structural events, authoritative final messages, settlement and canonical branch-query contracts, plugin serialization, and `--mode json` are unchanged. This is not a fully snapshot-free or lossless replay protocol. ([#171](https://github.com/solos/tom/issues/171))
 
 ### Fixed
 
@@ -144,7 +144,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - OpenAI Responses function-call deltas include any initial raw argument prefix exactly once on their first delta, matching the existing custom-tool behavior. This provider correctness fix applies to all event consumers; final message and snapshot contents are unchanged.
 - OpenAI Completions and Responses flush batched text/thinking before crossing channel/structural boundaries, preventing a snapshot from exposing content whose later compact delta would append it again. Real-provider offline SSE regressions compare both wire modes at every UI update.
 
-## [0.14.0](https://github.com/bigfish1913/tom/compare/v0.13.0...v0.14.0) - 2026-10-30
+## [0.14.0](https://github.com/solos/tom/compare/v0.13.0...v0.14.0) - 2026-10-30
 
 ### Added
 
@@ -153,19 +153,19 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 ### Fixed
 
 - *(rpc)* bound branch queries and preserve type identities
-- *(tui)* keep the editor's wrap width independent of the caret row ([#165](https://github.com/bigfish1913/tom/pull/165))
-- *(cli)* honor thinkingBudgets from settings.json ([#169](https://github.com/bigfish1913/tom/pull/169))
-- *(rpc)* support multi-type branch filters ([#159](https://github.com/bigfish1913/tom/pull/159))
-- *(rpc)* filter session branch reads ([#150](https://github.com/bigfish1913/tom/pull/150))
+- *(tui)* keep the editor's wrap width independent of the caret row ([#165](https://github.com/solos/tom/pull/165))
+- *(cli)* honor thinkingBudgets from settings.json ([#169](https://github.com/solos/tom/pull/169))
+- *(rpc)* support multi-type branch filters ([#159](https://github.com/solos/tom/pull/159))
+- *(rpc)* filter session branch reads ([#150](https://github.com/solos/tom/pull/150))
 - *(rpc)* drain commit events and notify partial batch commits
 - *(rpc)* publish session commit events for atomic entry writes
-- *(ai)* give xhigh and max their own thinking budgets ([#170](https://github.com/bigfish1913/tom/pull/170))
-- *(config)* keep compat on anthropic-messages models from models.json ([#168](https://github.com/bigfish1913/tom/pull/168))
+- *(ai)* give xhigh and max their own thinking budgets ([#170](https://github.com/solos/tom/pull/170))
+- *(config)* keep compat on anthropic-messages models from models.json ([#168](https://github.com/solos/tom/pull/168))
 
 ### Other
 
 - bring preview canonical branch queries into main
-- *(rpc)* [**breaking**] require canonical customTypes branch queries ([#160](https://github.com/bigfish1913/tom/pull/160))
+- *(rpc)* [**breaking**] require canonical customTypes branch queries ([#160](https://github.com/solos/tom/pull/160))
 - Merge remote-tracking branch 'origin/main' into HEAD
 - Merge branch 'main' into preview
 - cover RPC session commit publication
@@ -179,26 +179,26 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 - *(tui)* keep the editor's wrap width independent of the caret's row: a row used to wrap one column earlier while the caret sat on it, so the same draft reflowed (and the input box grew a line) once the caret moved away
 
-## [0.13.0](https://github.com/bigfish1913/tom/compare/v0.12.0...v0.13.0) - 2026-10-29
+## [0.13.0](https://github.com/solos/tom/compare/v0.12.0...v0.13.0) - 2026-10-29
 
 ### Fixed
 
-- *(tui)* keep Windows mouse selections aligned with painted frames ([#166](https://github.com/bigfish1913/tom/pull/166))
-- *(bash)* enforce a default tool execution timeout ([#164](https://github.com/bigfish1913/tom/pull/164))
-- *(cli)* say when the terminal cannot render inline images ([#161](https://github.com/bigfish1913/tom/pull/161))
+- *(tui)* keep Windows mouse selections aligned with painted frames ([#166](https://github.com/solos/tom/pull/166))
+- *(bash)* enforce a default tool execution timeout ([#164](https://github.com/solos/tom/pull/164))
+- *(cli)* say when the terminal cannot render inline images ([#161](https://github.com/solos/tom/pull/161))
 - *(cli)* classify session storage failures
 - *(cli)* stop footer counters freezing after dropped events
-- *(harness)* surface session write failures to the user ([#136](https://github.com/bigfish1913/tom/pull/136))
-- *(ai)* redact credentials from stream and image option debug output ([#154](https://github.com/bigfish1913/tom/pull/154))
-- *(bash)* read output while the command runs ([#163](https://github.com/bigfish1913/tom/pull/163))
-- *(tui)* crop kitty images to the viewport ([#158](https://github.com/bigfish1913/tom/pull/158))
+- *(harness)* surface session write failures to the user ([#136](https://github.com/solos/tom/pull/136))
+- *(ai)* redact credentials from stream and image option debug output ([#154](https://github.com/solos/tom/pull/154))
+- *(bash)* read output while the command runs ([#163](https://github.com/solos/tom/pull/163))
+- *(tui)* crop kitty images to the viewport ([#158](https://github.com/solos/tom/pull/158))
 
-## [0.12.0](https://github.com/bigfish1913/tom/compare/v0.11.1...v0.12.0) - 2026-10-28
+## [0.12.0](https://github.com/solos/tom/compare/v0.11.1...v0.12.0) - 2026-10-28
 
 ### Fixed
 
-- *(cli)* return to a restored session's working directory ([#141](https://github.com/bigfish1913/tom/pull/141))
-- *(tui)* mark kitty image chunks as continued ([#145](https://github.com/bigfish1913/tom/pull/145))
+- *(cli)* return to a restored session's working directory ([#141](https://github.com/solos/tom/pull/141))
+- *(tui)* mark kitty image chunks as continued ([#145](https://github.com/solos/tom/pull/145))
 
 ### Changed
 
@@ -208,21 +208,21 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 - *(tui)* switching to a session from another directory says where the session belongs instead of implying the tools moved
 
-## [0.11.1](https://github.com/bigfish1913/tom/compare/v0.11.0...v0.11.1) - 2026-10-28
+## [0.11.1](https://github.com/solos/tom/compare/v0.11.0...v0.11.1) - 2026-10-28
 
 ### Added
 
-- *(rpc)* publish session entry commit invalidations ([#147](https://github.com/bigfish1913/tom/pull/147))
+- *(rpc)* publish session entry commit invalidations ([#147](https://github.com/solos/tom/pull/147))
 
 ### Fixed
 
-- *(cli)* resolve CLI updates from GitHub releases ([#146](https://github.com/bigfish1913/tom/pull/146))
+- *(cli)* resolve CLI updates from GitHub releases ([#146](https://github.com/solos/tom/pull/146))
 
 ### Other
 
-- *(agent)* cover provider cache invalidation ([#148](https://github.com/bigfish1913/tom/pull/148))
+- *(agent)* cover provider cache invalidation ([#148](https://github.com/solos/tom/pull/148))
 
-## [0.11.0](https://github.com/bigfish1913/tom/compare/v0.10.1...v0.11.0) - 2026-10-27
+## [0.11.0](https://github.com/solos/tom/compare/v0.10.1...v0.11.0) - 2026-10-27
 
 ### Added
 
@@ -242,7 +242,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - rustfmt the new prompt test
 - make stable release preparation manual
 
-## [0.10.1](https://github.com/bigfish1913/tom/compare/v0.10.0...v0.10.1) - 2026-10-27
+## [0.10.1](https://github.com/solos/tom/compare/v0.10.0...v0.10.1) - 2026-10-27
 
 ### Added
 
@@ -264,7 +264,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - *(cli)* compare the completed path reference by normalized separator
 - Merge branch 'main' into fix/fork-session-file
 
-## [0.10.0](https://github.com/bigfish1913/tom/compare/v0.9.6...v0.10.0) - 2026-10-27
+## [0.10.0](https://github.com/solos/tom/compare/v0.9.6...v0.10.0) - 2026-10-27
 
 ### Added
 
@@ -318,27 +318,27 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - Preserve SQLite concurrent writes and restore state after persistence failure.
 - Validate operation starts across batched record/message writes.
 
-## [0.9.6](https://github.com/bigfish1913/tom/compare/v0.9.5...v0.9.6) - 2026-10-27
+## [0.9.6](https://github.com/solos/tom/compare/v0.9.5...v0.9.6) - 2026-10-27
 
 ### Fixed
 
 - *(cli)* preserve the two-argument default system prompt API for existing library callers
-- *(prompt)* list only the active tools and drop guidelines for absent ones ([#119](https://github.com/bigfish1913/tom/pull/119))
-- *(edit)* the display diff shows replaced lines old then new ([#121](https://github.com/bigfish1913/tom/pull/121))
+- *(prompt)* list only the active tools and drop guidelines for absent ones ([#119](https://github.com/solos/tom/pull/119))
+- *(edit)* the display diff shows replaced lines old then new ([#121](https://github.com/solos/tom/pull/121))
 
-## [0.9.5](https://github.com/bigfish1913/tom/compare/v0.9.4...v0.9.5) - 2026-10-27
+## [0.9.5](https://github.com/solos/tom/compare/v0.9.4...v0.9.5) - 2026-10-27
 
 ### Fixed
 
-- *(tui)* recognize Shift+Enter on Windows via native key state ([#108](https://github.com/bigfish1913/tom/pull/108))
+- *(tui)* recognize Shift+Enter on Windows via native key state ([#108](https://github.com/solos/tom/pull/108))
 
-## [0.9.4](https://github.com/bigfish1913/tom/compare/v0.9.3...v0.9.4) - 2026-10-26
+## [0.9.4](https://github.com/solos/tom/compare/v0.9.3...v0.9.4) - 2026-10-26
 
 ### Fixed
 
 - *(cli)* keep dev build output out of the TUI
 
-## [0.9.3](https://github.com/bigfish1913/tom/compare/v0.9.2...v0.9.3) - 2026-10-26
+## [0.9.3](https://github.com/solos/tom/compare/v0.9.2...v0.9.3) - 2026-10-26
 
 ### Added
 
@@ -352,21 +352,21 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ### Other
 
-- keep the workspace buildable on the declared Rust 1.78 MSRV ([#112](https://github.com/bigfish1913/tom/pull/112))
+- keep the workspace buildable on the declared Rust 1.78 MSRV ([#112](https://github.com/solos/tom/pull/112))
 
-## [0.9.2](https://github.com/bigfish1913/tom/compare/v0.9.1...v0.9.2) - 2026-10-25
-
-### Fixed
-
-- *(cli)* restore the session's model and footer usage on switch ([#104](https://github.com/bigfish1913/tom/pull/104))
-
-## [0.9.1](https://github.com/bigfish1913/tom/compare/v0.9.0...v0.9.1) - 2026-10-25
+## [0.9.2](https://github.com/solos/tom/compare/v0.9.1...v0.9.2) - 2026-10-25
 
 ### Fixed
 
-- *(cli)* stop buffering IME commits as pastes on Windows ([#91](https://github.com/bigfish1913/tom/pull/91))
+- *(cli)* restore the session's model and footer usage on switch ([#104](https://github.com/solos/tom/pull/104))
 
-## [0.9.0](https://github.com/bigfish1913/tom/compare/v0.8.5...v0.9.0) - 2026-10-25
+## [0.9.1](https://github.com/solos/tom/compare/v0.9.0...v0.9.1) - 2026-10-25
+
+### Fixed
+
+- *(cli)* stop buffering IME commits as pastes on Windows ([#91](https://github.com/solos/tom/pull/91))
+
+## [0.9.0](https://github.com/solos/tom/compare/v0.8.5...v0.9.0) - 2026-10-25
 
 ### Added
 
@@ -388,13 +388,13 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - remove zero-copy from plugin sdk
 - compare zero-copy with json and cbor
 
-## [0.8.5](https://github.com/bigfish1913/tom/compare/v0.8.4...v0.8.5) - 2026-10-24
+## [0.8.5](https://github.com/solos/tom/compare/v0.8.4...v0.8.5) - 2026-10-24
 
 ### Fixed
 
-- *(cli)* rebuild the banner and start a real session on /new ([#98](https://github.com/bigfish1913/tom/pull/98))
+- *(cli)* rebuild the banner and start a real session on /new ([#98](https://github.com/solos/tom/pull/98))
 
-## [0.8.4](https://github.com/bigfish1913/tom/compare/v0.8.3...v0.8.4) - 2026-10-23
+## [0.8.4](https://github.com/solos/tom/compare/v0.8.3...v0.8.4) - 2026-10-23
 
 ### Added
 
@@ -409,7 +409,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - *(ai)* clarify bounded stream API and async production
 - *(extensions)* await applied metadata before saturation cancellation
 
-## [0.8.3](https://github.com/bigfish1913/tom/compare/v0.8.2...v0.8.3) - 2026-10-23
+## [0.8.3](https://github.com/solos/tom/compare/v0.8.2...v0.8.3) - 2026-10-23
 
 ### Added
 
@@ -426,7 +426,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - record provider context reuse and shutdown checks
 - verify plugin workers join before DLL unload
 
-## [0.8.2](https://github.com/bigfish1913/tom/compare/v0.8.1...v0.8.2) - 2026-10-23
+## [0.8.2](https://github.com/solos/tom/compare/v0.8.1...v0.8.2) - 2026-10-23
 
 ### Added
 
@@ -448,7 +448,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - consolidate provider transport and session fixes
 - *(cli)* isolate and restore session directory overrides
 
-## [0.8.1](https://github.com/bigfish1913/tom/compare/v0.8.0...v0.8.1) - 2026-10-23
+## [0.8.1](https://github.com/solos/tom/compare/v0.8.0...v0.8.1) - 2026-10-23
 
 ### Added
 
@@ -469,7 +469,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - measure idle tool workers and check Windows ownership
 - *(harness)* serialize run budget environment tests
 
-## [0.8.0](https://github.com/bigfish1913/tom/compare/v0.7.1...v0.8.0) - 2026-10-22
+## [0.8.0](https://github.com/solos/tom/compare/v0.7.1...v0.8.0) - 2026-10-22
 
 ### Fixed
 
@@ -482,11 +482,11 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - compact exactly reconstructible provider text deltas
 - use the current stream API in compaction fixtures
 
-## [0.7.1](https://github.com/bigfish1913/tom/compare/v0.7.0...v0.7.1) - 2026-10-21
+## [0.7.1](https://github.com/solos/tom/compare/v0.7.0...v0.7.1) - 2026-10-21
 
 ### Fixed
 
-- *(cli)* reject web startup without its server extension ([#76](https://github.com/bigfish1913/tom/pull/76))
+- *(cli)* reject web startup without its server extension ([#76](https://github.com/solos/tom/pull/76))
 - keep snapshot benchmark features buildable independently
 
 ### Other
@@ -494,33 +494,33 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 - remove redundant provider snapshot conversions
 - add offline provider pipeline allocation benchmark
 
-## [0.7.0](https://github.com/bigfish1913/tom/compare/v0.6.3...v0.7.0) - 2026-10-21
+## [0.7.0](https://github.com/solos/tom/compare/v0.6.3...v0.7.0) - 2026-10-21
 
 ### Fixed
 
-- *(rpc)* publish native workspace and ACP protocol support ([#71](https://github.com/bigfish1913/tom/pull/71))
+- *(rpc)* publish native workspace and ACP protocol support ([#71](https://github.com/solos/tom/pull/71))
 
-## [0.6.3](https://github.com/bigfish1913/tom/compare/v0.6.2...v0.6.3) - 2026-10-20
+## [0.6.3](https://github.com/solos/tom/compare/v0.6.2...v0.6.3) - 2026-10-20
 
 ### Other
 
 - update README website links to tom.bigfisharc.cn
 - *(sdk)* consolidate provider bridge into optional SDK feature
 
-## [0.6.2](https://github.com/bigfish1913/tom/compare/v0.6.1...v0.6.2) - 2026-10-19
+## [0.6.2](https://github.com/solos/tom/compare/v0.6.1...v0.6.2) - 2026-10-19
 
 ### Fixed
 
 - *(tui)* restore iTerm2 queue editing and cross-provider model cycling
 
-## [0.6.1](https://github.com/bigfish1913/tom/compare/v0.6.0...v0.6.1) - 2026-10-19
+## [0.6.1](https://github.com/solos/tom/compare/v0.6.0...v0.6.1) - 2026-10-19
 
 ### Fixed
 
 - *(tui)* repaint the frame when the terminal is resized
 - *(tui)* preserve legacy resize repaint behavior
 
-## [0.6.0](https://github.com/bigfish1913/tom/compare/v0.5.1...v0.6.0) - 2026-10-18
+## [0.6.0](https://github.com/solos/tom/compare/v0.5.1...v0.6.0) - 2026-10-18
 
 ### Added
 
@@ -535,7 +535,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 - *(cli)* format side-question module declaration
 
-## [0.5.1](https://github.com/bigfish1913/tom/compare/v0.5.0...v0.5.1) - 2026-10-18
+## [0.5.1](https://github.com/solos/tom/compare/v0.5.0...v0.5.1) - 2026-10-18
 
 ### Fixed
 
@@ -550,7 +550,7 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 - clarify Pi attribution and 0.5.0 extension capabilities [skip ci]
 
-## [0.5.0](https://github.com/bigfish1913/tom/compare/v0.4.1...v0.5.0) - 2026-10-17
+## [0.5.0](https://github.com/solos/tom/compare/v0.4.1...v0.5.0) - 2026-10-17
 
 ### Added
 
@@ -1666,9 +1666,9 @@ on `main` and fixes how every crate presents itself on crates.io and docs.rs.
 Early crates.io publications while the workspace layout, provider layer and
 agent loop were being established. See `git log` for details.
 
-[Unreleased]: https://github.com/bigfish1913/tom/compare/v0.3.3...HEAD
-[0.3.3]: https://github.com/bigfish1913/tom/compare/v0.3.2...v0.3.3
-[0.3.2]: https://github.com/bigfish1913/tom/compare/v0.3.1...v0.3.2
-[0.3.1]: https://github.com/bigfish1913/tom/compare/v0.3.0...v0.3.1
-[0.3.0]: https://github.com/bigfish1913/tom/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/bigfish1913/tom/compare/v0.1.28...v0.2.0
+[Unreleased]: https://github.com/solos/tom/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/solos/tom/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/solos/tom/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/solos/tom/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/solos/tom/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/solos/tom/compare/v0.1.28...v0.2.0

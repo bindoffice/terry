@@ -18,7 +18,7 @@ tom --help
 从本仓库源码安装开发版本：
 
 ```bash
-git clone https://github.com/bigfish1913/tom.git
+git clone https://github.com/solos/tom.git
 cd tom
 cargo install --path crates/tom-cli --force
 ```
@@ -420,7 +420,7 @@ tom install tom-subagents
 宿主与扩展需同时支持对应协议；旧宿主明确要求升级，不回退到默认配置的子进程。
 SDK 提供 `AgentHarness::create_child`，扩展通过 `GetExecutionContext` 和 `ChildAgent`
 runtime actions 接入。完整协议见仓库 `docs/extensions/subagents.md`：
-<https://github.com/bigfish1913/tom/blob/main/docs/extensions/subagents.md>。
+<https://github.com/solos/tom/blob/main/docs/extensions/subagents.md>。
 
 ## 7. SDK 集成
 
@@ -500,7 +500,7 @@ Release PR；维护者需要在 `Actions → CI → Run workflow` 中选择 `mai
 `prepare_release`。只有合并符合条件的 Release PR 才会发布。发布记录统一维护在根目录
 `CHANGELOG.md`，不再新建 `docs/release-vX.Y.Z.md`。完整流程与纯文档不发布的处理方式
 见仓库 `docs/maintaining/releasing.md`：
-<https://github.com/bigfish1913/tom/blob/main/docs/maintaining/releasing.md>。
+<https://github.com/solos/tom/blob/main/docs/maintaining/releasing.md>。
 
 修改模型可读文档源 `docs/tom-tool/` 后运行 `sh scripts/sync-embedded-docs.sh` 并提交
 生成的文档快照。仅更新文档不需要 bump 版本或打 tag。官网仍需单独部署，提交或合并
@@ -509,7 +509,7 @@ Release PR；维护者需要在 `Actions → CI → Run workflow` 中选择 `mai
 ## 10. 文档查询入口
 
 - 在线文档：<https://tom.laofu.online/docs.html>
-- 源码仓库：<https://github.com/bigfish1913/tom>
+- 源码仓库：<https://github.com/solos/tom>
 - Rust API：<https://docs.rs/tom-agent>、<https://docs.rs/tom-plugin-sdk>
 
 - Package 与扩展作者指南：<https://tom.laofu.online/extension-authoring.md>
