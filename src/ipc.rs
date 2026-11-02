@@ -389,10 +389,11 @@ fn run_coding_agent(args: &[String]) -> i32 {
             return 1;
         }
     };
-    // `app::run` reads `std::env::args()` itself, so hand it the arguments this
-    // process was started with instead of trying to inject `args`.
-    let _ = args;
-    runtime.block_on(tom_cli::app::run())
+    // `args` is everything after the `tom` subcommand. Hand it to the CLI
+    // directly: reading `std::env::args()` here would include the subcommand
+    // name itself, which the CLI would treat as the first positional message —
+    // so `terry tom` would open with "tom" already typed into the prompt.
+    runtime.block_on(tom_cli::app::run_with_args(args.to_vec()))
 }
 
 fn run_daemon_serve(args: &[String]) -> i32 {

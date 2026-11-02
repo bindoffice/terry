@@ -71,10 +71,21 @@ fn resolve_connect_token(argv: &[String]) -> Option<String> {
 /// ([`crate::bin`] / `src/bin/tom.rs`) calls this under a tokio runtime and
 /// `std::process::exit`s with the returned code.
 pub async fn run() -> i32 {
+    // argv[0] is the program name; skip it (TS `main(args)` receives the same,
+    // already sliced by the Node CLI entry).
+    run_with_args(std::env::args().skip(1).collect()).await
+}
+
+/// [`run`] with an explicit argument list.
+///
+/// The standalone `tom` binary passes its own arguments. A host that dispatches
+/// to this CLI from inside its own binary (`terry tom ...`) passes everything
+/// *after* the subcommand name, so the name is not mistaken for a prompt.
+pub async fn run_with_args(argv: Vec<String>) -> i32 {
     // Startup profiling wrapper: TOM_TIMING=1 records namespace timings and
     // flushes them to stderr once the run completes, regardless of exit path.
     crate::timings::reset(crate::timings::TimingNamespace::Main);
-    let code = run_inner().await;
+    let code = run_inner(argv).await;
     crate::timings::print_timings();
     code
 }
@@ -98,11 +109,7 @@ fn terry_agent_theme() -> Option<String> {
         .clone()
 }
 
-async fn run_inner() -> i32 {
-    // argv[0] is the program name; skip it (TS `main(args)` receives the same,
-    // already sliced by the Node CLI entry).
-    let mut argv: Vec<String> = std::env::args().skip(1).collect();
-
+async fn run_inner(mut argv: Vec<String>) -> i32 {
     if argv.first().map(String::as_str) == Some("__tom_dev_cleanup") {
         return crate::dev_extension::run_cleanup_helper(&argv[1..]);
     }
@@ -1065,6 +1072,29 @@ fn print_build_error(e: &BuildError) {
 mod tests {
     use super::*;
     use crate::args::Args;
+
+    /// A host dispatching through its own binary (`terry tom ...`) passes the
+    /// arguments *after* the subcommand. Those must not include the subcommand
+    /// name, or it becomes the initial prompt.
+    #[test]
+    fn host_dispatch_arguments_carry_no_subcommand_name() {
+        // What `terry tom` produces: nothing after the subcommand.
+        let parsed = parse_args(&[]);
+        let (initial, extra) = build_initial_message(&parsed, None, None);
+        assert_eq!(initial, None, "a bare launch must not pre-fill a prompt");
+        assert!(extra.is_empty());
+
+        // `terry tom "fix the build"` keeps the real prompt.
+        let parsed = parse_args(&["fix the build".to_string()]);
+        let (initial, _) = build_initial_message(&parsed, None, None);
+        assert_eq!(initial.as_deref(), Some("fix the build"));
+
+        // And the word `tom` is still usable as a prompt when passed explicitly,
+        // which is why the stripping happens in the host, not here.
+        let parsed = parse_args(&["tom".to_string()]);
+        let (initial, _) = build_initial_message(&parsed, None, None);
+        assert_eq!(initial.as_deref(), Some("tom"));
+    }
 
     #[test]
     fn take_flag_value_supports_both_spellings() {
