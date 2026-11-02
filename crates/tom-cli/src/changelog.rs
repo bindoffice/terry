@@ -22,13 +22,13 @@ pub struct ChangelogEntry {
     pub content: String,
 }
 
-/// Default remote changelog URL. Overridable via `TOM_CHANGELOG_URL`.
-pub const DEFAULT_CHANGELOG_URL: &str =
-    "https://raw.githubusercontent.com/bigfish1913/tom/main/CHANGELOG.md";
-
-/// The remote changelog URL to use, honoring `TOM_CHANGELOG_URL`.
+/// The remote changelog URL, honoring `TOM_CHANGELOG_URL`.
+///
+/// The default lives in `repository`, next to the other URLs that point at the
+/// project's own home; this wrapper keeps the historical `changelog::` path and
+/// the environment override.
 pub fn changelog_url() -> String {
-    std::env::var("TOM_CHANGELOG_URL").unwrap_or_else(|_| DEFAULT_CHANGELOG_URL.to_string())
+    crate::repository::changelog_url()
 }
 
 /// Parse a semver-ish heading like `## 1.2.3` / `# 1.2.3` / `## v1.2.3`.

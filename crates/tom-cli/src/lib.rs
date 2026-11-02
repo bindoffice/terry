@@ -58,6 +58,7 @@ pub mod prebuilt_extensions;
 mod prebuilt_release;
 pub mod provider;
 pub mod remote;
+pub mod repository;
 pub mod resource_dirs;
 pub mod resume_picker;
 pub(crate) mod rpc;

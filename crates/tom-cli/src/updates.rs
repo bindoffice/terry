@@ -18,12 +18,10 @@ const CACHE_FILE: &str = "update-check.json";
 const CACHE_FALLBACK_MAX_AGE_MS: i64 = 6 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT_MS: u64 = 1800;
 const UPDATE_CHECK_CONCURRENCY: usize = 4;
-const GITHUB_RELEASES_API: &str =
-    "https://api.github.com/repos/bigfish1913/tom/releases?per_page=100";
-/// The single-release endpoint for the newest non-draft, non-prerelease tag.
-/// Authoritative version source for the stable CLI channel.
-const GITHUB_RELEASES_LATEST_API: &str =
-    "https://api.github.com/repos/bigfish1913/tom/releases/latest";
+// Both endpoints come from `repository`, so a fork or a mirror only has to
+// change one place. They are functions rather than constants because
+// `TOM_RELEASES_URL` can redirect a running binary.
+use crate::repository::{releases_api, releases_latest_api};
 const STAGED_TOM_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const MAX_STAGED_TOM_OUTPUT_BYTES: usize = 4 * 1024;
 const MAX_SELF_UPDATE_STATUS_BYTES: u64 = 64 * 1024;
@@ -462,7 +460,7 @@ fn windows_paths_equal(left: &Path, right: &Path) -> bool {
 }
 
 async fn fetch_tom_latest(client: &reqwest::Client) -> RegistryLookup {
-    fetch_stable_from_github(client, GITHUB_RELEASES_LATEST_API).await
+    fetch_stable_from_github(client, &releases_latest_api()).await
 }
 
 /// The stable version a `/releases/latest` body names, or `None` when the body
@@ -525,7 +523,7 @@ fn latest_preview_version(releases: impl IntoIterator<Item = GithubRelease>) -> 
 
 async fn fetch_tom_preview_latest(client: &reqwest::Client) -> RegistryLookup {
     let response = match client
-        .get(GITHUB_RELEASES_API)
+        .get(&releases_api())
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await
@@ -671,7 +669,7 @@ fn known_latest_tom(registry_lookup: Option<&str>, cached: Option<&str>) -> Opti
 }
 
 async fn lookup_latest_tom() -> Option<(String, bool)> {
-    lookup_latest_tom_from(GITHUB_RELEASES_LATEST_API).await
+    lookup_latest_tom_from(&releases_latest_api()).await
 }
 
 /// Resolve the latest stable version and report whether it came from a live

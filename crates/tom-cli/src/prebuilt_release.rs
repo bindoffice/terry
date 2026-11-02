@@ -8,7 +8,8 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const REPOSITORY: &str = "https://github.com/bigfish1913/tom";
+/// Trust anchor for prebuilt downloads; see `repository`.
+use crate::repository::REPOSITORY;
 const MAX_MANIFEST: u64 = 256 * 1024;
 const MAX_ARCHIVE: u64 = 256 * 1024 * 1024;
 
