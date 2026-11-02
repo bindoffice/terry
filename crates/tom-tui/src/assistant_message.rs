@@ -4,7 +4,7 @@
 //! packages/coding-agent/src/modes/interactive/components/assistant-message.ts
 //!
 //! Renders an assistant message's content blocks **in order** — text blocks
-//! as markdown, thinking/reasoning blocks as dim italic markdown, with a
+//! as markdown, thinking/reasoning blocks as dim (upright) markdown, with a
 //! spacing rule that mirrors the TS `updateContent` (a blank line between a
 //! thinking run and a following visible block). The block model
 //! ([`AssistantBlock`]) is a small, provider-free projection so this library
@@ -21,7 +21,6 @@ use super::image::{Image, ImageOptions};
 use super::markdown::Markdown;
 use super::spacer::Spacer;
 use super::text::Text;
-use crate::ansi::italic;
 use crate::theme::theme;
 
 /// A single visible block of an assistant message, in document order. This is
@@ -32,7 +31,7 @@ use crate::theme::theme;
 pub enum AssistantBlock {
     /// Plain assistant text (rendered as markdown).
     Text(String),
-    /// Reasoning / thinking text (rendered as dim italic markdown).
+    /// Reasoning / thinking text (rendered as dim, upright markdown).
     Thinking(String),
     /// Inline image bytes decoded from the provider's base64 image block.
     Image(Vec<u8>),
@@ -157,7 +156,7 @@ impl AssistantMessageComponent {
 
     /// Update the content from a flat block list. Mirrors the TS
     /// `updateContent` ordering + spacing: text blocks render as markdown,
-    /// **runs** of consecutive thinking blocks coalesce into one dim-italic
+    /// **runs** of consecutive thinking blocks coalesce into one dim
     /// markdown section (joined with `\n\n`), and a blank line separates a
     /// thinking run from a following visible block. When `hide_thinking` is
     /// set, each thinking run collapses to a single dim label line.
@@ -258,24 +257,28 @@ impl AssistantMessageComponent {
                     if opts.hide_thinking {
                         // One static dim label per thinking run (TS path).
                         self.content_container.add_child(Arc::new(Text::new(
-                            italic(&theme().colors.thinking_text.fg(&opts.hidden_thinking_label)),
+                            theme().colors.thinking_text.fg(&opts.hidden_thinking_label),
                             opts.output_pad,
                             0,
                         )));
                     } else {
-                        // Render the joined thinking as one dim italic markdown
-                        // section — the TS `color: thinkingText, italic: true`
-                        // styling. The base style must be applied per rendered
-                        // line (not by wrapping the whole markdown source with
-                        // ANSI): the renderer's inner spans (inline code,
-                        // links, headings) emit `SGR 0` resets, which would
-                        // otherwise drop the enclosing italic/color from the
-                        // rest of the block.
+                        // Render the joined thinking as one dim markdown
+                        // section (`color: thinkingText`). Thinking is NOT
+                        // italic: terminals cannot synthesise an oblique face
+                        // for most text fonts and substitute a *serif* italic
+                        // one instead, so a slanted block made the reasoning
+                        // visibly switch typeface. The dim color already
+                        // separates it from the answer. The base style is still
+                        // applied per rendered line (not by wrapping the whole
+                        // markdown source with ANSI): the renderer's inner spans
+                        // (inline code, links, headings) emit `SGR 0` resets,
+                        // which would otherwise drop the enclosing color from
+                        // the rest of the block.
                         let body = joined.join("\n\n");
                         // B5e: transform the PLAIN thinking markdown first (the
                         // plugin must see markdown, not ANSI).
                         let transformed = self.transform_markdown(&body);
-                        let base_style = format!("\x1b[3m{}", theme().colors.thinking_text.to_fg());
+                        let base_style = theme().colors.thinking_text.to_fg();
                         let md = Arc::new(
                             Markdown::new(transformed, opts.output_pad, 0)
                                 .with_base_style(base_style),
@@ -521,8 +524,8 @@ mod tests {
     fn test_thinking_style_survives_inline_code_reset() {
         // Regression: the thinking base style used to be applied by wrapping
         // the whole markdown source with ANSI. Inline code emits an `SGR 0`
-        // reset, which dropped the italic + thinking color for the rest of the
-        // block. The base style must be re-opened after that reset.
+        // reset, which dropped the thinking color for the rest of the block.
+        // The base style must be re-opened after that reset.
         let msg = AssistantMessageComponent::default();
         msg.update_blocks(&[AssistantBlock::Thinking(
             "consider `render_inline` then keep thinking".to_string(),
@@ -538,8 +541,40 @@ mod tests {
             "text after inline code missing: {rendered:?}"
         );
         assert!(
-            after_code.contains("\x1b[3m") && after_code.contains(&fg),
-            "thinking italic/color lost after inline code: {rendered:?}"
+            after_code.contains(&fg),
+            "thinking color lost after inline code: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_thinking_is_dim_but_never_italic() {
+        // Thinking used to be dim *italic*. Terminals substitute a serif
+        // italic face for text fonts that ship no oblique, so the reasoning
+        // visibly switched typeface. It must stay upright while keeping the
+        // dim thinking color; markdown emphasis in the answer still slants.
+        let msg = AssistantMessageComponent::default();
+        msg.update_blocks(&[
+            AssistantBlock::Thinking("中文思考过程 plain reasoning".to_string()),
+            AssistantBlock::Text("answer with *emphasis*".to_string()),
+        ]);
+        let rendered = msg.render(80).join("\n");
+        let fg = theme().colors.thinking_text.to_fg();
+
+        let thinking = rendered
+            .split("answer with")
+            .next()
+            .expect("answer missing");
+        assert!(
+            thinking.contains(&fg),
+            "thinking color missing: {rendered:?}"
+        );
+        assert!(
+            !thinking.contains("\x1b[3m"),
+            "thinking must not be italic: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("\x1b[3m"),
+            "markdown emphasis in the answer should still slant: {rendered:?}"
         );
     }
 

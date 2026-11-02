@@ -8,6 +8,8 @@ tom is a Rust port of pi, and is MIT licensed. The upstream `LICENSE` is
 reproduced alongside this file. Terry ships it as GPL-3.0-or-later, which MIT
 permits; keep the copyright notice when redistributing.
 
+Synced from tom at commit `2c877ee` (2026-11-02).
+
 Upstream crate: `crates/` + this directory name. Local adaptations:
 
 - Kept on Rust edition 2021 (Terry's workspace is edition 2024). The code

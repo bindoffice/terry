@@ -559,7 +559,9 @@ fn thinking_markdown_keeps_its_style_and_body_stays_plain_across_updates() {
     ]);
     tui.set_layout_root(Some(assistant.clone()));
     tui.start_readerless();
-    term.assert_text_italic("continue thinking", true);
+    // Thinking is dim but upright; only the answer's markdown emphasis slants.
+    term.assert_text_italic("continue thinking", false);
+    term.assert_text_italic("emphasis", true);
     term.assert_text_italic("the normal answer", false);
 
     assistant.update_blocks(&[
@@ -567,7 +569,7 @@ fn thinking_markdown_keeps_its_style_and_body_stays_plain_across_updates() {
         AssistantBlock::Text("the normal answer updated".into()),
     ]);
     tui.request_render(false);
-    term.assert_text_italic("continue thinking longer", true);
+    term.assert_text_italic("continue thinking longer", false);
     term.assert_text_italic("the normal answer updated", false);
 }
 
@@ -600,28 +602,30 @@ fn changing_block_kinds_repaints_thinking_and_body_styles() {
     let tui = TuiAltScreen::new(Box::new(term.clone()), true, None);
     tui.set_main_screen_mode(true);
     let assistant = Arc::new(AssistantMessageComponent::default());
+    // Emphasis marks where the body sits: thinking never slants, the body's
+    // `*emph*` does, so the italic row tracks which block is the answer.
     assistant.update_blocks(&[
         AssistantBlock::Thinking("the first block".into()),
-        AssistantBlock::Text("the second block".into()),
+        AssistantBlock::Text("the *second* block".into()),
     ]);
     tui.set_layout_root(Some(assistant.clone()));
     tui.start_readerless();
-    term.assert_text_italic("the first block", true);
-    term.assert_text_italic("the second block", false);
+    term.assert_text_italic("the first block", false);
+    term.assert_text_italic("second", true);
     assistant.update_blocks(&[
-        AssistantBlock::Text("the first block".into()),
+        AssistantBlock::Text("the *first* block".into()),
         AssistantBlock::Thinking("the second block".into()),
     ]);
     tui.request_render(false);
-    term.assert_text_italic("the first block", false);
-    term.assert_text_italic("the second block", true);
+    term.assert_text_italic("first", true);
+    term.assert_text_italic("the second block", false);
     assistant.update_blocks(&[
         AssistantBlock::Thinking("the first block".into()),
-        AssistantBlock::Text("the second block".into()),
+        AssistantBlock::Text("the *second* block".into()),
     ]);
     tui.request_render(false);
-    term.assert_text_italic("the first block", true);
-    term.assert_text_italic("the second block", false);
+    term.assert_text_italic("the first block", false);
+    term.assert_text_italic("second", true);
 }
 
 #[test]

@@ -176,6 +176,39 @@ pub fn italic(text: &str) -> String {
     format!("\x1b[3m{}\x1b[23m", text)
 }
 
+/// Length in bytes of the escape sequence starting at the head of `text`.
+///
+/// Covers CSI (e.g. `SGR`, cursor motion) and OSC/APC strings, which end at
+/// their respective terminators instead of a single final byte. Anything that
+/// is not a recognised introducer consumes only the ESC, so a stray control
+/// byte cannot swallow the visible text after it.
+pub(crate) fn escape_length(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    if bytes.len() < 2 || bytes[0] != 0x1b {
+        return 1;
+    }
+    match bytes[1] {
+        b'[' => text
+            .char_indices()
+            .skip(2)
+            .find(|(_, c)| ('\x40'..='\x7e').contains(c))
+            .map(|(index, c)| index + c.len_utf8())
+            // Unterminated CSI: consume what is known and let the caller
+            // continue from the visible remainder.
+            .unwrap_or(1),
+        b']' => text
+            .find('\x07')
+            .map(|index| index + 1)
+            .or_else(|| text.find("\x1b\\").map(|index| index + 2))
+            .unwrap_or(bytes.len()),
+        b'_' | b'P' | b'^' => text
+            .find("\x1b\\")
+            .map(|index| index + 2)
+            .unwrap_or(bytes.len()),
+        _ => 1,
+    }
+}
+
 /// Apply underline style.
 pub fn underline(text: &str) -> String {
     format!("\x1b[4m{}\x1b[24m", text)
@@ -215,5 +248,23 @@ mod tests {
         // let link = hyperlink("https://example.com", "Example");
         // assert!(link.contains("https://example.com"));
         // assert!(link.contains("Example"));
+    }
+
+    #[test]
+    fn escape_length_covers_csi_and_string_sequences() {
+        assert_eq!(escape_length("\x1b[3m中文"), 4);
+        assert_eq!(escape_length("\x1b[38;5;244mtext"), 11);
+        assert_eq!(escape_length("\x1b]8;;https://x\x07label"), 15);
+        assert_eq!(escape_length("\x1b]2;title\x1b\\tail"), 11);
+        // A bare ESC with no final byte consumes only the ESC itself.
+        assert_eq!(escape_length("\x1bplain"), 1);
+    }
+
+    #[test]
+    fn italic_wraps_the_whole_run() {
+        let out = italic("中文 emphasis");
+        assert_eq!(out, "\x1b[3m中文 emphasis\x1b[23m");
+        assert_eq!(strip_ansi(&out), "中文 emphasis");
+        assert_eq!(visible_width(&out), visible_width("中文 emphasis"));
     }
 }

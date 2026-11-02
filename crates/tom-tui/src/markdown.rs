@@ -103,6 +103,11 @@ impl Markdown {
     /// Wrap one rendered line with the configured base style, re-opening the
     /// base after nested full, italic, or foreground resets. Returns the line
     /// unchanged when no base style is configured.
+    ///
+    /// The base carries color, never a slant. Thinking text used to be dim
+    /// italic, but terminals substitute a *serif* italic face for text fonts
+    /// that ship no oblique, so the reasoning visibly switched typeface. The
+    /// dim color alone keeps it distinct from the answer.
     fn apply_base_style(&self, line: &str) -> String {
         let base = self.options.base_style.as_str();
         if base.is_empty() {
@@ -115,16 +120,7 @@ impl Markdown {
         while let Some(idx) = rest.find("\x1b[") {
             out.push_str(&rest[..idx]);
             rest = &rest[idx..];
-            let Some(end) = rest
-                .as_bytes()
-                .iter()
-                .enumerate()
-                .skip(2)
-                .find(|(_, byte)| (0x40..=0x7e).contains(*byte))
-                .map(|(index, _)| index + 1)
-            else {
-                break;
-            };
+            let end = crate::ansi::escape_length(rest);
             let sequence = &rest[..end];
             out.push_str(sequence);
             // Inner emphasis closes with SGR 23, and links/colors with SGR 39.
@@ -1590,6 +1586,46 @@ mod tests {
                 "base style missing on line: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_base_style_is_color_only_and_never_slants() {
+        // The thinking base style. It used to carry SGR 3 (dim italic), which
+        // made terminals substitute a serif italic face for text fonts that
+        // ship no oblique, so the reasoning visibly switched typeface. The base
+        // must carry color only, for CJK and latin alike.
+        let base = "\x1b[38;5;244m";
+        let md = Markdown::new("思考中文 then latin", 0, 0).with_base_style(base);
+        let rendered = md.render(80).join("\n");
+
+        assert_eq!(crate::ansi::strip_ansi(&rendered), "思考中文 then latin");
+        assert!(
+            rendered.contains("\x1b[38;5;244m"),
+            "base color missing: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("\x1b[3m"),
+            "base style must not slant anything: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_base_style_still_allows_markdown_emphasis() {
+        // Dropping the thinking slant must not disable real markdown emphasis:
+        // an `*italic*` span in the thinking text still slants, and the base
+        // color is restored after its SGR 23.
+        let base = "\x1b[38;5;244m";
+        let md = Markdown::new("plain *emph* plain", 0, 0).with_base_style(base);
+        let rendered = md.render(80).join("\n");
+        assert!(
+            rendered.contains("\x1b[3memph"),
+            "markdown emphasis lost: {rendered:?}"
+        );
+        let after = rendered.split("emph").nth(1).expect("emphasis missing");
+        assert!(
+            after.contains("\x1b[38;5;244m"),
+            "base color not reopened after emphasis: {rendered:?}"
+        );
     }
 
     #[test]

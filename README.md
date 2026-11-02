@@ -338,9 +338,28 @@ Two adaptations were required to live in this workspace:
   (`JSONSchema::compile`/`validate`) to 0.37 (`validator_for`/`iter_errors`), the
   version this workspace already depends on.
 
-`tom-cli` gained one hook: when `--theme` and the saved `theme` setting are both
-absent, it reads `TERRY_AGENT_THEME`. That is the only source change; the CLI's
-own behaviour is untouched.
+`tom-cli` carries the host-integration changes, all of which are inert unless
+Terry's `TERRY_*` environment variables are set: `app::run_with_args(argv)` so the
+host controls the argument list, a `host_state` module that reports run state
+over IPC, and a `TERRY_AGENT_THEME` fallback for the theme. The CLI's own
+behaviour is otherwise untouched.
+
+### Updating the vendored code
+
+Vendoring is a copy rather than a dependency, so picking up an upstream change
+means syncing it deliberately:
+
+```sh
+script/vendor-tom.sh --check    # what differs from the checkout (default ../tom)
+script/vendor-tom.sh            # copy new/changed files, then review the report
+```
+
+The script copies upstream files but never overwrites one Terry has modified:
+those are listed for manual review, so an intentional adaptation cannot be
+silently reverted. Formatting-only differences (whitespace, `use` ordering) are
+filtered out of that report, since `cargo fmt` with Terry's toolchain reorders
+imports throughout. Each vendored crate's `VENDORED.md` records the upstream
+commit it was synced from.
 
 Run their tests with `cargo test -p tom-cli -p tom-tui -p tom-harness -p tom-ai -p tom-tools -p tom-agent`.
 

@@ -290,8 +290,23 @@ Terry 读的是同一份历史。
 - `tom-ai` 与 `tom-tools` 从 `jsonschema` 0.18 的 API（`JSONSchema::compile`/`validate`）
   移植到本工作区已依赖的 0.37（`validator_for`/`iter_errors`）。
 
-`tom-cli` 只加了一个钩子：当 `--theme` 与已保存的 `theme` 设置都不存在时，读取
-`TERRY_AGENT_THEME`。这是唯一一处源码改动，CLI 自身行为未变。
+`tom-cli` 承载宿主集成相关的改动，且这些改动在未设置 Terry 的 `TERRY_*` 环境变量时全部不生效：
+`app::run_with_args(argv)` 让宿主掌控参数列表，`host_state` 模块通过 IPC 上报运行状态，
+以及主题的 `TERRY_AGENT_THEME` 兜底。除此之外 CLI 自身行为未变。
+
+### 更新引入的代码
+
+引入是拷贝而非依赖，因此同步上游改动需要显式执行：
+
+```sh
+script/vendor-tom.sh --check    # 查看与本地 tom 检出（默认 ../tom）的差异
+script/vendor-tom.sh            # 拷贝新增/变更文件，然后审阅报告
+```
+
+脚本会拷贝上游文件，但**绝不覆盖 Terry 改过的文件** —— 这些会被列出供人工审阅，
+因此刻意的适配不会被静默回退。纯格式差异（空白、`use` 顺序）会从报告中过滤掉，
+因为用 Terry 的工具链跑 `cargo fmt` 会重排大量 import。每个引入的 crate 的
+`VENDORED.md` 都记录了同步时的上游 commit。
 
 用 `cargo test -p tom-cli -p tom-tui -p tom-harness -p tom-ai -p tom-tools -p tom-agent` 运行它们的测试。
 
