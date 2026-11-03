@@ -552,8 +552,12 @@ impl ScrollView {
     }
 
     /// Get the scrollbar style (can be customized).
+    ///
+    /// The thumb is the theme's muted border color rather than ANSI bright
+    /// black: a fixed dark cell is invisible on a dark palette and a black
+    /// stripe on a light one.
     pub fn scrollbar_style(&self, text: &str) -> String {
-        format!("\x1b[100m{}\x1b[49m", text)
+        crate::theme::theme().colors.border_muted.bg(text)
     }
 }
 

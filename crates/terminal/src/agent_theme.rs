@@ -139,6 +139,13 @@ impl TerminalPalette {
                 "mdLinkUrl": hex(dim),
                 "mdCode": hex(self.bright[6]),      // bright cyan
                 "mdCodeBlock": hex(fg),
+                // `mdCodeBg` / `mdCodeBlockBg` are tom extensions (pi has no
+                // token for these surfaces). Writing them explicitly pins the
+                // code chip and code block to a tint of the terminal palette,
+                // instead of leaving tom's built-in dark greys — which read as
+                // a black band on a light or otherwise-colored theme.
+                "mdCodeBg": hex(surface),
+                "mdCodeBlockBg": hex(blend(bg, fg, 0.06)),
                 "mdCodeBlockBorder": hex(border_muted),
                 "mdQuote": hex(muted),
                 "mdQuoteBorder": hex(border),
@@ -238,6 +245,7 @@ pub fn insert_agent_theme_env(env: &mut collections::HashMap<String, String>) {
 mod tests {
     use super::*;
     use gpui::hsla;
+    use tom_tui::theme::Color;
 
     fn palette() -> TerminalPalette {
         TerminalPalette {
@@ -324,6 +332,49 @@ mod tests {
                 "{token} should be nearer the background ({bg}) than the text ({fg}), \
                  but was {surface}"
             );
+        }
+    }
+
+    /// The bug this pins: the code chip and code-block surfaces used to be
+    /// hardcoded One Dark greys (`#30343b` / `#282c34`). They are not pi theme
+    /// tokens, so the generated theme could not reach them and every host
+    /// palette got a dark block — a black band on Terry's light themes.
+    #[test]
+    fn code_surfaces_follow_the_terminal_background() {
+        for (background, is_dark) in [
+            (hsla(0.0, 0.0, 0.06, 1.0), true),
+            (hsla(0.0, 0.0, 0.97, 1.0), false),
+        ] {
+            let mut palette = palette();
+            palette.background = background;
+            palette.foreground = if is_dark {
+                hsla(0.0, 0.0, 0.92, 1.0)
+            } else {
+                hsla(0.0, 0.0, 0.12, 1.0)
+            };
+            palette.is_dark = is_dark;
+            let theme = tom_tui::theme_json::ThemeJson::parse(&palette.to_theme_json())
+                .expect("generated theme parses")
+                .to_theme_colors()
+                .expect("generated theme resolves");
+            // On a light palette the code surfaces must be light too: their
+            // luminance has to sit on the same side of mid-grey as the page.
+            let background_l = background.l;
+            for (name, surface) in [
+                ("mdCodeBg", theme.md_code_bg),
+                ("mdCodeBlockBg", theme.md_code_block_bg),
+            ] {
+                let Color::Rgb(r, g, b) = surface else {
+                    panic!("{name} should be a concrete colour, got {surface:?}")
+                };
+                let l =
+                    (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)) / 255.0;
+                if background_l < 0.5 {
+                    assert!(l < 0.5, "{name} is light ({l}) on a dark terminal");
+                } else {
+                    assert!(l > 0.5, "{name} is dark ({l}) on a light terminal");
+                }
+            }
         }
     }
 

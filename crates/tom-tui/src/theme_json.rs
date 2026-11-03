@@ -70,6 +70,12 @@ const TOKENS: &[(&str, Option<ColorSlot>)] = &[
     ("mdCode", Some(|c, v| c.md_code = v)),
     ("mdCodeBlock", Some(|c, v| c.md_code_block = v)),
     ("mdCodeBlockBorder", Some(|c, v| c.md_code_block_border = v)),
+    // tom extensions: the pi schema has no surface token for inline code or
+    // code blocks, so these are ours. A theme may set them; otherwise
+    // `to_theme_colors` derives them from `userMessageBg` rather than keeping
+    // the built-in dark One Dark greys.
+    ("mdCodeBg", Some(|c, v| c.md_code_bg = v)),
+    ("mdCodeBlockBg", Some(|c, v| c.md_code_block_bg = v)),
     ("mdQuote", Some(|c, v| c.md_quote = v)),
     ("mdQuoteBorder", Some(|c, v| c.md_quote_border = v)),
     ("mdHr", Some(|c, v| c.md_hr = v)),
@@ -318,6 +324,17 @@ impl ThemeJson {
             {
                 slot(&mut colors, color);
             }
+        }
+        // The code chip and code-block surfaces are a tom extension: the pi
+        // schema has no token for them, so `ThemeColors::default` would leave
+        // its built-in One Dark greys in place and every host palette would
+        // get a dark block. Derive them from the theme's own message surface
+        // instead, unless the file set a code surface explicitly.
+        if !self.colors.contains_key("mdCodeBlockBg") {
+            colors.md_code_block_bg = colors.surface;
+        }
+        if !self.colors.contains_key("mdCodeBg") {
+            colors.md_code_bg = colors.surface;
         }
         Ok(colors)
     }
@@ -681,9 +698,10 @@ mod tests {
 
     #[test]
     fn token_table_is_consistent() {
-        // 57 pi tokens, no duplicates; slots point at distinct fields is not
-        // checkable via fn pointers, but token uniqueness and known names are.
-        assert_eq!(TOKENS.len(), 56);
+        // 56 pi tokens plus tom's two code-surface extensions, no duplicates;
+        // slots pointing at distinct fields is not checkable via fn pointers,
+        // but token uniqueness and known names are.
+        assert_eq!(TOKENS.len(), 58);
         for (name, _) in TOKENS {
             assert!(!name.is_empty());
             assert!(!name.contains('/'));

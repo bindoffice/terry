@@ -346,16 +346,20 @@ impl Component for ProgressLoader {
         let spinner = self.loader.current_char();
         let text = self.loader.options.text.clone().unwrap_or_default();
 
-        // Create progress bar
+        // Create progress bar. Filled cells take the theme accent, the track
+        // the theme's code surface: the palette belongs to the host, so the
+        // bar must not pin ANSI black/blue (a black track on a light theme
+        // reads as a hole in the transcript).
         let bar_width = width.saturating_sub(20).min(30);
         let filled = (bar_width as f32 * progress) as usize;
         let empty = bar_width - filled;
+        let colors = crate::theme::theme().colors;
 
         let bar = format!(
-            "\x1b[36m{}\x1b[44m{}\x1b[40m{}\x1b[0m {}%",
-            spinner,
-            "█".repeat(filled),
-            "░".repeat(empty),
+            "{}{}{} {}%",
+            colors.accent.fg(&spinner.to_string()),
+            colors.accent.bg(&"█".repeat(filled)),
+            colors.md_code_block_bg.bg(&"░".repeat(empty)),
             percent
         );
 

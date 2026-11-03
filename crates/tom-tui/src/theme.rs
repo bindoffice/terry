@@ -58,10 +58,15 @@ pub struct ThemeColors {
     pub md_code: Color,
     /// Subtle inline-code background. This Rust extension keeps code readable
     /// without applying a card background to the whole assistant message.
+    ///
+    /// Derived from [`ThemeColors::surface`] unless a theme sets it, so a host
+    /// palette (Terry's, for instance) tints the chip instead of leaving the
+    /// built-in One Dark block on a light or differently-colored terminal.
     pub md_code_bg: Color,
     /// Code-block body color (pi `mdCodeBlock`).
     pub md_code_block: Color,
-    /// Low-contrast code-block surface (One Dark inspired).
+    /// Low-contrast code-block surface, derived from
+    /// [`ThemeColors::surface`] unless a theme sets it.
     pub md_code_block_bg: Color,
     /// Code-block fence/border color (pi `mdCodeBlockBorder`).
     pub md_code_block_border: Color,

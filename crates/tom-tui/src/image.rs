@@ -25,9 +25,11 @@ pub struct ImageTheme {
 
 impl Default for ImageTheme {
     fn default() -> Self {
+        // The placeholder is the theme's code surface, not a fixed dark gray:
+        // an image box on a light or custom palette should not be a black hole.
         Self {
-            placeholder_bg: "\x1b[48;5;238m", // Dark gray background
-            border_color: "\x1b[38;5;244m",   // Gray border
+            placeholder_bg: "\x1b[49m",
+            border_color: "\x1b[38;5;244m", // Gray border
             alt_text_color: |s| format!("\x1b[38;5;250m{}\x1b[0m", s),
         }
     }

@@ -5,7 +5,8 @@
 use std::sync::Mutex;
 
 use super::component::Component;
-use crate::ansi::{fg_256, bg_256, bold, dim};
+use crate::ansi::{bold, dim, fg_256};
+use crate::theme::theme;
 
 /// Progress bar style.
 #[derive(Debug, Clone, Copy, Default)]
@@ -85,17 +86,34 @@ impl ProgressBar {
             ProgressBarStyle::Default | ProgressBarStyle::Blocks => {
                 let filled_str: String = "█".repeat(filled);
                 let empty_str: String = "░".repeat(empty);
-                format!("{}{}{}{}", bg_256(28, &filled_str), bg_256(238, &empty_str), "\x1b[0m", "")
+                // Filled cells take the theme accent, empty cells the theme's
+                // own code surface, so the bar never paints a fixed dark band
+                // over a light or differently-themed terminal.
+                let colors = theme().colors;
+                format!(
+                    "{}{}{}",
+                    colors.accent.bg(&filled_str),
+                    colors.md_code_block_bg.bg(&empty_str),
+                    "\x1b[0m"
+                )
             }
             ProgressBarStyle::Dots => {
                 let filled_str: String = "●".repeat(filled);
                 let empty_str: String = "○".repeat(empty);
-                format!("{}{}", fg_256(28, &filled_str), dim(&empty_str))
+                format!(
+                    "{}{}",
+                    theme().colors.accent.fg(&filled_str),
+                    dim(&empty_str)
+                )
             }
             ProgressBarStyle::Lines => {
                 let filled_str: String = "━".repeat(filled);
                 let empty_str: String = "─".repeat(empty);
-                format!("{}{}", fg_256(28, &filled_str), dim(&empty_str))
+                format!(
+                    "{}{}",
+                    theme().colors.accent.fg(&filled_str),
+                    dim(&empty_str)
+                )
             }
         }
     }
