@@ -6,6 +6,9 @@
 //! `ExecutionEnv` view and (for the write/edit tools) the `MutatingEnv` view
 //! that carries the file-mutation-queue registry.
 
+/// Name of the companion tool that polls or writes to a live `bash` session.
+pub const BASH_SESSION_TOOL_NAME: &str = "bash_session";
+
 use std::sync::Arc;
 
 use crate::env::ExecutionEnv;

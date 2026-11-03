@@ -9,13 +9,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use schemars::JsonSchema;
-use serde::Deserialize;
-use tokio_util::sync::CancellationToken;
 use tom_agent::agent_tool::AgentTool;
 use tom_agent::error::AgentError;
 use tom_agent::types::{AgentToolResult, ToolExecutionMode, ToolResultPartial};
 use tom_ai::types::Tool;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 
 const MAX_SEARCH_RESULTS: usize = 8;
 const MAX_RESULT_CHARS: usize = 18_000;
@@ -32,13 +32,31 @@ static DOCS: &[DocPage] = &[
         topic: "authoring",
         description: "Rust cdylib 扩展开发最佳实践：统一 C ABI 入口、工具生命周期、事件处理器、资源发现、tom dev 开发、tom-extcore 复用边界与发布检查清单",
         content: include_str!("../embedded-docs/extension-authoring.md"),
-        aliases: &["package-authoring", "extension-authoring", "create-package", "create-extension"],
+        aliases: &["extension-authoring", "create-package", "create-extension"],
     },
     DocPage {
         topic: "guide",
         description: "完整使用手册：安装、模型、CLI、.tom 资源、Rust 扩展、SDK、排错和发布",
         content: include_str!("../embedded-docs/user-guide.md"),
-        aliases: &["manual", "user-guide", "cli", "quickstart", "package", "packages", "extension", "extensions"],
+        aliases: &["manual", "user-guide", "cli", "quickstart", "extension", "extensions"],
+    },
+    DocPage {
+        topic: "packages",
+        description: "资源包作者指南：从 npm / git 分发 skills、prompts、themes 与 extensions，清单格式、完整性校验、所有权标记与资源优先级",
+        content: include_str!("../embedded-docs/package-authoring.md"),
+        aliases: &[
+            "package-authoring",
+            "resource-package",
+            "npm-package",
+            "distribute",
+            "package-add",
+        ],
+    },
+    DocPage {
+        topic: "codemode",
+        description: "codemode：在 QuickJS 沙箱里写 JavaScript 调用工具。脚本环境（tools/text/exit/store/searchTools）、工具调用走同一条管线、沙箱边界与结果格式",
+        content: include_str!("../embedded-docs/codemode.md"),
+        aliases: &["code-mode", "script", "sandbox", "javascript", "batch"],
     },
     DocPage {
         topic: "overview",
@@ -92,7 +110,7 @@ impl DocsTool {
         Self {
             schema: Tool {
                 name: "docs".to_string(),
-                description: "Look up tom usage documentation. Omit topic (or use topic=list) to list topics; pass a topic such as guide, authoring, agent, debugging, architecture, or overview. Add query to find relevant sections. Use this before guessing tom commands, creating an agent project or extension, extension APIs, or .tom configuration.".to_string(),
+                description: "Look up tom usage documentation. Omit topic (or use topic=list) to list topics; pass a topic such as guide, authoring, codemode, agent, debugging, architecture, or overview. Add query to find relevant sections. Use this before guessing tom commands, creating an agent project or extension, extension APIs, or .tom configuration.".to_string(),
                 parameters: tom_ai::types::Schema::new(
                     serde_json::to_value(params).unwrap_or_default(),
                 ),
@@ -340,10 +358,21 @@ mod tests {
 
     #[tokio::test]
     async fn package_and_extension_aliases_resolve() {
-        for topic in ["package", "packages", "extension", "extensions", "PACKAGES"] {
+        // `extension` aliases stay on the guide; `packages` is now its own page
+        // (resource packages), which is the more useful answer for that word.
+        for topic in ["extension", "extensions", "EXTENSIONS"] {
             let output = execute(serde_json::json!({"topic": topic, "query": "packages"})).await;
             assert!(output.starts_with("# tom docs: guide"));
             assert!(output.contains("Matches for"));
+        }
+        for topic in ["packages", "PACKAGES", "package-authoring", "npm-package"] {
+            let output = execute(serde_json::json!({"topic": topic})).await;
+            assert!(
+                output.starts_with("# tom docs: packages"),
+                "topic {topic} resolved to: {}",
+                output.lines().next().unwrap_or_default()
+            );
+            assert!(output.contains("tom-package.json"));
         }
     }
 

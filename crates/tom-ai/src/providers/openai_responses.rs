@@ -1,4 +1,12 @@
 //! OpenAI Responses API provider (`/v1/responses`).
+//!
+//! Also serves Azure OpenAI's Responses API: Azure speaks the same wire
+//! protocol and differs only in endpoint resolution, the wire `model` field
+//! (a deployment name rather than a catalog id) and the `api-version` query
+//! parameter. Those three pieces live in [`azure`] and are applied here, so one
+//! transcript/tool/stream implementation serves both adapters and cannot drift.
+
+pub mod azure;
 
 use crate::event_stream::{
     create_assistant_message_event_stream_with_cancellation, AssistantMessageEventStream,
@@ -29,6 +37,10 @@ pub struct OpenAiResponsesProvider {
     allow_env_api_key: bool,
     http: reqwest::Client,
     models: Vec<Model>,
+    /// When set, this provider speaks Azure's dialect: the endpoint is resolved
+    /// per request, `model` becomes the deployment name, and `api-version` is
+    /// appended to the URL.
+    azure: Option<azure::AzureOptions>,
 }
 pub fn openai_responses_models() -> Vec<Model> {
     let mut model = Model::new(
@@ -66,6 +78,7 @@ impl OpenAiResponsesProvider {
             allow_env_api_key,
             http,
             models,
+            azure: None,
         }
     }
 
@@ -83,7 +96,16 @@ impl OpenAiResponsesProvider {
             allow_env_api_key: false,
             http,
             models,
+            azure: None,
         }
+    }
+
+    /// Switch this provider to Azure's dialect. Azure keeps its own credential
+    /// env var, so it never inherits `OPENAI_API_KEY`.
+    pub fn with_azure(mut self, options: azure::AzureOptions) -> Self {
+        self.azure = Some(options);
+        self.allow_env_api_key = false;
+        self
     }
 }
 struct PreparedRequest {
@@ -148,15 +170,51 @@ impl Provider for OpenAiResponsesProvider {
         let http = self.http.clone();
         let key = self.api_key.clone();
         let allow_env_api_key = self.allow_env_api_key;
+        // Azure resolves its endpoint per request (one resource per user) and
+        // sends a deployment name as the wire `model`. Everything downstream —
+        // transcript, tools, SSE — is the same protocol, so this is the only
+        // place the two dialects diverge before the request is built.
+        let azure = self.azure.clone();
+        let original_id = model.id.clone();
+        let (model, endpoint) = match &azure {
+            Some(options) => match azure::resolve_request(model, options) {
+                Ok((wire_model, endpoint)) => (wire_model, Some(endpoint)),
+                Err(message) => {
+                    // A misconfigured resource name must surface as a normal
+                    // Error event: a caller that only awaits `result()` should
+                    // never see this as a panic.
+                    run_stream(
+                        &mut producer,
+                        http,
+                        model,
+                        Err(message),
+                        opts,
+                        WireContext {
+                            api: Some(Api::AzureOpenaiResponses),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                    return stream;
+                }
+            },
+            None => (model.clone(), None),
+        };
         // Prepare headers while the caller's Context is borrowed. The helper
         // returns an error result for the producer task, so auth failure still
         // follows the original terminal Error event path without a dummy body.
-        let preparation = prepare_request(model, ctx, opts, &key, allow_env_api_key, build_request);
-        let model = model.clone();
+        let preparation =
+            prepare_request(&model, ctx, opts, &key, allow_env_api_key, build_request);
+        let catalog_model_id = (azure.is_some()).then(|| original_id.clone());
+        let wire = WireContext {
+            api: azure.map(|_| Api::AzureOpenaiResponses),
+            endpoint,
+            catalog_model_id,
+        };
         let mut opts = opts.clone();
         opts.signal = producer.cancellation_token();
         tokio::spawn(async move {
-            run_stream(&mut producer, http, &model, preparation, &opts).await;
+            run_stream(&mut producer, http, &model, preparation, &opts, wire).await;
         });
         stream
     }
@@ -1078,11 +1136,7 @@ fn custom_tool_arguments(property: &str, input: &str) -> Value {
 }
 
 fn supports_openai_grammar_tools(model: &Model) -> bool {
-    matches!(
-        model.compat.as_ref(),
-        Some(StreamingProtocolCompat::OpenaiResponses(compat))
-            if compat.supports_openai_grammar_tools.unwrap_or(false)
-    )
+    responses_compat(model).is_some_and(|c| c.supports_openai_grammar_tools.unwrap_or(false))
 }
 
 fn grammar_tool_properties(model: &Model, tools: &[Tool]) -> HashMap<String, String> {
@@ -1214,17 +1268,36 @@ fn apply_api_key(
     }
 }
 
+/// What the adapter must record about a request that the wire model cannot say.
+///
+/// The wire model carries the *endpoint* and, for Azure, the *deployment name*
+/// in `model.id`; the assistant message must carry the dialect and the catalog
+/// id instead, so a session replays through the provider the user picked.
+#[derive(Debug, Clone, Default)]
+struct WireContext {
+    api: Option<Api>,
+    endpoint: Option<azure::AzureEndpoint>,
+    /// The catalog model id, when the wire `model` is a deployment name.
+    catalog_model_id: Option<String>,
+}
+
 async fn run_stream(
     p: &mut AssistantMessageEventStreamProducer,
     http: reqwest::Client,
     model: &Model,
     preparation: Result<PreparedRequest, String>,
     opts: &SimpleStreamOptions,
+    wire: WireContext,
 ) {
+    // Every real path passes the dialect that issued the request, so an Azure
+    // session records `azure-openai-responses` and replays through Azure.
+    let api = wire.api.clone().unwrap_or_else(|| model.api.clone());
     let mut out = AssistantMessage::empty(
-        Api::OpenaiResponses,
+        api,
         model.provider.clone(),
-        model.id.clone(),
+        wire.catalog_model_id
+            .clone()
+            .unwrap_or_else(|| model.id.clone()),
         now_ms(),
     );
     let PreparedRequest {
@@ -1238,7 +1311,10 @@ async fn run_stream(
             return;
         }
     };
-    let url = responses_url(&model.base_url);
+    let url = match &wire.endpoint {
+        Some(endpoint) => endpoint.responses_url(),
+        None => responses_url(&model.base_url),
+    };
     let timeout = opts.request_timeout();
     let signal = opts.signal.clone();
     let mut builder = http.post(&url).timeout(timeout);
@@ -2332,13 +2408,18 @@ fn reasoning_effort(model: &Model, l: ThinkingLevel) -> Option<String> {
         ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => Some("high".into()),
     }
 }
-fn supports_strict_mode(model: &Model) -> bool {
+/// Azure serves the same Responses protocol, so it reads the same compat flags.
+/// Without this, an Azure model silently lost strict mode and grammar tools
+/// because its `api` is `azure-openai-responses` rather than `openai-responses`.
+fn responses_compat(model: &Model) -> Option<&crate::model::OpenaiResponsesCompat> {
     match model.compat.as_ref() {
-        Some(StreamingProtocolCompat::OpenaiResponses(c)) => {
-            c.supports_strict_mode.unwrap_or(false)
-        }
-        _ => false,
+        Some(StreamingProtocolCompat::OpenaiResponses(compat)) => Some(compat),
+        _ => None,
     }
+}
+
+fn supports_strict_mode(model: &Model) -> bool {
+    responses_compat(model).is_some_and(|c| c.supports_strict_mode.unwrap_or(false))
 }
 fn apply_response_metadata(out: &mut AssistantMessage, resp: &Value) {
     if let Some(id) = resp.get("id").and_then(Value::as_str) {
@@ -2549,6 +2630,7 @@ mod tests {
             &model,
             prepared,
             &opts,
+            WireContext::default(),
         )
         .await;
         drop(producer);

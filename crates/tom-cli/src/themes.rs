@@ -189,15 +189,35 @@ impl ThemeRegistry {
     pub fn discover(cwd: &Path, project_trusted: bool) -> (Self, Vec<String>) {
         let global = crate::resource_dirs::global_dir("themes");
         let project = project_trusted.then(|| crate::resource_dirs::project_dir(cwd, "themes"));
-        Self::discover_from(global.as_deref(), project.as_deref())
+        // Themes contributed by resource packages (`tom package add`) live in
+        // their own directories, not in `.tom/themes`, so they are merged here
+        // rather than being invisible until the user copies files around.
+        let packaged = crate::resource_dirs::package_theme_dirs(cwd, project_trusted);
+        Self::discover_with_packages(global.as_deref(), project.as_deref(), &packaged)
     }
 
     /// Scan explicit dirs (test seam; `discover` resolves the standard dirs).
     pub fn discover_from(global: Option<&Path>, project: Option<&Path>) -> (Self, Vec<String>) {
+        Self::discover_with_packages(global, project, &[])
+    }
+
+    /// Scan explicit dirs plus package-contributed ones.
+    ///
+    /// Package themes are scanned after the static dirs but before a project
+    /// theme of the same name: a package is either user-wide or an explicit
+    /// project install, and a project theme is the more specific choice.
+    pub fn discover_with_packages(
+        global: Option<&Path>,
+        project: Option<&Path>,
+        packaged: &[PathBuf],
+    ) -> (Self, Vec<String>) {
         let mut diagnostics = Vec::new();
         let mut entries = BTreeMap::new();
         if let Some(global) = global {
             scan_dir(global, &mut entries, &mut diagnostics, false);
+        }
+        for dir in packaged {
+            scan_dir(dir, &mut entries, &mut diagnostics, false);
         }
         if let Some(project) = project {
             scan_dir(project, &mut entries, &mut diagnostics, true);

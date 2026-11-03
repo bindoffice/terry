@@ -3287,6 +3287,9 @@ pub async fn interactive_tui(
                     &state,
                     &reload_context.tool_context,
                     &reload_context.catalog,
+                    &crate::session::SessionEventGate::new(std::sync::Arc::clone(
+                        &reload_context.extension_session,
+                    )),
                 )
                 .await;
                 tui.request_render(false);

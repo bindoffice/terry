@@ -63,8 +63,8 @@ tom --version
 **Package managers:**
 
 ```bash
-brew tap bigfish1913/tap && brew install tom          # macOS (Apple silicon), Linux
-scoop bucket add bigfish1913 https://github.com/bigfish1913/scoop-bucket
+brew tap solos/tap && brew install tom          # macOS (Apple silicon), Linux
+scoop bucket add solos https://github.com/solos/scoop-bucket
 scoop install tom                                     # Windows
 ```
 

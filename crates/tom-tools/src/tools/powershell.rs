@@ -6,13 +6,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 use tom_agent::agent_tool::AgentTool;
 use tom_agent::error::AgentError;
 use tom_agent::types::{AgentToolResult, TextContentOrImage, ToolResultPartial};
 use tom_ai::types::Tool;
-use schemars::JsonSchema;
-use serde::Deserialize;
-use tokio_util::sync::CancellationToken;
 
 use crate::env::ShellOverride;
 use crate::shell_output::{execute_shell_with_capture, ShellCaptureOptions};
@@ -108,6 +108,7 @@ impl AgentTool for PowerShellTool {
                 env: None,
                 inherit_env: true,
                 timeout: input.timeout,
+                truncation: crate::truncate::TruncationOptions::default(),
                 cancel: Some(&signal),
                 on_chunk: None,
                 return_execution_errors: true,

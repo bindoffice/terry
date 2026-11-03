@@ -1,3 +1,9 @@
+use tom_agent::{AgentError, AgentTool, AgentToolResult, ToolResultPartial};
+use tom_ai::{
+    providers::faux::{FauxScript, FauxStep},
+    types::{Schema, Tool},
+};
+use tom_harness::{agent_harness::AgentHarness, types::HarnessTool};
 use serde_json::{json, Value};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -5,12 +11,6 @@ use std::sync::{
 };
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tom_agent::{AgentError, AgentTool, AgentToolResult, ToolResultPartial};
-use tom_ai::{
-    providers::faux::{FauxScript, FauxStep},
-    types::{Schema, Tool},
-};
-use tom_harness::{agent_harness::AgentHarness, types::HarnessTool};
 
 struct WaitForCancellation {
     schema: Tool,

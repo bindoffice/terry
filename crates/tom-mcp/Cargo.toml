@@ -1,0 +1,35 @@
+[package]
+name = "tom-mcp"
+# Vendored from the tom workspace, which targets edition 2021 (the code
+# predates the edition-2024 `unsafe` requirements on `std::env::set_var`).
+edition = "2021"
+publish.workspace = true
+license = "MIT"
+version = "0.16.0"
+description = "Minimal Model Context Protocol client for tom: stdio + streamable HTTP transports, tool discovery, and model-facing tool injection"
+readme = "README.md"
+keywords = ["agent", "llm", "mcp", "tools"]
+categories = ["api-bindings", "development-tools"]
+
+[dependencies]
+tom-agent = { workspace = true }
+tom-ai = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true, features = [
+    "json",
+    "stream",
+    "rustls-tls-native-roots",
+    "charset",
+    "http2",
+] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tempfile = { workspace = true }

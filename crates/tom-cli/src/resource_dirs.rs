@@ -356,7 +356,62 @@ fn project_resource_dirs(cwd: &Path, sub: &str, kind: ResourceKind) -> Vec<PathB
         ResourceKind::Extensions => "extensions",
     };
     dirs.extend(crate::packages::project_package_dirs(cwd, package_kind));
+    dirs.extend(project_resource_package_dirs(cwd, package_kind));
     dirs.push(project_dir(cwd, sub));
+    dirs
+}
+
+/// Resource directories contributed by project *resource* packages
+/// (`tom package add --local`).
+///
+/// These honor a package's manifest, so a package that keeps its skills under
+/// `resources/skills` or ships `prompts/*.md` contributes the declared paths
+/// rather than the conventional directory name.
+fn project_resource_package_dirs(cwd: &Path, kind: &str) -> Vec<PathBuf> {
+    let root = cwd.join(PROJECT_CONFIG_DIR_NAME).join("packages");
+    package_resource_dirs_for_root(&root, kind)
+}
+
+/// Resource directories contributed by user-level resource packages
+/// (`~/.tom/agent/packages`).
+fn global_resource_package_dirs(kind: &str) -> Vec<PathBuf> {
+    let Some(agent) = crate::config::agent_dir().ok() else {
+        return Vec::new();
+    };
+    package_resource_dirs_for_root(&agent.join("packages"), kind)
+}
+
+/// Resolve every installed package's contribution for one kind, in registry
+/// order (registry order is the install order, which keeps precedence stable
+/// across runs).
+fn package_resource_dirs_for_root(root: &Path, kind: &str) -> Vec<PathBuf> {
+    let Ok(registry) = crate::resource_packages::PackageRegistry::load(root) else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    for package in &registry.packages {
+        let dir = root.join(&package.name);
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(manifest) = crate::resource_packages::read_manifest(&dir) else {
+            continue;
+        };
+        dirs.extend(crate::resource_packages::resource_dirs(
+            &dir, kind, &manifest,
+        ));
+    }
+    dirs
+}
+
+/// Theme directories from both packages roots. Themes are discovered by the
+/// TUI, which previously only saw `.tom/themes` and `<agent>/themes`.
+pub fn package_theme_dirs(cwd: &Path, project_trusted: bool) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if project_trusted {
+        dirs.extend(project_resource_package_dirs(cwd, "themes"));
+    }
+    dirs.extend(global_resource_package_dirs("themes"));
     dirs
 }
 
@@ -373,6 +428,10 @@ fn global_resource_dirs(sub: &str, kind: ResourceKind) -> Vec<PathBuf> {
         return Vec::new();
     };
     let mut dirs = configured_global_dirs(g.clone(), kind);
+    // User-level resource packages sit before the conventional directory so a
+    // package can override a loose global skill of the same name, while a
+    // project skill still beats both (first-registration-wins downstream).
+    dirs.extend(global_resource_package_dirs(sub));
     dirs.push(g);
     dirs
 }

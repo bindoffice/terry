@@ -18,12 +18,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use base64::Engine;
-use serde_json::Value;
 use tom_tui::{
     render_diff, AssistantBlock, AssistantMessageComponent, AssistantMessageOptions,
     BashExecutionComponent, BashTruncation, Container, Spacer, ToolExecutionComponent, ToolStatus,
     UserMessageComponent,
 };
+use serde_json::Value;
 
 /// A tool call visible in an assistant message snapshot, normalized to plain
 /// data so both the local (`tom_ai::Content::ToolCall`) and the wire
@@ -534,7 +534,10 @@ impl TranscriptView {
     }
 
     fn tool_end(&self, id: &str, name: &str, result: &Value, is_error: bool, width: usize) {
-        if matches!(name, "plan_mode_start" | "plan_mode_complete")
+        // `update_plan` is the model's own plan, rendered as a panel rather than
+        // a raw tool result: the plan is state the user should see persist, not
+        // a blob that scrolls away with the transcript.
+        if matches!(name, "plan_mode_start" | "plan_mode_complete" | "update_plan")
             && !is_error
             && update_plan_panel(&self.chat, result)
         {
@@ -993,8 +996,8 @@ fn finalize_bash(comp: &Arc<BashExecutionComponent>, result: &Value, is_error: b
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use tom_tui::{strip_ansi, Component};
+    use serde_json::json;
 
     fn view() -> TranscriptView {
         TranscriptView::new(Arc::new(Container::new()))

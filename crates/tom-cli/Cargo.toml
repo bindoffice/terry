@@ -25,6 +25,7 @@ tom-harness = { workspace = true }
 tom-tui = { workspace = true }
 tom-plugin-sdk = { workspace = true, features = ["binary"] }
 tom-extensions = { workspace = true }
+tom-mcp = { workspace = true }
 tokio = { workspace = true, features = ["signal", "io-std", "net"] }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }
@@ -72,9 +73,6 @@ windows-sys = { version = "0.59", features = [
 [target.'cfg(unix)'.dependencies]
 # `nix::sys::signal::raise` for the Ctrl+Z suspend (`app.suspend`).
 nix = { version = "0.29", features = ["signal"] }
-
-[package.metadata.docs.rs]
-rustdoc-args = ["--cfg", "docsrs"]
 
 # `cargo binstall tom-cli` support. The release workflow publishes
 # `tom-v<version>-<target>.tar.gz` (`.zip` on Windows) with the `tom` binary at

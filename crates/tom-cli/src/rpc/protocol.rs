@@ -118,6 +118,31 @@ pub enum Command {
         #[serde(rename = "modelId")]
         model_id: String,
     },
+    /// Queue a steering message (delivered after the current turn's tools).
+    Steer {
+        #[serde(flatten)]
+        payload: SteerPayload,
+    },
+    /// Queue a follow-up message (delivered when the agent stops).
+    FollowUp {
+        #[serde(flatten)]
+        payload: SteerPayload,
+    },
+    SetSteeringMode {
+        mode: String,
+    },
+    SetFollowUpMode {
+        mode: String,
+    },
+    SetAutoCompaction {
+        enabled: bool,
+    },
+    SetAutoRetry {
+        enabled: bool,
+    },
+    AbortRetry,
+    CycleThinkingLevel,
+    CycleModel,
     GetAvailableThinkingLevels,
     SetThinkingLevel {
         level: tom_ai::types::ThinkingLevel,
@@ -151,6 +176,52 @@ pub enum Command {
         answer: Option<Value>,
         #[serde(default)]
         cancelled: bool,
+    },
+    /// Start a fresh session.
+    NewSession {
+        #[serde(rename = "parentSession")]
+        parent_session: Option<String>,
+    },
+    /// Switch to an existing session by id or file.
+    SwitchSession {
+        #[serde(rename = "sessionPath")]
+        session_path: String,
+    },
+    /// Duplicate the current session at its current position.
+    Clone,
+    /// Create a new session from an earlier user message.
+    Fork {
+        #[serde(rename = "entryId")]
+        entry_id: String,
+    },
+    /// The user messages a fork could start from.
+    GetForkMessages,
+    /// The session tree for navigation.
+    GetTree,
+    /// Raw entries on the current branch.
+    GetEntries {
+        limit: Option<u64>,
+    },
+    /// The text of the last assistant message, or null.
+    GetLastAssistantText,
+    /// Session statistics.
+    GetSessionStats,
+    /// Set or clear the session display name.
+    SetSessionName {
+        name: Option<String>,
+    },
+    /// Run a shell command in the session (not as a model tool call).
+    Bash {
+        command: String,
+        #[serde(default)]
+        timeout: Option<u64>,
+    },
+    /// Abort a running shell command.
+    AbortBash,
+    /// Export the session as HTML.
+    ExportHtml {
+        #[serde(rename = "outputPath")]
+        output_path: Option<String>,
     },
     Ping,
     Stop,
@@ -187,6 +258,14 @@ impl<'de> serde::Deserialize<'de> for PromptPayload {
     }
 }
 
+/// A plain-text queued message. Unlike a prompt, `steer`/`follow_up` carry no
+/// image or content-block payload: they are injected mid-run as user turns.
+#[allow(dead_code)]
+#[derive(Debug, serde::Deserialize)]
+pub struct SteerPayload {
+    pub message: String,
+}
+
 pub const SUPPORTED_COMMANDS: &[&str] = &[
     "get_state",
     "get_commands",
@@ -221,6 +300,28 @@ pub const SUPPORTED_COMMANDS: &[&str] = &[
     "get_available_tools",
     "set_active_tools",
     "ui_dialog_response",
+    "steer",
+    "follow_up",
+    "set_steering_mode",
+    "set_follow_up_mode",
+    "set_auto_compaction",
+    "set_auto_retry",
+    "abort_retry",
+    "cycle_thinking_level",
+    "cycle_model",
+    "new_session",
+    "switch_session",
+    "clone",
+    "fork",
+    "get_fork_messages",
+    "get_tree",
+    "get_entries",
+    "get_last_assistant_text",
+    "get_session_stats",
+    "set_session_name",
+    "bash",
+    "abort_bash",
+    "export_html",
     "ping",
     "stop",
 ];
@@ -266,8 +367,60 @@ pub fn ready(mode: crate::args::RpcMessageUpdates) -> Value {
             "agentEndIsTerminal": false
         },
         "limits": {"frameBytes": MAX_FRAME_BYTES, "maxConcurrentPrompts": 1},
-        "parityComplete": false
+        // True only while every command in `PI_BASELINE_COMMANDS` is served.
+        // The unit test below fails the build if the two lists drift apart, so
+        // this flag cannot quietly become a lie.
+        "parityComplete": missing_baseline_commands().is_empty()
     })
+}
+
+/// The command set of the pi release this host targets.
+///
+/// Kept as a literal list rather than derived from documentation so the
+/// client-visible `parityComplete` claim has a machine-checkable definition.
+pub const PI_BASELINE_COMMANDS: &[&str] = &[
+    "abort",
+    "abort_bash",
+    "abort_retry",
+    "bash",
+    "clear_queue",
+    "clone",
+    "compact",
+    "cycle_model",
+    "cycle_thinking_level",
+    "export_html",
+    "follow_up",
+    "fork",
+    "get_available_models",
+    "get_available_thinking_levels",
+    "get_commands",
+    "get_entries",
+    "get_fork_messages",
+    "get_last_assistant_text",
+    "get_messages",
+    "get_session_stats",
+    "get_state",
+    "get_tree",
+    "new_session",
+    "prompt",
+    "set_auto_compaction",
+    "set_auto_retry",
+    "set_follow_up_mode",
+    "set_model",
+    "set_session_name",
+    "set_steering_mode",
+    "set_thinking_level",
+    "steer",
+    "switch_session",
+];
+
+/// Baseline commands this host does not serve. Empty ⇒ `parityComplete`.
+pub fn missing_baseline_commands() -> Vec<&'static str> {
+    PI_BASELINE_COMMANDS
+        .iter()
+        .copied()
+        .filter(|command| !SUPPORTED_COMMANDS.contains(command))
+        .collect()
 }
 
 /// Only expose capability metadata, never provider credentials or headers.
@@ -287,6 +440,25 @@ pub fn model_descriptor(model: &tom_ai::Model) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_pi_baseline_command_is_served() {
+        let missing = missing_baseline_commands();
+        assert!(
+            missing.is_empty(),
+            "the host advertises parity but does not serve: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn ready_reports_complete_parity() {
+        let ready = ready(crate::args::RpcMessageUpdates::CompactDeltas);
+        assert_eq!(
+            ready["parityComplete"],
+            json!(true),
+            "parityComplete must reflect the served command set"
+        );
+    }
 
     #[test]
     fn advertised_commands_are_unique() {

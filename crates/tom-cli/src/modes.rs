@@ -306,13 +306,17 @@ fn emit_agent_event(event: &AgentEvent) {
 /// client answers with `{"type":"ui_dialog_response","requestId","answer"}` (or
 /// `"cancelled":true`). A `prompt` runs in its own task so this loop keeps
 /// reading — that is what lets `abort` and dialog answers arrive mid-run.
+#[allow(clippy::too_many_arguments)]
 pub async fn rpc(
     harness: &AgentHarness,
     mut agent_events: Option<tokio::sync::broadcast::Receiver<AgentEvent>>,
     model_catalog: Vec<tom_ai::Model>,
     ui_dialog: tom_extensions::UiDialogMailbox,
     oauth_snapshot: Option<Arc<tom_extensions::RegistrySnapshot>>,
+    session_events: crate::session::SessionEventGate,
     message_updates: crate::args::RpcMessageUpdates,
+    args: crate::args::Args,
+    cwd: std::path::PathBuf,
 ) -> i32 {
     rpc_with_io(
         harness,
@@ -320,28 +324,38 @@ pub async fn rpc(
         model_catalog,
         ui_dialog,
         oauth_snapshot,
+        session_events,
         message_updates,
         tokio::io::BufReader::new(tokio::io::stdin()),
         std::io::stdout(),
+        args,
+        cwd,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn rpc_with_io<R, W>(
     harness: &AgentHarness,
     mut agent_events: Option<tokio::sync::broadcast::Receiver<AgentEvent>>,
     model_catalog: Vec<tom_ai::Model>,
     ui_dialog: tom_extensions::UiDialogMailbox,
     oauth_snapshot: Option<Arc<tom_extensions::RegistrySnapshot>>,
+    session_events: crate::session::SessionEventGate,
     message_updates: crate::args::RpcMessageUpdates,
     mut input: R,
     output: W,
+    rpc_args: crate::args::Args,
+    rpc_cwd: std::path::PathBuf,
 ) -> i32
 where
     R: tokio::io::AsyncBufRead + Unpin,
     W: Write + Send + 'static,
 {
     let mut command_tasks: Vec<RetainedRpcTask<()>> = Vec::new();
+    // Current `bash` command's cancel token. One command runs at a time; a
+    // finished command simply leaves a token nobody cancels.
+    let mut bash_cancel = tokio_util::sync::CancellationToken::new();
     let lane: Arc<dyn AgentLane> = harness.lane("main");
     // One blocking writer owns stdout. Producers only enqueue bounded messages,
     // so pipe backpressure never blocks a Tokio worker on IO or a std mutex.
@@ -853,6 +867,59 @@ where
             "set_thinking_level" => rpc_set_thinking_level(&lane, &msg).await,
             "get_available_tools" => Ok(rpc_get_available_tools(&lane, harness).await),
             "set_active_tools" => rpc_set_active_tools(&lane, &msg).await,
+            "steer" => rpc_steer(&lane, &msg).await,
+            "follow_up" => rpc_follow_up(&lane, &msg).await,
+            "set_steering_mode" => rpc_set_queue_mode(harness, &msg, QueueModeKind::Steering).await,
+            "set_follow_up_mode" => {
+                rpc_set_queue_mode(harness, &msg, QueueModeKind::FollowUp).await
+            }
+            "set_auto_compaction" => rpc_set_auto_compaction(harness, &msg).await,
+            "set_auto_retry" => rpc_set_auto_retry(harness, &msg).await,
+            "abort_retry" => rpc_abort_retry(harness).await,
+            "cycle_thinking_level" => rpc_cycle_thinking_level(&lane).await,
+            "cycle_model" => rpc_cycle_model(&lane, &model_catalog).await,
+            "new_session" => rpc_new_session(harness, &rpc_args, &rpc_cwd, &session_events).await,
+            "switch_session" => {
+                rpc_switch_session(harness, &rpc_args, &rpc_cwd, &msg, &session_events).await
+            }
+            "clone" => rpc_clone_session(harness, &rpc_args, &rpc_cwd, &session_events).await,
+            "fork" => rpc_fork_session(harness, &rpc_args, &rpc_cwd, &msg, &session_events).await,
+            "get_fork_messages" => rpc_get_fork_messages(harness).await,
+            "get_tree" => rpc_get_tree(harness).await,
+            "get_entries" => rpc_get_entries(harness, &msg).await,
+            "get_last_assistant_text" => rpc_get_last_assistant_text(harness).await,
+            "get_session_stats" => rpc_get_session_stats(&lane, harness).await,
+            "set_session_name" => rpc_set_session_name(&lane, &msg).await,
+            "bash" => {
+                // Detached: a long command must not block the read loop, or
+                // `abort_bash` could never be delivered.
+                command_tasks.retain(|task| !task.is_finished());
+                let request = msg.clone();
+                let out = stdout.clone();
+                let cwd = rpc_cwd.clone();
+                let cancel = bash_cancel.clone();
+                command_tasks.push(RetainedRpcTask::new(
+                    tokio::spawn(async move {
+                        let result = rpc_bash(&cwd, &cancel, &request).await;
+                        write_line(
+                            &out,
+                            &rpc_protocol::response(Some(id), "bash", result.map(Some)),
+                        )
+                        .await;
+                    }),
+                    pump_stop.clone(),
+                ));
+                continue;
+            }
+            "abort_bash" => {
+                // One shell command at a time, so a single token is enough.
+                // Cancelling a finished command is a no-op, and the token is
+                // replaced for the next one.
+                bash_cancel.cancel();
+                bash_cancel = tokio_util::sync::CancellationToken::new();
+                Ok(serde_json::json!({"aborted": true}))
+            }
+            "export_html" => rpc_export_html(harness, &rpc_cwd, &msg).await,
             "ping" => Ok(serde_json::json!({"pong": true})),
             other => Err(format!("unknown command type: {other}")),
         };
@@ -2350,6 +2417,587 @@ async fn rpc_set_active_tools(
     Ok(serde_json::json!({"activeTools": tools}))
 }
 
+// ===========================================================================
+// pi-parity RPC commands
+//
+// Everything below exists so a client written against pi's RPC reference can
+// drive tom without a special case. Each handler mirrors the documented
+// request/response shape; the notable divergences are called out in comments
+// where the two runtimes differ structurally.
+// ===========================================================================
+
+/// Queue a steering message: delivered after the current assistant turn
+/// finishes its tool calls, before the next model call.
+async fn rpc_steer(
+    lane: &Arc<dyn AgentLane>,
+    msg: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let message = queued_user_message(msg, "steer")?;
+    let result = lane.steer(message).await.map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "disposition": "queued",
+        "entryId": result.entry_id,
+        "queue": "steer",
+    }))
+}
+
+/// Queue a follow-up message: delivered only once the agent stops.
+async fn rpc_follow_up(
+    lane: &Arc<dyn AgentLane>,
+    msg: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let message = queued_user_message(msg, "follow_up")?;
+    let result = lane.follow_up(message).await.map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "disposition": "queued",
+        "entryId": result.entry_id,
+        "queue": "followUp",
+    }))
+}
+
+fn queued_user_message(
+    msg: &serde_json::Value,
+    command: &str,
+) -> Result<tom_agent::message::AgentMessage, String> {
+    let text = msg
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| format!("{command} requires a non-empty string `message`"))?;
+    Ok(tom_agent::message::AgentMessage::User(UserMessage::new(
+        text,
+        rpc_now_ms(),
+    )))
+}
+
+/// Set how queued steering messages drain. Applied to the live queue, so a
+/// client does not have to restart a session to change it.
+async fn rpc_set_queue_mode(
+    harness: &AgentHarness,
+    msg: &serde_json::Value,
+    kind: QueueModeKind,
+) -> Result<serde_json::Value, String> {
+    let raw = msg
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("{} requires `mode` (all|one-at-a-time)", kind.command()))?;
+    let mode = match raw {
+        "all" => tom_agent::types::QueueMode::All,
+        "one-at-a-time" | "one_at_a_time" => tom_agent::types::QueueMode::OneAtATime,
+        other => {
+            return Err(format!(
+                "{}: unknown mode `{other}` (expected all or one-at-a-time)",
+                kind.command()
+            ))
+        }
+    };
+    let queue_kind = match kind {
+        QueueModeKind::Steering => tom_harness::session::types::QueueKind::Steer,
+        QueueModeKind::FollowUp => tom_harness::session::types::QueueKind::FollowUp,
+    };
+    harness.set_queue_mode(queue_kind, mode);
+    Ok(serde_json::json!({"mode": raw}))
+}
+
+#[derive(Clone, Copy)]
+enum QueueModeKind {
+    Steering,
+    FollowUp,
+}
+
+impl QueueModeKind {
+    fn command(self) -> &'static str {
+        match self {
+            QueueModeKind::Steering => "set_steering_mode",
+            QueueModeKind::FollowUp => "set_follow_up_mode",
+        }
+    }
+}
+
+async fn rpc_set_auto_compaction(
+    harness: &AgentHarness,
+    msg: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let enabled = msg
+        .get("enabled")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or("set_auto_compaction requires a boolean `enabled`")?;
+    harness.set_auto_compaction(enabled);
+    Ok(serde_json::json!({"enabled": enabled}))
+}
+
+async fn rpc_set_auto_retry(
+    harness: &AgentHarness,
+    msg: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let enabled = msg
+        .get("enabled")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or("set_auto_retry requires a boolean `enabled`")?;
+    harness.set_auto_retry(enabled);
+    Ok(serde_json::json!({"enabled": enabled}))
+}
+
+/// Stop a retry that is waiting to fire. Not `abort`: the failed attempt stays
+/// the operation's result.
+async fn rpc_abort_retry(harness: &AgentHarness) -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({"aborted": harness.abort_retry()}))
+}
+
+/// Advance the thinking level through the model's supported list.
+async fn rpc_cycle_thinking_level(lane: &Arc<dyn AgentLane>) -> Result<serde_json::Value, String> {
+    let model = lane.get_model().await.map_err(|e| e.to_string())?;
+    let levels = model.supported_thinking_levels();
+    if levels.len() <= 1 {
+        // The reference returns `null` data for a model without thinking.
+        return Ok(serde_json::Value::Null);
+    }
+    let current = lane.get_thinking_level().await.map_err(|e| e.to_string())?;
+    let index = levels
+        .iter()
+        .position(|level| *level == current)
+        .unwrap_or(0);
+    let next = levels[(index + 1) % levels.len()];
+    lane.set_thinking_level(next)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"level": next}))
+}
+
+/// Advance to the next model in the catalog, keeping the provider when
+/// possible. Returns `null` data when the catalog has a single entry.
+async fn rpc_cycle_model(
+    lane: &Arc<dyn AgentLane>,
+    catalog: &[tom_ai::Model],
+) -> Result<serde_json::Value, String> {
+    if catalog.len() <= 1 {
+        return Ok(serde_json::Value::Null);
+    }
+    let current = lane.get_model().await.map_err(|e| e.to_string())?;
+    let index = catalog
+        .iter()
+        .position(|model| model.id == current.id && model.provider == current.provider)
+        .unwrap_or(0);
+    let next = &catalog[(index + 1) % catalog.len()];
+    lane.set_model(next.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "provider": next.provider,
+        "modelId": next.id,
+    }))
+}
+
+/// Start a fresh, empty session in the same storage directory.
+async fn rpc_new_session(
+    harness: &AgentHarness,
+    args: &crate::args::Args,
+    cwd: &std::path::Path,
+    session_events: &crate::session::SessionEventGate,
+) -> Result<serde_json::Value, String> {
+    // `session_before_switch` lets an extension refuse. The check runs BEFORE the
+    // new session is built: a veto must cost nothing and leave no orphan file.
+    if let Some(reason) = session_events
+        .dispatch(
+            tom_plugin_sdk::EventTag::SessionBeforeSwitch,
+            serde_json::json!({"reason": "new"}),
+        )
+        .await
+    {
+        return Ok(serde_json::json!({"cancelled": true, "reason": reason}));
+    }
+    let dir = crate::session::configured_session_dir(args, cwd);
+    let storage = crate::session::build_session(
+        &crate::session::SessionSelection::New {
+            dir: dir.clone(),
+            name: None,
+        },
+        &cwd.to_string_lossy(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    harness
+        .set_session(storage)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"cancelled": false}))
+}
+
+/// Clone the current session at its current position.
+async fn rpc_clone_session(
+    harness: &AgentHarness,
+    args: &crate::args::Args,
+    cwd: &std::path::Path,
+    session_events: &crate::session::SessionEventGate,
+) -> Result<serde_json::Value, String> {
+    // A clone forks the current session, so it is a fork for event purposes.
+    if let Some(reason) = session_events
+        .dispatch(
+            tom_plugin_sdk::EventTag::SessionBeforeFork,
+            serde_json::json!({
+                "entryId": harness.lane("main").get_leaf_id().await.ok().flatten(),
+                "position": "at",
+                "reason": "clone",
+            }),
+        )
+        .await
+    {
+        return Ok(serde_json::json!({"cancelled": true, "reason": reason}));
+    }
+    let dir = crate::session::configured_session_dir(args, cwd);
+    let forked =
+        crate::session::fork_session_storage(harness, &cwd.to_string_lossy(), &dir).await?;
+    harness
+        .set_session(forked)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"cancelled": false}))
+}
+
+/// Create a new session from an earlier user message.
+async fn rpc_fork_session(
+    harness: &AgentHarness,
+    args: &crate::args::Args,
+    cwd: &std::path::Path,
+    msg: &serde_json::Value,
+    session_events: &crate::session::SessionEventGate,
+) -> Result<serde_json::Value, String> {
+    let entry_id = msg
+        .get("entryId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or("fork requires `entryId`")?;
+
+    if let Some(reason) = session_events
+        .dispatch(
+            tom_plugin_sdk::EventTag::SessionBeforeFork,
+            serde_json::json!({"entryId": entry_id, "position": "before", "reason": "fork"}),
+        )
+        .await
+    {
+        return Ok(serde_json::json!({"cancelled": true, "reason": reason}));
+    }
+    let dir = crate::session::configured_session_dir(args, cwd);
+    let forked =
+        crate::session::fork_session_storage(harness, &cwd.to_string_lossy(), &dir).await?;
+    harness
+        .set_session(forked)
+        .await
+        .map_err(|e| e.to_string())?;
+    // The fork keeps every entry but leaves its leaf at the original tip;
+    // navigating is what actually makes it "start from here". No summary is
+    // generated, matching `/fork`'s default.
+    harness
+        .lane("main")
+        .navigate_tree(Some(entry_id), false, None, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"cancelled": false}))
+}
+
+/// The user messages a fork could start from, oldest first.
+async fn rpc_get_fork_messages(harness: &AgentHarness) -> Result<serde_json::Value, String> {
+    let entries = harness
+        .find_entries(&EntryQuery {
+            order: Some(EntryOrder::OldestFirst),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut messages = Vec::new();
+    for entry in entries {
+        let serde_json::Value::Object(data) =
+            serde_json::to_value(&entry).unwrap_or(serde_json::Value::Null)
+        else {
+            continue;
+        };
+        // Message entries carry the role inside `message`; user turns are
+        // `{type:"message", message:{kind:"user", role:"user", content:..}}`.
+        let is_user = data
+            .get("message")
+            .and_then(|message| message.get("role").or_else(|| message.get("kind")))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|role| role == "user");
+        if !is_user {
+            continue;
+        }
+        let text = data
+            .get("message")
+            .map(rpc_message_text)
+            .unwrap_or_default();
+        messages.push(serde_json::json!({
+            "entryId": entry.id(),
+            "text": text,
+            "seq": entry.seq(),
+        }));
+    }
+    Ok(serde_json::json!({"messages": messages, "count": messages.len()}))
+}
+
+/// The branch as a parent/child tree, which is what `/tree` renders.
+async fn rpc_get_tree(harness: &AgentHarness) -> Result<serde_json::Value, String> {
+    let entries = harness
+        .find_entries(&EntryQuery {
+            order: Some(EntryOrder::OldestFirst),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    let leaf = harness.get_leaf_id().await.ok().flatten();
+
+    let mut nodes = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        let data = serde_json::to_value(entry).unwrap_or(serde_json::Value::Null);
+        nodes.push(serde_json::json!({
+            "id": entry.id(),
+            "parentId": data.get("parentId").cloned().unwrap_or(serde_json::Value::Null),
+            "seq": entry.seq(),
+            "type": data.get("type").cloned().unwrap_or(serde_json::Value::Null),
+            "label": data.get("label").cloned().unwrap_or(serde_json::Value::Null),
+            "isLeaf": leaf.as_deref() == Some(entry.id()),
+        }));
+    }
+    Ok(serde_json::json!({
+        "nodes": nodes,
+        "leafId": leaf,
+        "count": nodes.len(),
+    }))
+}
+
+/// Raw entries on the current branch, newest last.
+async fn rpc_get_entries(
+    harness: &AgentHarness,
+    msg: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let limit = msg
+        .get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .map(|limit| limit.clamp(1, 500) as usize);
+    let mut entries = harness
+        .find_entries(&EntryQuery {
+            order: Some(EntryOrder::OldestFirst),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    let total = entries.len();
+    if let Some(limit) = limit {
+        if entries.len() > limit {
+            entries = entries.split_off(entries.len() - limit);
+        }
+    }
+    let entries = entries
+        .iter()
+        .map(|entry| serde_json::to_value(entry).unwrap_or(serde_json::Value::Null))
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "entries": entries,
+        "count": entries.len(),
+        "total": total,
+    }))
+}
+
+/// The last assistant message's text, or `null` when there is none.
+async fn rpc_get_last_assistant_text(harness: &AgentHarness) -> Result<serde_json::Value, String> {
+    let entries = harness
+        .find_entries(&EntryQuery {
+            order: Some(EntryOrder::NewestFirst),
+            limit: Some(200),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    for entry in entries {
+        let data = serde_json::to_value(&entry).unwrap_or(serde_json::Value::Null);
+        let Some(message) = data.get("message") else {
+            continue;
+        };
+        if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
+            continue;
+        }
+        return Ok(serde_json::json!({"text": rpc_message_text(message)}));
+    }
+    Ok(serde_json::json!({"text": serde_json::Value::Null}))
+}
+
+/// Session statistics: counts, tokens and cost, plus the context budget.
+async fn rpc_get_session_stats(
+    lane: &Arc<dyn AgentLane>,
+    harness: &AgentHarness,
+) -> Result<serde_json::Value, String> {
+    let stats = lane.get_stats().await.map_err(|e| e.to_string())?;
+    let context = rpc_context_usage(lane, harness).await;
+    Ok(serde_json::json!({
+        "messageCount": stats.message_count,
+        "cachedTokens": stats.cached_tokens,
+        "uncachedTokens": stats.uncached_tokens,
+        "totalTokens": stats.total_tokens,
+        "cost": stats.cost_total,
+        "context": context,
+        "name": lane.get_name().await.ok().flatten(),
+        "leafId": lane.get_leaf_id().await.ok().flatten(),
+    }))
+}
+
+/// Set or clear the session display name.
+async fn rpc_set_session_name(
+    lane: &Arc<dyn AgentLane>,
+    msg: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    // An explicit `null` clears the name; a missing field is a client error so
+    // a typo cannot silently erase it.
+    let Some(value) = msg.get("name") else {
+        return Err("set_session_name requires `name` (string or null)".into());
+    };
+    let name = match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(name) => Some(name.as_str()),
+        _ => return Err("set_session_name: `name` must be a string or null".into()),
+    };
+    lane.set_name(name).await.map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"name": name}))
+}
+
+/// Run a shell command in the session's working directory (RPC `bash`).
+///
+/// This is the client-side `!` command, not a model tool call: the output goes
+/// back to the client and never enters the transcript.
+async fn rpc_bash(
+    cwd: &std::path::Path,
+    cancel: &tokio_util::sync::CancellationToken,
+    msg: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let command = msg
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("bash requires a non-empty `command`")?;
+    let timeout_secs = msg
+        .get("timeout")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(120);
+
+    // Resolve to an absolute path: the executor validates that the working
+    // directory exists, and a relative `.` would be resolved against whatever
+    // the process cwd happens to be rather than the session's.
+    let cwd = if cwd.is_absolute() {
+        cwd.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|base| base.join(cwd))
+            .unwrap_or_else(|_| cwd.to_path_buf())
+    };
+    let env = std::sync::Arc::new(tom_tools::os_env::OsExecutionEnv::with_cwd(cwd));
+    let ctx = tom_tools::tools::tool_context::ExecutionToolContext::new(env.clone(), Some(env));
+    let tool = tom_tools::tools::bash::create_bash_tool(
+        &ctx,
+        Some(tom_tools::tools::bash::BashToolOptions {
+            default_timeout: Some(timeout_secs as f64),
+            // A client-side `!` command must run in the same shell the model's
+            // bash tool uses, or the two disagree about syntax.
+            shell: crate::session::bash_options().shell,
+            ..Default::default()
+        }),
+    );
+
+    let outcome = tool
+        .execute(
+            "rpc-bash",
+            serde_json::json!({"command": command, "timeout": timeout_secs}),
+            cancel.clone(),
+            std::sync::Arc::new(|_| {}),
+        )
+        .await;
+
+    let (content, error) = match outcome {
+        Ok(result) => (result.content, None),
+        // A non-zero exit is a normal result for a client-side `!` command, not
+        // a protocol failure: the user needs to see the status and any output
+        // the command produced before failing.
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
+
+    let output = content
+        .into_iter()
+        .filter_map(|block| match block {
+            tom_agent::types::TextContentOrImage::Text(text) => Some(text.text),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if cancel.is_cancelled() {
+        return Ok(serde_json::json!({"output": output, "cancelled": true}));
+    }
+    match error {
+        Some(error) => Ok(serde_json::json!({"output": output, "error": error})),
+        None => Ok(serde_json::json!({"output": output})),
+    }
+}
+
+/// Export the session as HTML (RPC `export_html`).
+async fn rpc_export_html(
+    harness: &AgentHarness,
+    cwd: &std::path::Path,
+    msg: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let requested = msg.get("outputPath").and_then(serde_json::Value::as_str);
+    let path = match requested {
+        Some(path) if !path.trim().is_empty() => {
+            let path = std::path::PathBuf::from(path);
+            if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            }
+        }
+        // A client that does not name a file gets a stable default in the
+        // working directory rather than an error.
+        _ => cwd.join(format!("session-{}.html", rpc_now_ms())),
+    };
+    crate::export::export_session(harness, crate::export::ExportFormat::Html, &path).await?;
+    Ok(serde_json::json!({"path": path.to_string_lossy()}))
+}
+
+/// Load a different session file (RPC `switch_session`).
+async fn rpc_switch_session(
+    harness: &AgentHarness,
+    args: &crate::args::Args,
+    cwd: &std::path::Path,
+    msg: &serde_json::Value,
+    session_events: &crate::session::SessionEventGate,
+) -> Result<serde_json::Value, String> {
+    let path = msg
+        .get("sessionPath")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or("switch_session requires `sessionPath`")?;
+    if let Some(reason) = session_events
+        .dispatch(
+            tom_plugin_sdk::EventTag::SessionBeforeSwitch,
+            serde_json::json!({"reason": "resume", "targetSessionFile": path}),
+        )
+        .await
+    {
+        return Ok(serde_json::json!({"cancelled": true, "reason": reason}));
+    }
+    let dir = crate::session::configured_session_dir(args, cwd);
+    let session = crate::session::build_session(
+        &crate::session::SessionSelection::ById {
+            id: path.to_string(),
+            dir,
+        },
+        &cwd.to_string_lossy(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    harness
+        .set_session(session)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"cancelled": false}))
+}
+
 /// Stable JSON projection for the fine-grained agent lifecycle stream.
 ///
 /// Delegates to the shared [`crate::remote::protocol::RemoteEvent`] so the
@@ -2609,6 +3257,7 @@ mod tests {
     };
     use tom_harness::session::types::OperationError;
 
+    include!("rpc/parity_command_tests.rs");
     include!("rpc/external_tools_configuration_tests.rs");
     include!("rpc/external_tools_lifecycle_tests.rs");
     include!("rpc/external_tools_abort_outcome_tests.rs");
@@ -2708,9 +3357,12 @@ mod tests {
                 vec![],
                 tom_extensions::UiDialogMailbox::new(),
                 None,
+                crate::session::SessionEventGate::none(),
                 crate::args::RpcMessageUpdates::default(),
                 tokio::io::BufReader::new(input.as_bytes()),
                 output.clone(),
+                crate::args::Args::default(),
+                std::path::PathBuf::from("."),
             )
             .await,
             0
@@ -2943,9 +3595,12 @@ mod tests {
                 vec![],
                 tom_extensions::UiDialogMailbox::new(),
                 None,
+                crate::session::SessionEventGate::none(),
                 crate::args::RpcMessageUpdates::default(),
                 tokio::io::BufReader::new(input.as_bytes()),
                 output.clone(),
+                crate::args::Args::default(),
+                std::path::PathBuf::from("."),
             )
             .await,
             0
@@ -2996,9 +3651,12 @@ mod tests {
                 vec![],
                 tom_extensions::UiDialogMailbox::new(),
                 Some(Arc::new(registry.snapshot())),
+                crate::session::SessionEventGate::none(),
                 crate::args::RpcMessageUpdates::default(),
                 tokio::io::BufReader::new(input.as_bytes()),
-                output.clone()
+                output.clone(),
+                crate::args::Args::default(),
+                std::path::PathBuf::from("."),
             )
             .await,
             0
@@ -3157,9 +3815,12 @@ mod tests {
                 vec![],
                 ui,
                 None,
+                crate::session::SessionEventGate::none(),
                 crate::args::RpcMessageUpdates::default(),
                 tokio::io::BufReader::new(input),
                 captured,
+                crate::args::Args::default(),
+                std::path::PathBuf::from("."),
             )
             .await
         });
@@ -3356,9 +4017,12 @@ mod tests {
             vec![],
             tom_extensions::UiDialogMailbox::new(),
             None,
+            crate::session::SessionEventGate::none(),
             crate::args::RpcMessageUpdates::default(),
             tokio::io::BufReader::new(input.as_bytes()),
             output.clone(),
+            crate::args::Args::default(),
+            std::path::PathBuf::from("."),
         )
         .await;
         assert_eq!(result, 0);
@@ -3386,9 +4050,12 @@ mod tests {
             vec![],
             tom_extensions::UiDialogMailbox::new(),
             None,
+            crate::session::SessionEventGate::none(),
             crate::args::RpcMessageUpdates::default(),
             tokio::io::BufReader::new(&input[..]),
             output.clone(),
+            crate::args::Args::default(),
+            std::path::PathBuf::from("."),
         )
         .await;
         assert_eq!(result, 0);
@@ -3417,9 +4084,12 @@ mod tests {
             vec![],
             tom_extensions::UiDialogMailbox::new(),
             None,
+            crate::session::SessionEventGate::none(),
             crate::args::RpcMessageUpdates::default(),
             tokio::io::BufReader::new(&b"{\"type\":\"compact\",\"id\":1}\n"[..]),
             output.clone(),
+            crate::args::Args::default(),
+            std::path::PathBuf::from("."),
         )
         .await;
         assert_eq!(code, 0);
@@ -3457,9 +4127,12 @@ mod tests {
             vec![],
             tom_extensions::UiDialogMailbox::new(),
             None,
+            crate::session::SessionEventGate::none(),
             crate::args::RpcMessageUpdates::default(),
             tokio::io::BufReader::new(&b""[..]),
             output.clone(),
+            crate::args::Args::default(),
+            std::path::PathBuf::from("."),
         )
         .await;
         assert_eq!(code, 0);
@@ -3531,9 +4204,12 @@ mod tests {
                         vec![],
                         tom_extensions::UiDialogMailbox::new(),
                         None,
+                        crate::session::SessionEventGate::none(),
                         mode,
                         tokio::io::BufReader::new(input),
                         captured,
+                        crate::args::Args::default(),
+                        std::path::PathBuf::from("."),
                     )
                     .await
                 });
@@ -3657,9 +4333,12 @@ mod tests {
                         vec![],
                         tom_extensions::UiDialogMailbox::new(),
                         None,
+                        crate::session::SessionEventGate::none(),
                         mode,
                         tokio::io::BufReader::new(input.as_bytes()),
-                        output.clone()
+                        output.clone(),
+                        crate::args::Args::default(),
+                        std::path::PathBuf::from("."),
                     )
                     .await,
                     0
@@ -3781,6 +4460,7 @@ mod tests {
             vec![],
             tom_extensions::UiDialogMailbox::new(),
             None,
+            crate::session::SessionEventGate::none(),
             crate::args::RpcMessageUpdates::default(),
             tokio::io::BufReader::new(
                 &b"{\"type\":\"prompt\",\"id\":1,\"message\":\"test\"}\n"[..],
@@ -3790,6 +4470,8 @@ mod tests {
                 release,
                 output: output.clone(),
             },
+            crate::args::Args::default(),
+            std::path::PathBuf::from("."),
         )
         .await;
         release_thread.join().unwrap();
@@ -3847,9 +4529,12 @@ mod tests {
                 vec![],
                 ui.clone(),
                 None,
+                crate::session::SessionEventGate::none(),
                 crate::args::RpcMessageUpdates::default(),
                 tokio::io::BufReader::new(input),
                 BrokenOutput,
+                crate::args::Args::default(),
+                std::path::PathBuf::from("."),
             ),
         )
         .await

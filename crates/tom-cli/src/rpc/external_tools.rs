@@ -4,12 +4,6 @@ use super::{
     writer::RpcWriter,
 };
 use async_trait::async_trait;
-use serde_json::{json, Value};
-use std::{
-    sync::{Arc, Weak},
-    time::Duration,
-};
-use tokio_util::sync::CancellationToken;
 use tom_agent::{
     error::AgentError,
     types::{AgentToolResult, TextContentOrImage},
@@ -17,6 +11,12 @@ use tom_agent::{
 use tom_ai::types::Content;
 use tom_harness::agent_harness::AgentLane;
 use tom_tools::tools::external::ExternalToolBackend;
+use serde_json::{json, Value};
+use std::{
+    sync::{Arc, Weak},
+    time::Duration,
+};
+use tokio_util::sync::CancellationToken;
 
 pub(crate) struct ExternalTools {
     pub broker: ClientRequestBroker,

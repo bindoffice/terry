@@ -14,6 +14,9 @@ pub mod anthropic;
 pub mod openai_completions;
 
 #[cfg(feature = "providers")]
+pub mod google;
+
+#[cfg(feature = "providers")]
 pub mod openai_responses;
 
 #[cfg(feature = "providers")]

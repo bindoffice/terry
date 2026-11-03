@@ -24,9 +24,12 @@ mod external_transport {
                     vec![],
                     tom_extensions::UiDialogMailbox::new(),
                     None,
+                    crate::session::SessionEventGate::none(),
                     crate::args::RpcMessageUpdates::default(),
                     tokio::io::BufReader::with_capacity(127, input.as_slice()),
                     output,
+                    crate::args::Args::default(),
+                    std::path::PathBuf::from("."),
                 ),
             )
             .await
@@ -47,11 +50,14 @@ mod external_transport {
                 vec![],
                 tom_extensions::UiDialogMailbox::new(),
                 None,
+                crate::session::SessionEventGate::none(),
                 crate::args::RpcMessageUpdates::default(),
                 tokio::io::BufReader::new(
                     &b"\n \t\r\n{\"id\":1,\"type\":\"ping\"}\r\n{\"id\":2,\"type\":\"ping\"}"[..],
                 ),
                 output.clone(),
+                crate::args::Args::default(),
+                std::path::PathBuf::from("."),
             ),
         )
         .await
@@ -160,9 +166,12 @@ mod external_transport {
                 vec![],
                 mailbox,
                 None,
+                crate::session::SessionEventGate::none(),
                 crate::args::RpcMessageUpdates::default(),
                 tokio::io::BufReader::new(input),
                 writer,
+                crate::args::Args::default(),
+                std::path::PathBuf::from("."),
             )
             .await
         });

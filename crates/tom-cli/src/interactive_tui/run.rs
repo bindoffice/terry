@@ -90,9 +90,18 @@ pub(super) fn launch_external_editor(draft: String, tx: mpsc::UnboundedSender<Tu
             ))));
             return;
         }
+        // Precedence: the explicit test/override variable, then the saved
+        // `externalEditor` setting, then the conventional environment. A user
+        // who set the setting in `settings.json` expects it to beat `$EDITOR`.
         let editor = std::env::var("TOM_EXTERNAL_EDITOR")
             .ok()
             .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                crate::settings::load_settings()
+                    .ok()
+                    .and_then(|settings| settings.external_editor)
+                    .filter(|value| !value.trim().is_empty())
+            })
             .or_else(|| std::env::var("VISUAL").ok())
             .or_else(|| std::env::var("EDITOR").ok())
             .unwrap_or_else(|| {

@@ -225,6 +225,7 @@ pub fn loop_config_with_converter(
         cache_retention: tom_ai::provider::CacheRetention::default(),
         session_id: None,
         signal: tokio_util::sync::CancellationToken::new(),
+        tools_budget_tokens: None,
     }
 }
 

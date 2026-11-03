@@ -373,6 +373,50 @@ pub trait AgentLane: Send + Sync {
         label: Option<&str>,
     ) -> HarnessResult<NavigationResult>;
 
+    /// Navigation with an explicit branch-summary token budget.
+    ///
+    /// `branchSummary.reserveTokens` is a user setting, and the host — not the
+    /// harness — is what reads settings. The default forwards to
+    /// [`Self::navigate_tree`] so an implementation that does not summarize is
+    /// still correct.
+    async fn navigate_tree_with_budget(
+        &self,
+        target_id: Option<&str>,
+        summarize: bool,
+        custom_instructions: Option<&str>,
+        _reserve_tokens: Option<i64>,
+    ) -> HarnessResult<NavigationResult> {
+        self.navigate_tree(target_id, summarize, custom_instructions, None)
+            .await
+    }
+
+    /// Navigation with an explicit branch-summary budget *and* an entry label.
+    ///
+    /// The label is applied to the new leaf after the move; `navigate_tree`
+    /// takes one but no implementation applied it, so the argument was dead.
+    async fn navigate_tree_labeled(
+        &self,
+        target_id: Option<&str>,
+        summarize: bool,
+        custom_instructions: Option<&str>,
+        reserve_tokens: Option<i64>,
+        label: Option<&str>,
+    ) -> HarnessResult<NavigationResult> {
+        let result = self
+            .navigate_tree_with_budget(target_id, summarize, custom_instructions, reserve_tokens)
+            .await?;
+        // `navigate_tree` has always taken a label and never applied it. Apply
+        // it here so the argument is not dead and `/tree` can name a branch.
+        if let (Some(label), NavigationOutcome::Completed { new_leaf_id, .. }) =
+            (label, &result.outcome)
+        {
+            if let Some(id) = new_leaf_id {
+                self.set_label(id, Some(label)).await?;
+            }
+        }
+        Ok(result)
+    }
+
     async fn abort(&self) -> HarnessResult<AbortResult>;
 
     async fn steer(&self, message: AgentMessage) -> HarnessResult<QueueResult>;
@@ -473,6 +517,11 @@ struct ActiveRun {
     run_id: String,
     lane: String,
     signal: CancellationToken,
+    /// Cancels an in-flight retry delay without aborting the run (RPC
+    /// `abort_retry`). Separate from `signal` on purpose: cancelling the run
+    /// would also discard the operation's recovery frames, while "stop
+    /// retrying" must leave the failed attempt's result in place.
+    retry_cancel: CancellationToken,
     /// Cancels delegated work on abort OR normal parent completion.
     children: CancellationToken,
     idle: Arc<tokio::sync::Notify>,
@@ -623,6 +672,7 @@ struct HarnessInner {
     thinking_level: ThinkingLevel,
     active_tool_names: Vec<String>,
     tools: Vec<HarnessTool>,
+    tools_budget_tokens: Option<usize>,
     resources: AgentHarnessResources,
     stream_options: AgentHarnessStreamOptions,
     retry: RetryPolicy,
@@ -843,6 +893,7 @@ impl AgentHarness {
             thinking_level: options.thinking_level,
             active_tool_names: options.active_tool_names,
             tools: options.tools,
+            tools_budget_tokens: None,
             resources: options.resources,
             stream_options: options.stream_options,
             retry: options.retry,
@@ -1054,6 +1105,115 @@ impl AgentHarness {
     /// context is to the threshold without duplicating the defaults.
     pub fn compaction_settings(&self) -> crate::types::CompactionSettings {
         self.inner.lock().unwrap().compaction.clone()
+    }
+
+    /// Change how a queue drains while the harness is live (RPC
+    /// `set_steering_mode` / `set_follow_up_mode`).
+    ///
+    /// Only the mode changes; already-queued messages stay queued and are
+    /// drained under the new rule, which is what a client switching modes
+    /// mid-session expects.
+    pub fn set_queue_mode(
+        &self,
+        kind: crate::session::types::QueueKind,
+        mode: tom_agent::types::QueueMode,
+    ) {
+        use crate::session::types::QueueKind;
+        // Clone the handle: the queue is an `Arc` shared with the lane handles,
+        // and holding the `inner` guard across the second lock is unnecessary.
+        let queue = {
+            let inner = self.inner.lock().unwrap();
+            match kind {
+                QueueKind::Steer => Arc::clone(&inner.steering_queue),
+                QueueKind::FollowUp => Arc::clone(&inner.follow_up_queue),
+                QueueKind::NextRun => Arc::clone(&inner.next_run_queue),
+                // Context messages are committed at a turn boundary, not drained
+                // by a queue mode; there is nothing to switch.
+                QueueKind::Context => return,
+            }
+        };
+        queue.lock().unwrap().mode = mode;
+    }
+
+    /// The drain mode currently in force for a queue.
+    pub fn queue_mode(
+        &self,
+        kind: crate::session::types::QueueKind,
+    ) -> tom_agent::types::QueueMode {
+        use crate::session::types::QueueKind;
+        let queue = {
+            let inner = self.inner.lock().unwrap();
+            match kind {
+                QueueKind::Steer => Arc::clone(&inner.steering_queue),
+                QueueKind::FollowUp => Arc::clone(&inner.follow_up_queue),
+                QueueKind::NextRun => Arc::clone(&inner.next_run_queue),
+                QueueKind::Context => return tom_agent::types::QueueMode::OneAtATime,
+            }
+        };
+        let mode = queue.lock().unwrap().mode;
+        mode
+    }
+
+    /// Enable or disable automatic compaction at runtime (RPC
+    /// `set_auto_compaction`). The loop reads the setting from its per-operation
+    /// snapshot, so a change takes effect on the next operation rather than
+    /// interrupting an in-flight one.
+    pub fn set_auto_compaction(&self, enabled: bool) {
+        self.inner.lock().unwrap().compaction.enabled = enabled;
+    }
+
+    /// Whether automatic compaction is currently enabled.
+    pub fn auto_compaction_enabled(&self) -> bool {
+        self.inner.lock().unwrap().compaction.enabled
+    }
+
+    /// Enable or disable automatic retry at runtime (RPC `set_auto_retry`).
+    ///
+    /// Only `enabled` is mutable: the delays and attempt ceiling come from the
+    /// user's `retry` settings block and are not a per-session decision. A
+    /// retry already sleeping keeps its timer; turning retry off prevents the
+    /// *next* scheduled attempt.
+    pub fn set_auto_retry(&self, enabled: bool) {
+        self.inner.lock().unwrap().retry.enabled = enabled;
+    }
+
+    /// Whether automatic retry is currently enabled.
+    pub fn auto_retry_enabled(&self) -> bool {
+        self.inner.lock().unwrap().retry.enabled
+    }
+
+    /// The current operation's retry-cancel token, or a token that can never
+    /// fire when no operation is active.
+    fn retry_cancel_token(&self) -> CancellationToken {
+        self.inner
+            .lock()
+            .unwrap()
+            .active_run
+            .as_ref()
+            .map(|run| run.retry_cancel.clone())
+            .unwrap_or_default()
+    }
+
+    /// Cancel an in-flight retry delay (RPC `abort_retry`).
+    ///
+    /// Returns `true` when an operation was active. The failed attempt stays the
+    /// operation's result; only the wait is cancelled, so this is not
+    /// equivalent to `abort`.
+    pub fn abort_retry(&self) -> bool {
+        let token = self
+            .inner
+            .lock()
+            .unwrap()
+            .active_run
+            .as_ref()
+            .map(|run| run.retry_cancel.clone());
+        match token {
+            Some(token) => {
+                token.cancel();
+                true
+            }
+            None => false,
+        }
     }
 
     /// The run recovery repaired and that is waiting to be continued, if any.
@@ -1795,6 +1955,92 @@ impl AgentHarness {
         })
     }
 
+    /// Refresh the declared tool set for the next turn.
+    ///
+    /// `tool_search` loads tools *mid-turn*, but a provider request is built from
+    /// the context the loop was handed when the run started. Without this hook the
+    /// matches would only become callable on the next `prompt`, and a model that
+    /// searched for a tool and then called it in the same turn would get "unknown
+    /// tool" — which is exactly what a single-turn agent does.
+    ///
+    /// The rebuild is from the live snapshot (never from the tools the turn was
+    /// handed), so it also picks up a tool loaded by an earlier step of the same
+    /// turn and drops nothing: the declared set is always `active ∩ registry`.
+    fn tool_load_hook(
+        &self,
+        next: AfterToolResults,
+        signal: CancellationToken,
+    ) -> AfterToolResults {
+        let harness = self.clone();
+        Arc::new(move |ctx: ShouldStopAfterTurnContext<'_>| {
+            let harness = harness.clone();
+            let next = Arc::clone(&next);
+            let signal = signal.clone();
+            let assistant = ctx.message.clone();
+            let tool_results = ctx.tool_results.to_vec();
+            let new_messages = ctx.new_messages.to_vec();
+            let mut context = ctx.context.clone();
+            Box::pin(async move {
+                // Run the inner hook first: it may deliver context or compact, and
+                // the tool refresh only replaces the tools field of whatever
+                // context it produced.
+                let mut changed = false;
+                if let Some(update) = next(ShouldStopAfterTurnContext {
+                    message: &assistant,
+                    tool_results: &tool_results,
+                    new_messages: &new_messages,
+                    context: &context,
+                })
+                .await
+                {
+                    if let Some(replacement) = update.context {
+                        context = replacement;
+                        changed = true;
+                    }
+                }
+                // Another hook that replaced the context wholesale keeps whatever
+                // tool list it chose; only the loader's additions are ours.
+                let snap = match harness.snapshot_config() {
+                    Ok(snap) => snap,
+                    Err(_) => {
+                        return changed.then(|| tom_agent::AgentLoopTurnUpdate {
+                            context: Some(context),
+                            ..Default::default()
+                        })
+                    }
+                };
+                let tools = harness.active_tools_with_search(&snap.tools, &snap.active_tool_names);
+                let names = |tools: &[Arc<dyn AgentTool>]| -> Vec<String> {
+                    tools
+                        .iter()
+                        .map(|tool| tool.schema().name.clone())
+                        .collect()
+                };
+                let declared = names(&context.tools);
+                let refresh = names(&tools);
+                // Only report a change when the set really differs, so an ordinary
+                // turn does not pay for a context rebuild.
+                if declared.len() == refresh.len() && declared.iter().all(|n| refresh.contains(n)) {
+                    return changed.then(|| tom_agent::AgentLoopTurnUpdate {
+                        context: Some(context),
+                        ..Default::default()
+                    });
+                }
+                if signal.is_cancelled() {
+                    return changed.then(|| tom_agent::AgentLoopTurnUpdate {
+                        context: Some(context),
+                        ..Default::default()
+                    });
+                }
+                context.tools = tools;
+                Some(tom_agent::AgentLoopTurnUpdate {
+                    context: Some(context),
+                    ..Default::default()
+                })
+            })
+        })
+    }
+
     /// `appendCustomEntry(customType, data?)` — persist a custom entry on the
     /// lane. Mirrors TS `AgentHarness.appendCustomEntry`.
     pub async fn append_custom_entry(
@@ -1806,6 +2052,241 @@ impl AgentHarness {
             .append_custom_entry(custom_type, data)
             .await
             .map_err(session_to_harness_err)
+    }
+
+    /// The registered tools that are not declared to the model: the candidates
+    /// `tool_search` ranks.
+    ///
+    /// Live rather than snapshotted: a tool loaded earlier in the same batch is
+    /// already gone from this list, so a second search cannot re-report it. The
+    /// harness itself is always excluded — loading the loader is meaningless.
+    pub fn deferred_tools(&self) -> Vec<tom_tools::DeferredTool> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner
+            .tools
+            .iter()
+            .filter(|tool| {
+                let name = &tool.tool.schema().name;
+                name != tom_tools::TOOL_SEARCH_TOOL_NAME && !inner.active_tool_names.contains(name)
+            })
+            .map(|tool| {
+                let schema = tool.tool.schema();
+                tom_tools::DeferredTool::new(schema.name.clone(), schema.description.clone())
+                    .with_parameters(schema.parameters.as_value().clone())
+            })
+            .collect()
+    }
+
+    /// The tools that would be declared on the next provider request.
+    ///
+    /// Differs from [`Self::active_tools_for_nested_calls`], which deliberately
+    /// includes deferred tools: those are reachable by a script but are *not*
+    /// declared to the model. This is the declared set, with the declaration
+    /// budget already applied, so a front end can show exactly what the next
+    /// request will carry.
+    pub fn declared_tools(&self) -> HarnessResult<Vec<Arc<dyn AgentTool>>> {
+        let snap = self.snapshot_config()?;
+        Ok(self.active_tools_with_search(&snap.tools, &snap.active_tool_names))
+    }
+
+    /// The tools a nested call (`codemode`) may reach: the declared set plus every
+    /// deferred tool, minus the caller itself.
+    ///
+    /// A deferred tool belongs here on purpose. "Deferred" means *the model* has
+    /// not been given it, not that it is unavailable — a script naming it is
+    /// exactly the interaction deferral was traded for. The `codemode` tool is
+    /// excluded so a script cannot start another script.
+    pub fn active_tools_for_nested_calls(&self) -> HarnessResult<Vec<Arc<dyn AgentTool>>> {
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if inner.closed {
+            return Err(HarnessError::closed());
+        }
+        let mut tools: Vec<Arc<dyn AgentTool>> = inner
+            .tools
+            .iter()
+            .filter(|tool| {
+                let name = &tool.tool.schema().name;
+                inner.active_tool_names.contains(name)
+            })
+            .map(|tool| crate::image_tool::wrap(Arc::clone(&tool.tool)))
+            .collect();
+        for tool in &inner.tools {
+            let name = &tool.tool.schema().name;
+            if inner.active_tool_names.contains(name) {
+                continue;
+            }
+            tools.push(crate::image_tool::wrap(Arc::clone(&tool.tool)));
+        }
+        tools.retain(|tool| tool.schema().name != tom_tools::codemode::CODEMODE_TOOL_NAME);
+        Ok(tools)
+    }
+
+    /// Run one nested tool call through the agent loop's pipeline.
+    ///
+    /// The hooks, the active tool set and the loop's validation are the ones an
+    /// ordinary call would meet — a permission gate cannot be side-stepped by
+    /// asking a script instead of the model.
+    pub async fn run_nested_tool(
+        &self,
+        name: &str,
+        args: JsonValue,
+        signal: CancellationToken,
+    ) -> Result<tom_tools::codemode::NestedToolOutcome, String> {
+        let snapshot = self.snapshot_config().map_err(|error| error.to_string())?;
+        let tools = self
+            .active_tools_for_nested_calls()
+            .map_err(|error| error.to_string())?;
+        if !tools.iter().any(|tool| tool.schema().name == name) {
+            return Err(format!("unknown tool `{name}`"));
+        }
+        // The caller's signal is the script's call token: it fires when the script
+        // stops waiting, and the run's own cancellation has to stop a nested call
+        // too, so the two are chained rather than one replacing the other.
+        let config = self.loop_config_for_nested_calls(&snapshot, signal);
+        let tool_call = tom_ai::types::ToolCall {
+            kind: tom_ai::types::ToolCallType,
+            id: format!("codemode/{name}"),
+            name: name.to_string(),
+            arguments: args,
+            thought_signature: None,
+            namespace: None,
+            recorded: None,
+        };
+        let mut assistant = tom_ai::types::AssistantMessage::empty(
+            snapshot.model.api,
+            snapshot.model.provider.clone(),
+            snapshot.model.id.clone(),
+            0,
+        );
+        assistant.content = vec![tom_ai::types::Content::ToolCall(tool_call.clone())];
+        assistant.stop_reason = tom_ai::types::StopReason::ToolUse;
+        let context = AgentContext {
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools,
+        };
+        let (result, is_error) =
+            tom_agent::run_nested_tool_call(&context, &assistant, &tool_call, &config)
+                .await
+                .map_err(|error| error.to_string())?;
+        Ok(tom_tools::codemode::NestedToolOutcome {
+            structured: structured_details(&result),
+            content: result.content,
+            is_error,
+        })
+    }
+
+    /// The loop config a nested call runs under: the run's model, hooks and
+    /// cancellation, and nothing that would start another run.
+    fn loop_config_for_nested_calls(
+        &self,
+        snapshot: &ConfigSnapshot,
+        signal: CancellationToken,
+    ) -> AgentLoopConfig {
+        AgentLoopConfig {
+            model: snapshot.model.clone(),
+            convert_to_llm: Self::build_convert_to_llm(snapshot.to_provider_messages.clone()),
+            convert_to_llm_incremental: None,
+            transform_context: None,
+            get_api_key: None,
+            should_stop_after_turn: None,
+            prepare_next_turn: None,
+            after_tool_results: None,
+            get_steering_messages: None,
+            get_follow_up_messages: None,
+            before_tool_call: snapshot.before_tool_call.clone(),
+            after_tool_call: snapshot.after_tool_call.clone(),
+            tool_execution: snapshot.tool_execution.to_agent_mode(),
+            thinking_level: snapshot.thinking_level,
+            api_key: None,
+            timeout: snapshot.stream_options.timeout,
+            stream_idle_timeout: snapshot.stream_options.stream_idle_timeout,
+            max_retries: snapshot.stream_options.max_retries,
+            max_retry_delay: snapshot.stream_options.max_retry_delay,
+            cache_retention: snapshot.stream_options.cache_retention.unwrap_or_default(),
+            session_id: Some(self.session_id()),
+            signal,
+            tools_budget_tokens: snapshot.tools_budget_tokens,
+        }
+    }
+
+    /// Whether this harness has anything for `tool_search` to find.
+    pub fn has_deferred_tools(&self) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.tools.iter().any(|tool| {
+            let name = &tool.tool.schema().name;
+            name != tom_tools::TOOL_SEARCH_TOOL_NAME && !inner.active_tool_names.contains(name)
+        })
+    }
+
+    /// Report the live context budget. Used by the `get_context_remaining` tool
+    /// so the model can decide when to compact instead of waiting for the host
+    /// threshold. The token count is the same estimator the compaction check
+    /// uses, so the two never disagree about how full the window is.
+    pub async fn context_usage(&self) -> HarnessResult<tom_tools::ContextUsage> {
+        let snap = self.snapshot_config()?;
+        let context = self.branch_context_default().await?;
+        let used_tokens = crate::compaction::estimate_context_tokens(&context.messages).tokens;
+        Ok(tom_tools::ContextUsage {
+            used_tokens,
+            context_window: snap.model.context_window as i64,
+        })
+    }
+
+    /// Admit tools into the active set and record the change on the lane.
+    ///
+    /// The load has to be durable for the same reason every other tool change
+    /// is: the declared set is derived per request, so an in-memory-only load
+    /// would vanish at the next `/tree`, resume or fork and the model would keep
+    /// calling a tool nobody declares. One `active_tools_change` entry per load
+    /// is what makes the matches stay declared on that branch.
+    pub async fn load_tools(&self, names: &[String]) -> HarnessResult<Vec<String>> {
+        let active = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if inner.closed {
+                return Err(HarnessError::closed());
+            }
+            let mut added = Vec::new();
+            for name in names {
+                if inner
+                    .active_tool_names
+                    .iter()
+                    .any(|existing| existing == name)
+                {
+                    continue;
+                }
+                // A tool that is not registered cannot be declared; skipping it
+                // keeps the recorded set a subset of the registry.
+                if !inner
+                    .tools
+                    .iter()
+                    .any(|tool| &tool.tool.schema().name == name)
+                {
+                    continue;
+                }
+                inner.active_tool_names.push(name.clone());
+                added.push(name.clone());
+            }
+            if added.is_empty() {
+                return Ok(added);
+            }
+            (inner.active_tool_names.clone(), added)
+        };
+        let (active_names, added) = active;
+        let entry = ProvisionedEntry {
+            id: self.next_entry_id(),
+            kind: ProvisionedKind::ActiveTools {
+                active_tool_names: active_names,
+            },
+        };
+        // The tools are already live; report a persistence failure instead of
+        // claiming the change was recorded, so the model learns the load will
+        // not survive a branch switch.
+        self.session
+            .append_entry(entry, &self.lane)
+            .await
+            .map_err(session_to_harness_err)?;
+        Ok(added)
     }
 
     /// `getName()` — the session name. Mirrors TS `AgentHarness.getName`.
@@ -2275,6 +2756,35 @@ impl AgentHarness {
         Ok(inner.tools.clone())
     }
 
+    /// Cap the tool-declaration payload, in approximate tokens.
+    ///
+    /// Every provider request re-sends the full declaration set, so its size is
+    /// a fixed per-turn cost paid before the model reads anything. When that set
+    /// grows (a busy MCP server, many extension tools), this trims
+    /// *descriptions* until it fits — never names or parameter schemas, because
+    /// those are what make a call correct. `None` restores the default of
+    /// sending declarations exactly as the tools define them.
+    ///
+    /// A setter rather than an `AgentHarnessOptions` field: it is a policy knob
+    /// a front end turns after creation, like `set_active_tools`, and adding a
+    /// field would churn every existing options literal for no benefit.
+    ///
+    /// This is deliberately not a `world-state diff`: tom replays statelessly,
+    /// so omitting an unchanged declaration would hide the tool rather than save
+    /// a token. See `tom_tools::tools_budget` for the reasoning.
+    pub fn set_tools_budget(&self, budget_tokens: Option<usize>) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.tools_budget_tokens = budget_tokens;
+    }
+
+    /// The current declaration budget, if any.
+    pub fn tools_budget(&self) -> Option<usize> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .tools_budget_tokens
+    }
+
     /// `setTools(tools, activeNames?)`. Mirrors TS `AgentHarness.setTools` —
     /// replaces the registry and (when `active_names` is `None`) resets
     /// `active_tool_names` to every tool's schema name. Inputs are moved in
@@ -2529,11 +3039,165 @@ impl AgentHarness {
             run_id: run_id.clone(),
             lane: self.lane.clone(),
             signal: signal.clone(),
+            retry_cancel: CancellationToken::new(),
             children: self.child_scope.lock().unwrap().child_token(),
             idle: Arc::clone(&idle),
             kind,
         });
         Ok((run_id, signal, idle))
+    }
+
+    /// Navigation with an optional branch summary, applied before the move.
+    ///
+    /// Inherent rather than a trait method: it is an implementation detail of
+    /// this harness, and a trait impl cannot declare private helpers.
+    async fn navigate_tree_budgeted(
+        &self,
+        target_id: Option<&str>,
+        summarize: bool,
+        custom_instructions: Option<&str>,
+        reserve_tokens: Option<i64>,
+    ) -> HarnessResult<NavigationResult> {
+        let run_id = self.session.id_generator().next();
+        let target = target_id.filter(|id| !id.is_empty());
+
+        // Summarize the branch *being left* before moving, because after the
+        // move the entries are no longer on this lane's path. A summary that
+        // fails must not strand the user mid-navigation: the move still
+        // happens and `summary_entry` stays `None`.
+        let summary = if summarize {
+            match self
+                .summarize_branch_before_leaving(&run_id, custom_instructions, reserve_tokens)
+                .await
+            {
+                Ok(entry) => entry,
+                Err(error) => {
+                    tracing::warn!(%error, "branch summary failed; navigating without one");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        match self.session.move_lane(&self.lane, target).await {
+            Ok(()) => {
+                let leaf = self
+                    .session
+                    .view(&self.lane)
+                    .get_leaf_id()
+                    .await
+                    .map_err(session_to_harness_err)?;
+                Ok(NavigationResult {
+                    run_id,
+                    outcome: NavigationOutcome::Completed {
+                        new_leaf_id: leaf,
+                        summary_entry: summary,
+                    },
+                })
+            }
+            Err(error) => Ok(NavigationResult {
+                run_id,
+                outcome: NavigationOutcome::Failed {
+                    leaf_id: self
+                        .session
+                        .view(&self.lane)
+                        .get_leaf_id()
+                        .await
+                        .ok()
+                        .flatten(),
+                    error: OperationError {
+                        code: "navigation_failed".into(),
+                        message: error.to_string(),
+                    },
+                },
+            }),
+        }
+    }
+
+    /// Summarize the current branch and persist the summary as a
+    /// `branch_summary` entry.
+    ///
+    /// Called *before* moving the lane, while the entries being abandoned are
+    /// still on this branch's path. Returns `Ok(None)` when there is nothing to
+    /// summarize (an empty branch), which is not an error.
+    async fn summarize_branch_before_leaving(
+        &self,
+        run_id: &str,
+        custom_instructions: Option<&str>,
+        reserve_tokens: Option<i64>,
+    ) -> HarnessResult<Option<Entry>> {
+        use crate::compaction::branch_summary::{
+            generate_branch_summary, GenerateBranchSummaryOptions,
+        };
+        use crate::compaction::compaction::CompactionLlmOptions;
+
+        let entries = self.branch_path_oldest_first().await?;
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        let from_id = entries
+            .last()
+            .map(|entry| entry.id().to_string())
+            .unwrap_or_default();
+
+        let (provider, model, thinking_level, retry, stream_options) = {
+            let inner = self.inner.lock().unwrap();
+            let model = inner.model.clone();
+            (
+                Self::resolve_provider(&inner.models, &model)?,
+                model,
+                inner.thinking_level,
+                if inner.retry.enabled {
+                    Some(inner.retry.clone())
+                } else {
+                    None
+                },
+                inner.stream_options.clone(),
+            )
+        };
+
+        let result = generate_branch_summary(
+            &entries,
+            &GenerateBranchSummaryOptions {
+                llm: CompactionLlmOptions {
+                    provider,
+                    model,
+                    api_key: None,
+                    signal: CancellationToken::new(),
+                    thinking_level: Some(thinking_level),
+                    retry,
+                    custom_instructions: custom_instructions.map(str::to_string),
+                    stream_options,
+                },
+                replace_instructions: false,
+                reserve_tokens: reserve_tokens
+                    .unwrap_or(GenerateBranchSummaryOptions::DEFAULT_RESERVE_TOKENS),
+            },
+        )
+        .await
+        .map_err(|error| HarnessError::agent(error.to_string()))?;
+
+        let details = serde_json::json!({
+            "readFiles": result.read_files,
+            "modifiedFiles": result.modified_files,
+        });
+        let entry = ProvisionedEntry {
+            id: self.session.id_generator().next(),
+            kind: ProvisionedKind::BranchSummary {
+                from_id,
+                summary: result.summary,
+                details: Some(details),
+                usage: result.usage,
+            },
+        };
+        self.write_write_deferred(run_id, &entry).await?;
+        let committed = self
+            .session
+            .append_entry(entry, &self.lane)
+            .await
+            .map_err(session_to_harness_err)?;
+        Ok(Some(committed))
     }
 
     /// Release the active-run guard and notify idle waiters.
@@ -3409,6 +4073,7 @@ impl AgentHarness {
             thinking_level: inner.thinking_level,
             active_tool_names: inner.active_tool_names.clone(),
             tools: inner.tools.clone(),
+            tools_budget_tokens: inner.tools_budget_tokens,
             system_prompt: inner.system_prompt.clone(),
             resources: inner.resources.clone(),
             stream_options: inner.stream_options.clone(),
@@ -3432,6 +4097,40 @@ impl AgentHarness {
 
     /// Build the agent tools vec, filtered by `active_tool_names`. An empty
     /// `active_tool_names` means "all tools active" (mirrors TS default).
+    ///
+    /// Deferred tools have to be *registered* to be loadable later, but they
+    /// must not be declared to the model, so they stay out of the active set
+    /// until [`AgentHarness::load_tools`] admits them.
+    /// Apply the declaration budget, returning the same tools with shortened
+    /// descriptions when the set does not fit.
+    ///
+    /// The tools themselves are kept: dropping one would make it uncallable,
+    /// which trades a token problem for a capability problem. Only the
+    /// description text is shortened, and only as much as the budget requires.
+    fn trim_tool_declarations(
+        tools: Vec<Arc<dyn AgentTool>>,
+        budget_tokens: usize,
+    ) -> Vec<Arc<dyn AgentTool>> {
+        let declared: Vec<tom_ai::types::Tool> = tools.iter().map(|t| t.schema().clone()).collect();
+        let (trimmed, changed) = tom_tools::apply_tools_budget(&declared, budget_tokens);
+        if changed == 0 {
+            return tools;
+        }
+        // Only the description differs, so the tool identity is preserved and a
+        // wrapper can serve the shortened schema.
+        tools
+            .into_iter()
+            .zip(trimmed)
+            .map(|(tool, schema)| {
+                if schema.description == tool.schema().description {
+                    tool
+                } else {
+                    crate::tool_schema_override::with_schema(tool, schema)
+                }
+            })
+            .collect()
+    }
+
     fn active_tools(tools: &[HarnessTool], active: &[String]) -> Vec<Arc<dyn AgentTool>> {
         if active.is_empty() {
             return tools
@@ -3444,6 +4143,65 @@ impl AgentHarness {
             .filter(|t| active.contains(&t.tool.schema().name))
             .map(|t| crate::image_tool::wrap(Arc::clone(&t.tool)))
             .collect()
+    }
+
+    /// Tools for this harness's tool-search surface.
+    ///
+    /// A `tool_search` tool is only projected when there is something to search
+    /// (a deferred tool exists), so a session with no MCP servers and no deferral
+    /// is unchanged: no extra tool, no extra declaration, no extra token.
+    /// The tools declared on the next provider request.
+    ///
+    /// This is the single choke point: every declaration — the run's own, the
+    /// nested-call surface, and the mid-turn refresh after `tool_search` — is
+    /// produced here, so the declaration budget is applied exactly once and
+    /// cannot be bypassed by a path that forgot about it.
+    fn active_tools_with_search(
+        &self,
+        tools: &[HarnessTool],
+        active: &[String],
+    ) -> Vec<Arc<dyn AgentTool>> {
+        let declared = self.active_tools_with_search_unbudgeted(tools, active);
+        match self.tools_budget() {
+            Some(budget) => Self::trim_tool_declarations(declared, budget),
+            None => declared,
+        }
+    }
+
+    fn active_tools_with_search_unbudgeted(
+        &self,
+        tools: &[HarnessTool],
+        active: &[String],
+    ) -> Vec<Arc<dyn AgentTool>> {
+        let mut declared = Self::active_tools(tools, active);
+        // A registry without `tool_search` (an embedded harness that manages its
+        // own tool set) is left alone: deferral is a host decision.
+        let has_search = tools
+            .iter()
+            .any(|tool| tool.tool.schema().name == tom_tools::TOOL_SEARCH_TOOL_NAME);
+        if !has_search {
+            return declared;
+        }
+        let deferred = self.deferred_tools();
+        if deferred.is_empty() {
+            return declared;
+        }
+        // The loader is only *added* here: a harness that already lists it in
+        // `active_tool_names` (the normal case) must not get it twice, since a
+        // duplicated declaration is a broken request for some providers.
+        let already_declared = declared
+            .iter()
+            .any(|tool| tool.schema().name == tom_tools::TOOL_SEARCH_TOOL_NAME);
+        if already_declared {
+            return declared;
+        }
+        if let Some(search) = tools
+            .iter()
+            .find(|tool| tool.tool.schema().name == tom_tools::TOOL_SEARCH_TOOL_NAME)
+        {
+            declared.push(crate::image_tool::wrap(Arc::clone(&search.tool)));
+        }
+        declared
     }
 
     /// Compose the system prompt: base prompt + skills listing. The base prompt
@@ -4295,7 +5053,9 @@ impl AgentHarness {
             &snap.resources,
             &snap.active_tool_names,
         );
-        let tools = Self::active_tools(&snap.tools, &snap.active_tool_names);
+        // The declaration budget is applied inside `active_tools_with_search`,
+        // the one place every declaration path goes through.
+        let tools = self.active_tools_with_search(&snap.tools, &snap.active_tool_names);
 
         let mut agent_context = AgentContext {
             system_prompt,
@@ -4515,6 +5275,7 @@ impl AgentHarness {
             // `sessionId: this.session.id`); without it every turn may miss.
             session_id: Some(self.session.storage().metadata().id),
             signal: signal.clone(),
+            tools_budget_tokens: snap.tools_budget_tokens,
         };
 
         // Deliver accepted context before compaction and again after turn-end
@@ -4525,11 +5286,14 @@ impl AgentHarness {
             signal.clone(),
             Arc::clone(&context_write_error),
         ));
-        config.prepare_next_turn = Some(self.context_boundary_hook(
-            None,
-            Arc::clone(&settle_state),
+        config.prepare_next_turn = Some(self.tool_load_hook(
+            self.context_boundary_hook(
+                None,
+                Arc::clone(&settle_state),
+                signal.clone(),
+                Arc::clone(&context_write_error),
+            ),
             signal.clone(),
-            Arc::clone(&context_write_error),
         ));
 
         // Emitter: use the caller's override if one was supplied (e.g. the TUI
@@ -4676,9 +5440,14 @@ impl AgentHarness {
                     error: retry_error.expect("retry eligibility requires an error"),
                 })
                 .await;
+            // `abort_retry` cancels this token directly; it is deliberately
+            // not the run signal, because "stop retrying" must leave the failed
+            // attempt as the operation's result instead of aborting the run.
+            let retry_cancel = self.retry_cancel_token();
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
                 _ = signal.cancelled() => break attempt_result,
+                _ = retry_cancel.cancelled() => break attempt_result,
             }
             if signal.is_cancelled() {
                 break attempt_result;
@@ -5043,6 +5812,7 @@ struct ConfigSnapshot {
     thinking_level: ThinkingLevel,
     active_tool_names: Vec<String>,
     tools: Vec<HarnessTool>,
+    tools_budget_tokens: Option<usize>,
     system_prompt: Option<String>,
     resources: AgentHarnessResources,
     stream_options: AgentHarnessStreamOptions,
@@ -5188,45 +5958,32 @@ impl AgentLane for AgentHarness {
     async fn navigate_tree(
         &self,
         target_id: Option<&str>,
-        _summarize: bool,
-        _custom_instructions: Option<&str>,
+        summarize: bool,
+        custom_instructions: Option<&str>,
         _label: Option<&str>,
     ) -> HarnessResult<NavigationResult> {
-        let run_id = self.session.id_generator().next();
-        let target = target_id.filter(|id| !id.is_empty());
-        match self.session.move_lane(&self.lane, target).await {
-            Ok(()) => {
-                let leaf = self
-                    .session
-                    .view(&self.lane)
-                    .get_leaf_id()
-                    .await
-                    .map_err(session_to_harness_err)?;
-                Ok(NavigationResult {
-                    run_id,
-                    outcome: NavigationOutcome::Completed {
-                        new_leaf_id: leaf,
-                        summary_entry: None,
-                    },
-                })
-            }
-            Err(error) => Ok(NavigationResult {
-                run_id,
-                outcome: NavigationOutcome::Failed {
-                    leaf_id: self
-                        .session
-                        .view(&self.lane)
-                        .get_leaf_id()
-                        .await
-                        .ok()
-                        .flatten(),
-                    error: OperationError {
-                        code: "navigation_failed".into(),
-                        message: error.to_string(),
-                    },
-                },
-            }),
-        }
+        // `branchSummary.reserveTokens` is a user setting, so the default here
+        // is only the fallback for an embedding caller that has no settings.
+        self.navigate_tree_with_budget(target_id, summarize, custom_instructions, None)
+            .await
+    }
+
+    async fn navigate_tree_with_budget(
+        &self,
+        target_id: Option<&str>,
+        summarize: bool,
+        custom_instructions: Option<&str>,
+        reserve_tokens: Option<i64>,
+    ) -> HarnessResult<NavigationResult> {
+        // Inherent method: the trait impl cannot declare private helpers.
+        AgentHarness::navigate_tree_budgeted(
+            self,
+            target_id,
+            summarize,
+            custom_instructions,
+            reserve_tokens,
+        )
+        .await
     }
 
     async fn abort(&self) -> HarnessResult<AbortResult> {
@@ -6432,6 +7189,123 @@ mod session_switch_tests {
         assert!(harness.take_write_failures().is_empty());
     }
 
+    /// Navigation with `summarize` must actually persist a `branch_summary`
+    /// entry. Before this was wired, `navigate_tree` discarded the flag and the
+    /// result's `summary_entry` was always `None`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn navigate_tree_with_summarize_persists_a_branch_summary() {
+        use tom_ai::providers::faux::{FauxProvider, FauxScript};
+
+        // One queued response per prompt plus one for the branch summary: the
+        // faux provider has no default, so an exhausted script is a hard error.
+        let provider = FauxProvider::new(
+            FauxScript::new()
+                .with_text("first")
+                .with_text("second")
+                .with_text("summary of the branch"),
+        );
+        let mut options = opts();
+        options.model = provider.default_model().clone();
+        options.models = vec![provider];
+        let harness = AgentHarness::create(options).await.unwrap();
+        let lane = harness.lane("main");
+
+        // Two turns give the branch something to summarize and a second leaf to
+        // navigate back to.
+        lane.prompt_text("first", Vec::new()).await.unwrap();
+        let first_leaf = lane.get_leaf_id().await.unwrap().expect("first leaf");
+        lane.prompt_text("second", Vec::new()).await.unwrap();
+
+        let result = lane
+            .navigate_tree_with_budget(Some(&first_leaf), true, Some("focus"), Some(1234))
+            .await
+            .expect("navigate");
+
+        let summary = match result.outcome {
+            NavigationOutcome::Completed {
+                summary_entry,
+                new_leaf_id,
+            } => {
+                assert_eq!(new_leaf_id.as_deref(), Some(first_leaf.as_str()));
+                summary_entry.expect("a summary entry must be produced")
+            }
+            other => panic!("expected a completed navigation, got {other:?}"),
+        };
+        assert_eq!(summary.base().entry_type, "branch_summary");
+
+        let entries = harness.find_entries(&EntryQuery::default()).await.unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.base().entry_type == "branch_summary"),
+            "the summary must be persisted, got: {:?}",
+            entries
+                .iter()
+                .map(|e| e.base().entry_type.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// `navigate_tree_labeled` must apply the label it is given. The plain
+    /// entry point accepted a label for a long time and silently dropped it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn navigate_tree_labeled_applies_the_label() {
+        use tom_ai::providers::faux::{FauxProvider, FauxScript};
+
+        let provider = FauxProvider::new(FauxScript::new().with_text("x"));
+        let mut options = opts();
+        options.model = provider.default_model().clone();
+        options.models = vec![provider];
+        let harness = AgentHarness::create(options).await.unwrap();
+        let lane = harness.lane("main");
+
+        lane.prompt_text("only", Vec::new()).await.unwrap();
+        let leaf = lane.get_leaf_id().await.unwrap().expect("leaf");
+        lane.prompt_text("second", Vec::new()).await.unwrap();
+
+        lane.navigate_tree_labeled(Some(&leaf), false, None, None, Some("checkpoint"))
+            .await
+            .expect("navigate");
+
+        let label = harness.get_label(&leaf).await.unwrap();
+        assert_eq!(label.as_deref(), Some("checkpoint"));
+    }
+
+    /// Without `summarize`, navigation must not spend an LLM call or write an
+    /// entry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn navigate_tree_without_summarize_writes_nothing() {
+        use tom_ai::providers::faux::{FauxProvider, FauxScript};
+
+        let provider = FauxProvider::new(FauxScript::new().with_text("x"));
+        let mut options = opts();
+        options.model = provider.default_model().clone();
+        options.models = vec![provider];
+        let harness = AgentHarness::create(options).await.unwrap();
+        let lane = harness.lane("main");
+
+        lane.prompt_text("only", Vec::new()).await.unwrap();
+        let leaf = lane.get_leaf_id().await.unwrap().expect("leaf");
+
+        let result = lane
+            .navigate_tree(Some(&leaf), false, None, None)
+            .await
+            .expect("navigate");
+        match result.outcome {
+            NavigationOutcome::Completed { summary_entry, .. } => {
+                assert!(summary_entry.is_none(), "no summary was requested");
+            }
+            other => panic!("expected a completed navigation, got {other:?}"),
+        }
+        let entries = harness.find_entries(&EntryQuery::default()).await.unwrap();
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.base().entry_type == "branch_summary"),
+            "a plain navigation must not write a summary"
+        );
+    }
+
     /// A backend failing every write must not grow the queue without bound.
     ///
     /// The host drains at turn boundaries, but one run can fail many writes before
@@ -7233,5 +8107,16 @@ mod recorded_recovery_tests {
         .await;
 
         assert_eq!(executions.load(Ordering::SeqCst), 1);
+    }
+}
+
+/// A tool's structured value, when it reported one. `bash` is the case that
+/// matters: it returns `{ output, exitCode }` so a script can branch on a
+/// nonzero exit without parsing text.
+fn structured_details(result: &tom_agent::AgentToolResult) -> Option<JsonValue> {
+    match &result.details {
+        JsonValue::Null => None,
+        JsonValue::Object(map) if map.is_empty() => None,
+        other => Some(other.clone()),
     }
 }

@@ -635,6 +635,149 @@ pub fn dispatch_data_event_claiming(
     claimed
 }
 
+/// Veto-aware, timeout-bounded dispatch for a lifecycle event **with a JSON
+/// payload** (`session_before_switch` / `session_before_fork`).
+///
+/// This is the data-carrying counterpart of [`dispatch_lifecycle_event`]: the
+/// RPC session commands need to tell a handler *what* is about to happen
+/// (`reason`, `sessionPath`, `entryId`) and honor a refusal, and neither
+/// existing dispatcher does both -- [`dispatch_data_event`] is fire-and-forget
+/// and ignores the return code, while [`dispatch_lifecycle_event`] carries no
+/// payload.
+///
+/// Returns `None` when no handler vetoed; `Some(reason)` names the extension
+/// that refused, which the caller turns into `{"cancelled": true}`. Same timeout
+/// and panic containment as the no-payload path.
+pub async fn dispatch_lifecycle_data_event(
+    snapshot: &RegistrySnapshot,
+    tag: EventTag,
+    data: &str,
+    keepalive: Arc<crate::PluginKeepalive>,
+) -> Option<String> {
+    if !crate::registry::assert_active(snapshot.active_flag()) {
+        return None;
+    }
+    let handlers = snapshot.handlers_for(tag).to_vec();
+    if handlers.is_empty() {
+        return None;
+    }
+    let timeout = lifecycle_timeout_for(tag);
+    for h in handlers {
+        if !crate::registry::platform_allows(&h.platforms) {
+            crate::event_log::log_handler_invocation(
+                tag,
+                &h.plugin,
+                "PlatformSkip",
+                0,
+                Some(format!("host={}", crate::registry::current_platform())),
+            );
+            continue;
+        }
+        let plugin_name = h.plugin.clone();
+        let h_task = h;
+        let tag_task = tag;
+        let data = data.to_string();
+        let started = std::time::Instant::now();
+        let keepalive = keepalive.clone();
+        let background = tom_agent::tool_execution_scope::track_background_tool();
+        let outcome = tokio::time::timeout(
+            timeout,
+            tokio::task::spawn_blocking(move || {
+                let _keepalive = keepalive;
+                let _background = background;
+                call_lifecycle_data_handler(h_task, tag_task, data)
+            }),
+        )
+        .await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        match outcome {
+            Ok(Ok(Ok(rc))) if rc == tom_plugin_sdk::EVENT_HANDLER_ABORT => {
+                tracing::warn!(
+                    tag = ?tag,
+                    plugin = %plugin_name,
+                    "extension handler vetoed lifecycle event"
+                );
+                crate::event_log::log_handler_invocation(
+                    tag,
+                    &plugin_name,
+                    "Abort",
+                    duration_ms,
+                    None,
+                );
+                return Some(format!("extension `{plugin_name}` vetoed {tag:?}"));
+            }
+            Ok(Ok(Ok(rc))) => {
+                let result = if rc == 0 { "Continue" } else { "Error" };
+                crate::event_log::log_handler_invocation(
+                    tag,
+                    &plugin_name,
+                    result,
+                    duration_ms,
+                    if rc == 0 {
+                        None
+                    } else {
+                        Some(format!("rc={rc}"))
+                    },
+                );
+            }
+            Ok(Ok(Err(_))) => {
+                tracing::error!(tag = ?tag, "extension handler panicked -- skipped");
+                crate::event_log::log_handler_invocation(
+                    tag,
+                    &plugin_name,
+                    "Panic",
+                    duration_ms,
+                    None,
+                );
+            }
+            Ok(Err(join_error)) => {
+                tracing::error!(tag = ?tag, error = %join_error, "extension handler task failed -- skipped");
+                crate::event_log::log_handler_invocation(
+                    tag,
+                    &plugin_name,
+                    "TaskFailed",
+                    duration_ms,
+                    Some(join_error.to_string()),
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    tag = ?tag,
+                    plugin = %plugin_name,
+                    timeout_ms = timeout.as_millis() as u64,
+                    "extension handler timed out -- skipped"
+                );
+                crate::event_log::log_handler_invocation(
+                    tag,
+                    &plugin_name,
+                    "Timeout",
+                    duration_ms,
+                    None,
+                );
+            }
+        }
+    }
+    None
+}
+
+/// Invoke one payload-carrying lifecycle handler on a blocking thread.
+///
+/// Takes the handler **by value** for the same `Send` reason as
+/// [`call_lifecycle_handler`], and frees the event's strings on this thread
+/// after the call.
+fn call_lifecycle_data_handler(
+    h: crate::registry::RegisteredHandler,
+    tag: EventTag,
+    data: String,
+) -> std::thread::Result<i32> {
+    let event = StablePluginEvent::data(tag, StbString::from_string(data));
+    // SAFETY: the plugin warrants `h.handler` + `h.user_data` are safe to call
+    // from any thread; catch_unwind so a panic cannot cross FFI.
+    let rc = catch_unwind(AssertUnwindSafe(|| (h.handler)(event, h.user_data)));
+    free_dispatched_event(&event);
+    rc
+}
+
 /// Per-lifecycle-event handler timeout budget (see docs/extensions/lifecycle.md):
 /// startup 5s, session shutdown 15s, everything else 10s. A handler that
 /// exceeds its budget is logged + skipped (it keeps running on its blocking
@@ -975,12 +1118,12 @@ fn free_dispatched_event(event: &StablePluginEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use tom_agent::message::AgentMessage;
     use tom_agent::types::AgentToolResult;
     use tom_ai::types::{AssistantMessage, AssistantMessageEvent, Usage};
     use tom_plugin_sdk::EventTag;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
 
     // The two handler-fan-out tests share the process-global `HANDLER_HITS`
     // counter (the handler is an `extern "C" fn` that can't capture per-test
@@ -1347,6 +1490,106 @@ mod tests {
     /// A lifecycle handler that returns a generic handled error — no veto.
     extern "C" fn error_handler(_ev: StablePluginEvent, _ud: *mut std::ffi::c_void) -> i32 {
         tom_plugin_sdk::EVENT_HANDLER_ERROR
+    }
+
+    /// Records the payload a data-carrying lifecycle event received, so a test
+    /// can prove the handler sees `reason`/`sessionPath` rather than an empty
+    /// event, and returns the veto code.
+    static SEEN_SESSION_SWITCH_PAYLOAD: std::sync::Mutex<Option<String>> =
+        std::sync::Mutex::new(None);
+
+    extern "C" fn inspect_and_abort(ev: StablePluginEvent, _ud: *mut std::ffi::c_void) -> i32 {
+        // SAFETY: called by the host dispatcher, which initialized the payload
+        // for this tag and keeps it alive for the duration of the callback.
+        let payload = unsafe { tom_plugin_sdk::events::EventView::from_raw(&ev) }.data_text();
+        *SEEN_SESSION_SWITCH_PAYLOAD.lock().unwrap() = payload;
+        tom_plugin_sdk::EVENT_HANDLER_ABORT
+    }
+
+    /// A handler that only records the payload and continues.
+    static SEEN_FORK_PAYLOAD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+    extern "C" fn inspect_and_continue(ev: StablePluginEvent, _ud: *mut std::ffi::c_void) -> i32 {
+        // SAFETY: as in `inspect_and_abort`.
+        let payload = unsafe { tom_plugin_sdk::events::EventView::from_raw(&ev) }.data_text();
+        *SEEN_FORK_PAYLOAD.lock().unwrap() = payload;
+        tom_plugin_sdk::EVENT_HANDLER_CONTINUE
+    }
+
+    /// A payload-carrying lifecycle event reaches the handler WITH its payload,
+    /// and its veto is reported. The four RPC session commands depend on both:
+    /// a handler can only decide about a switch if it knows the reason and
+    /// target, and the caller needs a refusal to turn into `cancelled: true`.
+    #[tokio::test]
+    async fn dispatch_lifecycle_data_event_passes_the_payload_and_honors_a_veto() {
+        *SEEN_SESSION_SWITCH_PAYLOAD.lock().unwrap() = None;
+        let mut reg = crate::registry::ExtensionRegistry::new();
+        reg.register_event_handler(
+            "guard-ext".to_string(),
+            EventTag::SessionBeforeSwitch,
+            inspect_and_abort,
+            std::ptr::null_mut(),
+        );
+        let snap = Arc::new(reg.snapshot());
+        let veto = dispatch_lifecycle_data_event(
+            &snap,
+            EventTag::SessionBeforeSwitch,
+            r#"{"reason":"resume","targetSessionFile":"/tmp/s.jsonl"}"#,
+            crate::PluginKeepalive::empty(),
+        )
+        .await;
+        assert_eq!(
+            veto.as_deref(),
+            Some("extension `guard-ext` vetoed SessionBeforeSwitch")
+        );
+        let seen = SEEN_SESSION_SWITCH_PAYLOAD
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the handler must receive a payload");
+        assert!(seen.contains("\"reason\":\"resume\""), "{seen}");
+        assert!(seen.contains("/tmp/s.jsonl"), "{seen}");
+    }
+
+    /// A continuing handler sees the payload too, and no veto is reported.
+    #[tokio::test]
+    async fn dispatch_lifecycle_data_event_continues_when_no_handler_vetoes() {
+        *SEEN_FORK_PAYLOAD.lock().unwrap() = None;
+        let mut reg = crate::registry::ExtensionRegistry::new();
+        reg.register_event_handler(
+            "observer".to_string(),
+            EventTag::SessionBeforeFork,
+            inspect_and_continue,
+            std::ptr::null_mut(),
+        );
+        let snap = Arc::new(reg.snapshot());
+        let veto = dispatch_lifecycle_data_event(
+            &snap,
+            EventTag::SessionBeforeFork,
+            r#"{"entryId":"e1","position":"before"}"#,
+            crate::PluginKeepalive::empty(),
+        )
+        .await;
+        assert!(veto.is_none());
+        assert_eq!(
+            SEEN_FORK_PAYLOAD.lock().unwrap().as_deref(),
+            Some(r#"{"entryId":"e1","position":"before"}"#)
+        );
+    }
+
+    /// No subscriber means no veto, and nothing to dispatch.
+    #[tokio::test]
+    async fn dispatch_lifecycle_data_event_without_handlers_allows_the_action() {
+        let reg = crate::registry::ExtensionRegistry::new();
+        let snap = Arc::new(reg.snapshot());
+        assert!(dispatch_lifecycle_data_event(
+            &snap,
+            EventTag::SessionBeforeSwitch,
+            "{}",
+            crate::PluginKeepalive::empty()
+        )
+        .await
+        .is_none());
     }
 
     #[test]

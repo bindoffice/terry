@@ -124,6 +124,11 @@ pub fn trust_path() -> Result<PathBuf, ConfigError> {
     Ok(agent_dir()?.join("trust.json"))
 }
 
+/// `~/.tom/agent/mcp.json` — user-level MCP server definitions.
+pub fn mcp_path() -> Result<PathBuf, ConfigError> {
+    Ok(agent_dir()?.join("mcp.json"))
+}
+
 fn read_text_with_fallback(
     primary: PathBuf,
     fallback: Option<PathBuf>,
@@ -952,6 +957,7 @@ mod tests {
             input: None,
             headers: None,
             compat: None,
+            truncation_policy: None,
         }
     }
 
@@ -1216,6 +1222,7 @@ mod tests {
                 input: None,
                 headers: None,
                 compat: None,
+                truncation_policy: None,
             }],
         };
         let models = provider_to_models("gateway", &cfg).expect("anthropic-compatible");
@@ -1501,6 +1508,7 @@ mod tests {
                 input: None,
                 headers: None,
                 compat: None,
+                truncation_policy: None,
             }],
         };
         let models = provider_to_models("tom-fake-provider", &cfg).unwrap();

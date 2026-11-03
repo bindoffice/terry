@@ -142,6 +142,100 @@ ANTHROPIC_BASE_URL=https://gateway.example.com
 ANTHROPIC_AUTH_TOKEN=token
 ```
 
+### 内置协议一览
+
+`models.json` 的 `api` 字段决定 wire 协议。核心内建这些：
+
+| `api` | 认证 | 端点 |
+| --- | --- | --- |
+| `anthropic-messages` | `x-api-key` / bearer | `ANTHROPIC_BASE_URL` 或 `baseUrl` |
+| `openai-completions` | bearer | `OPENAI_API_KEY` 或 `baseUrl` |
+| `openai-responses` | bearer | `baseUrl` |
+| `azure-openai-responses` | bearer | `AZURE_OPENAI_BASE_URL` / 资源名 |
+| `google-generative-ai` | `x-goog-api-key` | `GOOGLE_API_KEY` / `GEMINI_API_KEY` |
+| `google-vertex` | bearer | `GOOGLE_VERTEX_ACCESS_TOKEN`，区域主机由 location 推出 |
+
+Azure 示例（部署名和 api-version 都可省略）：
+
+```jsonc
+{
+  "providers": {
+    "azure": {
+      "api": "azure-openai-responses",
+      "baseUrl": "https://my-resource.openai.azure.com",
+      "apiKey": "sk-azure",
+      "models": [{ "id": "gpt-4o-mini" }]
+    }
+  }
+}
+```
+
+部署名与模型 id 不一致时用 `AZURE_OPENAI_DEPLOYMENT_NAME_MAP="gpt-4o-mini=prod-mini"`
+映射；`api-version` 默认 `v1`，可用 `AZURE_OPENAI_API_VERSION` 覆盖。
+
+Gemini / Vertex：
+
+```jsonc
+{
+  "providers": {
+    "gemini": {
+      "api": "google-generative-ai",
+      "apiKey": "GOOGLE_API_KEY",
+      "models": [{ "id": "gemini-2.5-pro" }]
+    }
+  }
+}
+```
+
+Vertex 需要 project 与 location（`GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION`），
+认证用导出的 access token（`GOOGLE_VERTEX_ACCESS_TOKEN`）或 API key；自动获取 ADC
+不在核心内实现。
+
+AWS Bedrock 不在核心实现：它需要 SigV4 签名与完整凭证链，依赖成本高于协议适配，
+请通过扩展提供。
+
+### 资源包（npm / git，无需 Rust 工具链）
+
+`tom install` 装的是**编译好的 Rust 扩展**，作者必须有工具链。资源包是另一条路：
+把 skills / prompts / themes / extensions 打成一个包，从 npm 或 git 安装。
+
+```bash
+tom package add npm:my-tom-pack            # 用户级 ~/.tom/agent/packages
+tom package add npm:@acme/pack@1.2.0 -l    # 项目级 ./.tom/packages
+tom package add git:github.com/me/pack#v1
+tom package add ./my-pack --force
+tom package list-resources
+tom package remove my-tom-pack
+```
+
+包可以用 `tom-package.json` 描述，或者在 `package.json` 里写 `tom`（也接受 `pi`，
+所以现成的 pi 包可以直接装）：
+
+```json
+{
+  "name": "my-tom-pack",
+  "version": "1.0.0",
+  "tom": {
+    "skills": ["./resources/skills"],
+    "prompts": ["prompts/*.md"],
+    "themes": ["./resources/themes"]
+  }
+}
+```
+
+完全不写清单也可以：`extensions/`、`skills/`、`prompts/`、`themes/` 会被自动发现。
+
+安全边界：
+
+- npm 包会校验 registry 的 `dist.integrity`（sha512/sha256）或 `shasum`，校验失败不解包。
+- 安装先落到临时目录再改名，失败不会留下半个包。
+- 每个安装目录里有 `.tom-managed.json` 标记；`tom package remove` 只删带标记的目录，
+  覆盖手写目录必须显式 `--force`。
+- 手工维护的目录用 `tom package adopt <dir>` 接管后就能被 `remove` 管理。
+
+包资源与手写资源的优先级：项目包 > 项目 `.tom/<kind>` > 用户包 > 用户 `<agent>/<kind>`，
+同名按 first-registration-wins（与既有语义一致）。
+
 ## 3. CLI 命令
 
 常用全局选项：
@@ -268,6 +362,23 @@ tom --connect 127.0.0.1:9899
 ```bash
 tom --tools read,bash,edit,write,docs -p "检查并修改项目文件"
 ```
+
+### 工具膨胀与 `tool_search`
+
+MCP 服务器接上之后，声明给模型的工具会迅速变多（一个 filesystem 服务器就有
+10+ 个）。`tool_search` 让模型用一句话找工具，而不是每次请求都声明全部：
+
+- 检索方式：BM25，搜索工具名、描述与参数 schema 的属性名/说明。
+- 命中的工具会进入 active 集合，并写成一条 `active_tools_change` 条目，因此
+  `/tree`、续接会话与 fork 之后仍然声明；同一次运行的下一轮请求即可调用。
+- 在 `mcp.json` 里用 `"exposure": "deferred"` 把某个服务器的工具移出声明集合：
+
+```json
+{ "mcpServers": { "filesystem": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."], "exposure": "deferred" } } }
+```
+
+默认是 `direct`。延迟声明是权衡：每次加载要多花一次检索调用，所以只对大工具集
+划算。
 
 ## 5. 项目目录和资源优先级
 

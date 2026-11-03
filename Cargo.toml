@@ -285,6 +285,7 @@ members = [
     "crates/tom-cli",
     "crates/tom-extensions",
     "crates/tom-harness",
+    "crates/tom-mcp",
     "crates/tom-plugin-sdk",
     "crates/tom-runtime",
     "crates/tom-telemetry",
@@ -538,6 +539,7 @@ tom-ai = { path = "crates/tom-ai" }
 tom-cli = { path = "crates/tom-cli" }
 tom-extensions = { path = "crates/tom-extensions" }
 tom-harness = { path = "crates/tom-harness" }
+tom-mcp = { path = "crates/tom-mcp" }
 tom-plugin-sdk = { path = "crates/tom-plugin-sdk" }
 tom-runtime = { path = "crates/tom-runtime" }
 tom-telemetry = { path = "crates/tom-telemetry" }
@@ -851,6 +853,7 @@ resvg = { version = "0.46.0", default-features = false, features = [
     "raster-images",
 ] }
 rsa = "0.9.6"
+rquickjs = { version = "0.14", default-features = false, features = ["std"] }
 runtimelib = { version = "1.4.0", default-features = false, features = [
     "async-dispatcher-runtime", "aws-lc-rs"
 ] }

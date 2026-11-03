@@ -20,13 +20,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 use tom_agent::agent_tool::AgentTool;
 use tom_agent::error::AgentError;
 use tom_agent::types::{AgentToolResult, TextContentOrImage, ToolResultPartial};
 use tom_ai::types::Tool;
-use schemars::JsonSchema;
-use serde::Deserialize;
-use tokio_util::sync::CancellationToken;
 
 use crate::env::ExecutionEnv;
 use crate::env::FileKind;
@@ -34,7 +34,7 @@ use crate::path_utils::resolve_read_tool_path;
 use crate::tools::tool_context::ExecutionToolContext;
 use crate::truncate::{
     format_size, truncate_head, truncate_line_default, TruncationOptions, TruncationResult,
-    DEFAULT_MAX_BYTES, GREP_MAX_LINE_LENGTH,
+    GREP_MAX_LINE_LENGTH,
 };
 
 /// Default max matches. Mirrors TS `grep.ts::DEFAULT_LIMIT`.
@@ -83,25 +83,29 @@ pub struct GrepToolDetails {
 /// bag for remote backends; the Rust port always uses the `FileSystem` trait, so
 /// this is an empty forward-compat seam (parity with `ReadToolOptions`).
 #[derive(Debug, Clone, Default)]
-pub struct GrepToolOptions {}
+pub struct GrepToolOptions {
+    /// Model-specific output budget. `None` keeps the 50 KB default.
+    pub truncation_policy: Option<crate::truncate::TruncationPolicy>,
+}
 
 /// The built-in `grep` tool. Holds an `Arc<dyn ExecutionEnv>` (read-only view).
 pub struct GrepTool {
     schema: Tool,
     env: Arc<dyn ExecutionEnv>,
+    truncation: TruncationOptions,
 }
 
 impl GrepTool {
-    fn schema() -> Tool {
+    fn schema(truncation: TruncationOptions) -> Tool {
         let params = schemars::schema_for!(GrepInput);
         Tool {
             name: "grep".to_string(),
             description: format!(
                 "Search file contents for a pattern. Returns matching lines with file paths and \
                  line numbers. Skips `.git/` directories. Output is truncated to {DEFAULT_LIMIT} \
-                 matches or {kb}KB (whichever is hit first). Long lines are truncated to \
+                 matches or {} (whichever is hit first). Long lines are truncated to \
                  {GREP_MAX_LINE_LENGTH} chars.",
-                kb = DEFAULT_MAX_BYTES / 1024
+                format_size(truncation.max_bytes_or_default())
             ),
             parameters: tom_ai::types::Schema::new(
                 serde_json::to_value(params).unwrap_or_default(),
@@ -116,10 +120,11 @@ pub fn create_grep_tool(
     context: &ExecutionToolContext,
     options: Option<GrepToolOptions>,
 ) -> Arc<dyn AgentTool> {
-    let _ = options; // forward-compat seam, no surface in v1
+    let truncation = TruncationOptions::from_policy(options.unwrap_or_default().truncation_policy);
     Arc::new(GrepTool {
-        schema: GrepTool::schema(),
+        schema: GrepTool::schema(truncation),
         env: context.env().clone(),
+        truncation,
     })
 }
 
@@ -300,7 +305,7 @@ impl AgentTool for GrepTool {
             &raw_output,
             TruncationOptions {
                 max_lines: Some(usize::MAX),
-                max_bytes: None,
+                max_bytes: Some(self.truncation.max_bytes_or_default()),
             },
         );
         let was_truncated = truncation.truncated;
@@ -319,7 +324,10 @@ impl AgentTool for GrepTool {
             details.match_limit_reached = Some(effective_limit as u32);
         }
         if was_truncated {
-            notices.push(format!("{} limit reached", format_size(DEFAULT_MAX_BYTES)));
+            notices.push(format!(
+                "{} limit reached",
+                format_size(self.truncation.max_bytes_or_default())
+            ));
             details.truncation = Some(truncation);
         }
         if lines_truncated {

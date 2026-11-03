@@ -39,6 +39,11 @@ encoding_rs = { workspace = true }
 codepage = { workspace = true }
 regex = { workspace = true }
 globset = { workspace = true }
+# Code mode: the QuickJS VM that runs model-written scripts. Only `std` is on:
+# the sandbox needs no loaders, no timers and no async integration — the
+# host-call loop drives the VM itself, which is what makes cancellation and the
+# deadline work.
+rquickjs = { workspace = true }
 # Image processing (resize, convert, EXIF). Image's default features minus
 # `avif`: tom never encodes AVIF, and the AVIF encoder stack (ravif -> rav1e)
 # needs Rust 1.85+ and stays in Cargo.lock even when unused.
@@ -58,3 +63,7 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["process", "signal"] }
+# Interactive shell sessions (`session_id`): a PTY is what makes progress bars,
+# `isatty`-gated colour and stdin-reading programs behave like a terminal. It is
+# opt-in per call, so the default path stays plain pipes.
+portable-pty = { workspace = true }

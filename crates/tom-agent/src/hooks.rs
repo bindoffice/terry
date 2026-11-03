@@ -139,6 +139,20 @@ pub struct AgentLoopConfig {
     pub session_id: Option<String>,
     /// Cancellation token for the whole run. The loop clones a child per tool.
     pub signal: CancellationToken,
+    /// Ceiling on the declaration payload, in approximate tokens. `None` (the
+    /// default) sends descriptions exactly as the tools declare them.
+    ///
+    /// Every request carries the full tool set, so its cost is paid on each
+    /// turn before the model reads anything. When a namespace grows — a server
+    /// exposing twenty tools, each with a paragraph of description — this is the
+    /// only part of that cost a host can reduce without changing what the model
+    /// is able to call: descriptions are trimmed, names and parameter schemas
+    /// are not.
+    ///
+    /// Applied by the *host* while it assembles `Context::tools`
+    /// (`tom_tools::apply_tools_budget`), not here: `tom-agent` is below
+    /// `tom-tools` in the dependency chain and must not reach up for it.
+    pub tools_budget_tokens: Option<usize>,
 }
 
 impl std::fmt::Debug for AgentLoopConfig {

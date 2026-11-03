@@ -41,6 +41,7 @@ CRATES=(
   tom-agent
   tom-tools
   tom-harness
+  tom-mcp
   tom-plugin-sdk
   tom-runtime
   tom-tui

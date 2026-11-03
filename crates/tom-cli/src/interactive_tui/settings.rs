@@ -1345,7 +1345,9 @@ fn provider_origin_protocol(
             .or_else(|| manifest.models.first().map(|model| model.api.as_str()));
         let protocol = match api {
             Some("anthropic-messages") => "Anthropic 兼容",
-            Some("openai-completions" | "openai-responses") => "OpenAI 兼容",
+            Some("openai-completions" | "openai-responses" | "azure-openai-responses") => {
+                "OpenAI 兼容"
+            }
             _ => "自定义协议",
         };
         return ("package", protocol);
@@ -1360,7 +1362,9 @@ fn provider_origin_protocol(
                 .and_then(|p| p.api.as_deref())
                 .map(|api| match api {
                     "anthropic-messages" => "Anthropic 兼容",
-                    "openai-completions" | "openai-responses" => "OpenAI 兼容",
+                    "openai-completions" | "openai-responses" | "azure-openai-responses" => {
+                        "OpenAI 兼容"
+                    }
                     _ => "自定义协议",
                 })
                 .unwrap_or("自定义协议");
@@ -1554,6 +1558,12 @@ fn show_provider_api_selector(
             .with_description("Anthropic Messages 兼容接口"),
         SelectItem::new("openai-responses", "OpenAI Responses")
             .with_description("OpenAI Responses 接口"),
+        SelectItem::new("azure-openai-responses", "Azure OpenAI")
+            .with_description("Azure OpenAI Responses 接口（部署名 + api-version）"),
+        SelectItem::new("google-generative-ai", "Google Gemini")
+            .with_description("Google Generative Language 接口"),
+        SelectItem::new("google-vertex", "Google Vertex")
+            .with_description("Google Vertex AI 接口（project + location）"),
     ];
     let list = Arc::new(SelectList::new(items, 3));
 
@@ -1830,6 +1840,7 @@ pub(super) fn save_provider_from_form(form: &ProviderFormState) -> Result<String
             input: None,
             headers: None,
             compat: None,
+            truncation_policy: None,
         }]
     };
     let provider = crate::config::ProviderConfig {
@@ -1861,6 +1872,9 @@ fn provider_display_name(id: &str) -> String {
         "openai" => "OpenAI".to_string(),
         "openai-completions" => "OpenAI Completions".to_string(),
         "openai-responses" => "OpenAI Responses".to_string(),
+        "azure-openai-responses" => "Azure OpenAI".to_string(),
+        "google-generative-ai" => "Google Gemini".to_string(),
+        "google-vertex" => "Google Vertex".to_string(),
         _ => id.to_string(),
     }
 }

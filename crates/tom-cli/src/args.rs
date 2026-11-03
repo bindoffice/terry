@@ -691,6 +691,8 @@ pub fn print_help() {
                                 (see `tom dev --help`)
   dev-local [options]            Debug only the current Rust extension
                                 (shortcut for `tom dev --local-only`)
+  mcp list|add|remove|status     Manage Model Context Protocol servers
+                                (see `tom mcp --help`)
 
 {u}Built-in Tools:{r}
   {builtin}  (enabled by default)

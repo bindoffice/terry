@@ -10,7 +10,9 @@
 
 pub mod agent_harness;
 pub mod cache_stats;
+pub mod codemode;
 pub mod compaction;
+pub mod context_budget;
 pub mod context_files;
 pub mod diagnostics;
 pub mod error;
@@ -28,5 +30,7 @@ pub mod settle;
 pub mod skills;
 pub mod system_prompt;
 pub mod tool_recovery;
+pub mod tool_schema_override;
+pub mod tool_search;
 pub mod types;
 pub mod watcher;

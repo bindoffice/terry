@@ -109,7 +109,21 @@ pub(super) async fn switch_to_session(
     state: &Arc<TuiState>,
     tool_context: &tom_extensions::ToolCallContext,
     catalog: &Arc<std::sync::RwLock<Vec<tom_ai::Model>>>,
+    session_events: &crate::session::SessionEventGate,
 ) -> bool {
+    // Same veto the RPC `switch_session` honors: an extension that refuses a
+    // switch must refuse it from the TUI too, or the guard is trivially
+    // bypassed by using the other front end.
+    if let Some(reason) = session_events
+        .dispatch(
+            tom_plugin_sdk::EventTag::SessionBeforeSwitch,
+            serde_json::json!({"reason": "resume", "targetSessionFile": id}),
+        )
+        .await
+    {
+        add_note_message(chat, &format!("Session switch declined: {reason}"));
+        return false;
+    }
     if *state.status.lock().unwrap() == RunStatus::Working {
         state.set_status(RunStatus::Aborting);
         let _ = lane.abort().await;

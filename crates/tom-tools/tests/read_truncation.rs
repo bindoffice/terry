@@ -95,6 +95,7 @@ async fn read_uses_injected_image_processor_and_resize_option() {
         Some(ReadToolOptions {
             auto_resize_images: false,
             image_processor: Some(Arc::new(TestImageProcessor)),
+            ..Default::default()
         }),
     );
     let result = run_read(tool, serde_json::json!({ "path": "image.png" }))

@@ -6,7 +6,9 @@
 The built-in agent tools and the execution environment they run against:
 `read`, `write`, `edit`, `bash`, plus `grep`, `find`, `ls` and `powershell`,
 implemented as `AgentTool`s that any agent built on
-[`tom-agent`](https://crates.io/crates/tom-agent) can use.
+[`tom-agent`](https://crates.io/crates/tom-agent) can use. It also carries
+`tool_search`, the BM25 retrieval tool that loads tools a host chose not to
+declare up front (see [Tool search](#tool-search)).
 
 The point of the crate is the split between *what a tool does* and *where it
 runs*. Tools are written against `ExecutionEnv`, so the same `read` tool works
@@ -97,6 +99,31 @@ every other test.
 
 The `tom` CLI loads `read`, `write`, `edit` and `bash` by default — the
 Pi-compatible set — and exposes the rest through the `default_tools` setting.
+
+## Tool search
+
+Declaring every tool on every request stops scaling once a host loads MCP
+servers: one filesystem server is ten-plus tools, each with a schema. `tool_search`
+lets the model ask for a tool by describing it instead.
+
+```rust
+use std::sync::Arc;
+use tom_tools::{create_tool_search_tool, DeferredTool, DeferredToolSource};
+
+let source: Arc<dyn DeferredToolSource> = Arc::new(|| {
+    vec![
+        DeferredTool::new("mcp__fs__read_file", "Read a file from the filesystem."),
+        DeferredTool::new("mcp__fs__list_dir", "List a directory."),
+    ]
+});
+let tool = create_tool_search_tool(source);
+```
+
+The ranker is BM25 over the tool's name, description and parameter schema; a
+query that *is* a tool name ranks that tool first. A hit is reported through
+`AgentToolResult::added_tool_names`, which is what the host turns into a tool
+load. `Bm25Ranker` and `create_tool_search_document` are public if you want the
+ranking without the tool — `codemode`-style script APIs use the same ranker.
 
 ## Related crates
 

@@ -29,8 +29,8 @@ pub mod types;
 pub use abort::AbortHandle;
 pub use agent::{Agent, AgentBuilder, AgentOptions};
 pub use agent_loop::{
-    run_agent_loop, run_agent_loop_continue, run_agent_loop_from_assistant, LoopOutcome,
-    NewMessages,
+    run_agent_loop, run_agent_loop_continue, run_agent_loop_from_assistant, run_nested_tool_call,
+    LoopOutcome, NewMessages,
 };
 pub use agent_tool::AgentTool;
 pub use error::AgentError;

@@ -30,10 +30,6 @@ uuid = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 tempfile = { workspace = true }
 
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
-
 [features]
 default = []
 provider-performance = ["tom-plugin-sdk/provider"]

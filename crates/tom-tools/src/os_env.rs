@@ -442,6 +442,44 @@ async fn kill_process_tree(pid: u32) {
     }
 }
 
+/// Blocking variant of [`kill_process_tree`] for callers that are not on a
+/// runtime (a session registry dropped from a plain thread, for instance).
+/// Best-effort: errors are swallowed, exactly like the async version.
+pub(crate) fn kill_process_tree_blocking(pid: u32) {
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+        // Process group first: the child was spawned as its own group leader,
+        // so this reaches everything it started.
+        if kill(Pid::from_raw(-(pid as i32)), Signal::SIGKILL).is_err() {
+            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+        }
+    }
+    #[cfg(windows)]
+    {
+        if shell_jobs::terminate(pid) {
+            return;
+        }
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        let mut cmd = std::process::Command::new("taskkill");
+        cmd.args(["/F", "/T", "/PID", &pid.to_string()]);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let _ = cmd.status();
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = pid;
+    }
+}
+
 #[async_trait]
 impl FileSystem for OsExecutionEnv {
     async fn open_append_file(

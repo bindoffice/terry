@@ -33,7 +33,7 @@ use crate::env::{ExecutionEnv, FileContent, ShellExecOptions};
 use crate::error::{ExecutionError, ExecutionErrorCode};
 use crate::truncate::{
     trim_to_last_utf8_bytes, truncate_tail, TruncationLimit, TruncationOptions, TruncationResult,
-    DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES,
+    DEFAULT_MAX_BYTES,
 };
 
 /// The 100KB cap on the in-memory `tail_output` rolling buffer.
@@ -68,6 +68,8 @@ pub struct ShellCaptureOptions<'a> {
     pub env: Option<HashMap<String, String>>,
     pub inherit_env: bool,
     pub timeout: Option<f64>,
+    /// Output budget. Defaults to the historical 50 KB / 2000 line limits.
+    pub truncation: TruncationOptions,
     pub cancel: Option<&'a CancellationToken>,
     pub on_chunk: Option<Box<dyn FnMut(&str, &dyn Fn() -> ShellCaptureProgress) + Send + 'a>>,
     pub return_execution_errors: bool,
@@ -81,6 +83,7 @@ impl<'a> Default for ShellCaptureOptions<'a> {
             env: None,
             inherit_env: true,
             timeout: None,
+            truncation: TruncationOptions::default(),
             cancel: None,
             on_chunk: None,
             return_execution_errors: false,
@@ -99,6 +102,7 @@ struct CaptureState {
     current_line_bytes: usize,
     full_output_path: Option<PathBuf>,
     full_output_requested: bool,
+    truncation: TruncationOptions,
 }
 
 impl CaptureState {
@@ -121,21 +125,24 @@ impl CaptureState {
             None => {}
         }
         self.tail_output.push_str(text);
-        // Cap the in-memory tail at MAX_OUTPUT_BYTES.
-        let trimmed = trim_to_last_utf8_bytes(&self.tail_output, MAX_OUTPUT_BYTES);
+        // Cap the in-memory tail at twice the byte budget (never below the
+        // historical 100KB floor), so a larger per-model budget is not lost.
+        let cap = std::cmp::max(MAX_OUTPUT_BYTES, self.truncation.max_bytes_or_default() * 2);
+        let trimmed = trim_to_last_utf8_bytes(&self.tail_output, cap);
         if trimmed.len() != self.tail_output.len() {
             self.tail_output = trimmed.to_string();
         }
     }
 
     fn create_progress(&self) -> ShellCaptureProgress {
-        let tail_truncation = truncate_tail(&self.tail_output, TruncationOptions::default());
+        let tail_truncation = truncate_tail(&self.tail_output, self.truncation);
+        let (max_lines, max_bytes) = self.truncation.resolve();
         let total_lines = self.completed_lines + if self.has_open_line { 1 } else { 0 };
-        let truncated = total_lines > DEFAULT_MAX_LINES || self.total_bytes > DEFAULT_MAX_BYTES;
+        let truncated = total_lines > max_lines || self.total_bytes > max_bytes;
         let truncated_by = if truncated {
             tail_truncation
                 .truncated_by
-                .or(if self.total_bytes > DEFAULT_MAX_BYTES {
+                .or(if self.total_bytes > max_bytes {
                     Some(TruncationLimit::Bytes)
                 } else {
                     Some(TruncationLimit::Lines)
@@ -243,7 +250,10 @@ pub async fn execute_shell_with_capture(
     command: &str,
     options: ShellCaptureOptions<'_>,
 ) -> Result<ShellCaptureResult, ExecutionError> {
-    let state = Arc::new(Mutex::new(CaptureState::default()));
+    let state = Arc::new(Mutex::new(CaptureState {
+        truncation: options.truncation,
+        ..CaptureState::default()
+    }));
 
     // The user on_chunk callback. Both streams fire it (the TS wires both to the
     // same onChunk); we share it via Arc<Mutex<Option<Box>>> so both closures can

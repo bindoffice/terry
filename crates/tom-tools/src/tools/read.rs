@@ -7,15 +7,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 use tom_agent::agent_tool::AgentTool;
 use tom_agent::error::AgentError;
 use tom_agent::types::{AgentToolResult, TextContentOrImage, ToolResultPartial};
 use tom_ai::types::{
     ConstrainedSamplingConfig, ConstrainedStrictness, ImageContent, ImageContentType, Tool,
 };
-use schemars::JsonSchema;
-use serde::Deserialize;
-use tokio_util::sync::CancellationToken;
 
 use crate::env::ExecutionEnv;
 use crate::file_io::{
@@ -26,7 +26,6 @@ use crate::path_utils::resolve_read_tool_path;
 use crate::tools::tool_context::ExecutionToolContext;
 use crate::truncate::{
     format_size, truncate_head, TruncationOptions, TruncationResult, DEFAULT_MAX_BYTES,
-    DEFAULT_MAX_LINES,
 };
 /// Input for the read tool. Mirrors TS `ReadToolInput`. `offset` is 1-indexed.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
@@ -54,6 +53,8 @@ pub struct ReadToolOptions {
     pub auto_resize_images: bool,
     /// Optional image conversion/resizing implementation.
     pub image_processor: Option<Arc<dyn ReadImageProcessor>>,
+    /// Model-specific output budget. `None` keeps the 50 KB / 2000 line default.
+    pub truncation_policy: Option<crate::truncate::TruncationPolicy>,
 }
 
 impl Clone for ReadToolOptions {
@@ -61,6 +62,7 @@ impl Clone for ReadToolOptions {
         Self {
             auto_resize_images: self.auto_resize_images,
             image_processor: self.image_processor.clone(),
+            truncation_policy: self.truncation_policy,
         }
     }
 }
@@ -70,6 +72,7 @@ impl std::fmt::Debug for ReadToolOptions {
         f.debug_struct("ReadToolOptions")
             .field("auto_resize_images", &self.auto_resize_images)
             .field("image_processor", &self.image_processor.is_some())
+            .field("truncation_policy", &self.truncation_policy)
             .finish()
     }
 }
@@ -79,6 +82,7 @@ impl Default for ReadToolOptions {
         Self {
             auto_resize_images: true,
             image_processor: None,
+            truncation_policy: None,
         }
     }
 }
@@ -111,16 +115,21 @@ pub struct ReadTool {
 }
 
 impl ReadTool {
-    fn schema() -> Tool {
+    fn schema(policy: Option<crate::truncate::TruncationPolicy>) -> Tool {
         let params = schemars::schema_for!(ReadInput);
+        let options = TruncationOptions::from_policy(policy);
+        let budget = match policy {
+            Some(policy) => policy.describe(),
+            None => format_size(DEFAULT_MAX_BYTES),
+        };
         Tool {
             name: "read".to_string(),
             description: format!(
                 "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). \
-                 Images are sent as attachments. For text files, output is truncated to {DEFAULT_MAX_LINES} \
-                 lines or {kb}KB (whichever is hit first). Use offset/limit for large files. When you need \
+                 Images are sent as attachments. For text files, output is truncated to {} \
+                 lines or {budget} (whichever is hit first). Use offset/limit for large files. When you need \
                  the full file, continue with offset until complete.",
-                kb = DEFAULT_MAX_BYTES / 1024
+                options.max_lines_or_default()
             ),
             parameters: tom_ai::types::Schema::new(serde_json::to_value(params).unwrap_or_default()),
             constrained_sampling: Some(ConstrainedSamplingConfig::JsonSchema { strict: ConstrainedStrictness::Prefer }),
@@ -135,8 +144,9 @@ pub fn create_read_tool(
 ) -> Arc<dyn AgentTool> {
     let options = options.unwrap_or_default();
     let image_processor = options.image_processor.clone();
+    let policy = options.truncation_policy;
     Arc::new(ReadTool {
-        schema: ReadTool::schema(),
+        schema: ReadTool::schema(policy),
         env: context.env().clone(),
         file_io: context.file_io().cloned(),
         options,
@@ -162,6 +172,8 @@ impl AgentTool for ReadTool {
     ) -> Result<AgentToolResult, AgentError> {
         let input: ReadInput = serde_json::from_value(params)
             .map_err(|e| AgentError::Validation(format!("read input invalid: {e}")))?;
+        let truncation_opts = TruncationOptions::from_policy(self.options.truncation_policy);
+        let max_bytes = truncation_opts.max_bytes_or_default();
 
         if let Some(router) = &self.file_io {
             if let Some(client) = router
@@ -172,7 +184,7 @@ impl AgentTool for ReadTool {
                 let abs = resolve_client_path(self.env.cwd(), &input.path)
                     .map_err(|e| file_err_to_agent(e.into()))?;
                 // Text only: never sniff extensions or fetch host image bytes.
-                return client_text_result(&client, &abs, &input, &signal).await;
+                return client_text_result(&client, &abs, &input, &signal, truncation_opts).await;
             }
         }
 
@@ -226,20 +238,20 @@ impl AgentTool for ReadTool {
                 (all_lines[start_line..].join("\n"), None)
             };
 
-        let truncation = truncate_head(&selected_content, TruncationOptions::default());
+        let truncation = truncate_head(&selected_content, truncation_opts);
         let (output_text, details): (String, Option<TruncationResult>) = if truncation
             .first_line_exceeds_limit
         {
             let first_line_size = format_size(all_lines[start_line].as_bytes().len());
             (
-                    format!(
-                        "[Line {start_line_display} is {first_line_size}, exceeds {} limit. \
-                         Use bash: sed -n '{start_line_display}p' {} | head -c {DEFAULT_MAX_BYTES}]",
-                        format_size(DEFAULT_MAX_BYTES),
-                        input.path
-                    ),
-                    Some(truncation),
-                )
+                format!(
+                    "[Line {start_line_display} is {first_line_size}, exceeds {} limit. \
+                         Use bash: sed -n '{start_line_display}p' {} | head -c {max_bytes}]",
+                    format_size(max_bytes),
+                    input.path
+                ),
+                Some(truncation),
+            )
         } else if truncation.truncated {
             let end_line_display = start_line_display + truncation.output_lines - 1;
             let next_offset = end_line_display + 1;
@@ -255,7 +267,7 @@ impl AgentTool for ReadTool {
                     text.push_str(&format!(
                         "\n\n[Showing lines {start_line_display}-{end_line_display} of \
                              {total_file_lines} ({} limit). Use offset={next_offset} to continue.]",
-                        format_size(DEFAULT_MAX_BYTES)
+                        format_size(max_bytes)
                     ));
                 }
             }
@@ -301,13 +313,16 @@ async fn client_text_result(
     absolute_path: &str,
     input: &ReadInput,
     signal: &CancellationToken,
+    truncation_opts: TruncationOptions,
 ) -> Result<AgentToolResult, AgentError> {
+    let max_lines = truncation_opts.max_lines_or_default();
+    let max_bytes = truncation_opts.max_bytes_or_default();
     let offset = input.offset.unwrap_or(1).max(1);
     let display_lines = input
         .limit
         .map(|n| n as usize)
-        .unwrap_or(DEFAULT_MAX_LINES)
-        .min(DEFAULT_MAX_LINES);
+        .unwrap_or(max_lines)
+        .min(max_lines);
     let text = client
         .read_text(
             absolute_path,
@@ -337,14 +352,14 @@ async fn client_text_result(
         &selected,
         TruncationOptions {
             max_lines: Some(display_lines),
-            max_bytes: Some(DEFAULT_MAX_BYTES),
+            max_bytes: Some(max_bytes),
         },
     );
     let mut output = truncation.content.clone();
     if truncation.first_line_exceeds_limit {
         output = format!(
             "[Line {offset} exceeds {} display limit. Client text was not displayed.]",
-            format_size(DEFAULT_MAX_BYTES)
+            format_size(max_bytes)
         );
     } else if has_sentinel || truncation.truncated {
         let next = u64::from(offset) + truncation.output_lines as u64;

@@ -629,12 +629,17 @@ impl RuntimeActionHost for HarnessActionHost {
         let summarize = arg_bool(&args, "summarize");
         let custom = arg_str_opt(&args, "customInstructions");
         let label = arg_str_opt(&args, "label");
+        // `branchSummary.skipPrompt: true` means "do not generate a summary";
+        // honour it here rather than ignoring the flag the harness now supports.
+        let settings = crate::settings::load_settings().unwrap_or_default();
+        let summarize = summarize && !settings.branch_summary_skipped();
         let lane = self.harness()?.lane("main");
         let result = lane
-            .navigate_tree(
+            .navigate_tree_labeled(
                 target_id.as_deref(),
                 summarize,
                 custom.as_deref(),
+                settings.branch_summary_reserve_tokens(),
                 label.as_deref(),
             )
             .await

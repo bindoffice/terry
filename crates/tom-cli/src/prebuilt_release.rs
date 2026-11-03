@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Trust anchor for prebuilt downloads; see `repository`.
-use crate::repository::REPOSITORY;
+const REPOSITORY: &str = crate::repository::REPOSITORY;
 const MAX_MANIFEST: u64 = 256 * 1024;
 const MAX_ARCHIVE: u64 = 256 * 1024 * 1024;
 

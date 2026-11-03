@@ -11,15 +11,15 @@ use std::{
 
 use async_trait::async_trait;
 use jsonschema::Validator;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 use tom_agent::{
     agent_tool::AgentTool,
     error::AgentError,
     types::{AgentToolResult, ToolResultPartial},
 };
 use tom_ai::types::{Schema, Tool};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tokio_util::sync::CancellationToken;
 
 /// A caller-supplied tool definition. Limits are measured in UTF-8 bytes.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -413,10 +413,10 @@ impl AgentTool for ExternalTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tom_agent::types::TextContentOrImage;
-    use tom_ai::types::{ImageContent, ImageContentType};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tom_agent::types::TextContentOrImage;
+    use tom_ai::types::{ImageContent, ImageContentType};
 
     fn definition() -> ExternalToolDefinition {
         ExternalToolDefinition {

@@ -181,6 +181,7 @@ async fn run_inner(mut argv: Vec<String>) -> i32 {
         Some("install") => return crate::install::run_async(&argv[1..]).await,
         Some("uninstall") => return crate::install::uninstall(&argv[1..]),
         Some("package") => return crate::packages::run(&argv[1..]),
+        Some("mcp") => return crate::mcp::run(&argv[1..]).await,
         // These historical aliases are intentionally rejected instead of
         // falling through to the prompt path.
         Some(removed @ ("pi-package" | "pi-update" | "install-pi" | "uninstall-pi")) => {
@@ -622,13 +623,22 @@ async fn run_inner(mut argv: Vec<String>) -> i32 {
                         let session = reload_context.extension_session.lock().unwrap();
                         session.snapshot_arc()
                     };
+                    // Extensions may veto a session switch mid-RPC; the gate
+                    // reads the live cell, so a `/reload` is picked up without
+                    // re-plumbing the loop.
+                    let session_events = crate::session::SessionEventGate::new(
+                        std::sync::Arc::clone(&reload_context.extension_session),
+                    );
                     crate::modes::rpc(
                         &harness,
                         Some(event_rx),
                         model_catalog,
                         reload_context.ui_dialog.clone(),
                         oauth_snapshot,
+                        session_events,
                         parsed.rpc_message_updates,
+                        parsed.clone(),
+                        cwd.clone(),
                     )
                     .await
                 };

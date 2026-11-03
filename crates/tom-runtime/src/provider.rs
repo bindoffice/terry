@@ -120,7 +120,7 @@ pub enum ResolveError {
     HttpConfiguration,
     #[error("No implementation registered for provider {provider:?} and API {api}")]
     UnsupportedApi { provider: String, api: String },
-    #[error("Unknown provider \"{0}\". Supported: anthropic, openai-completions, openai-responses, a models.json provider id, or an installed provider package")]
+    #[error("Unknown provider \"{0}\". Supported: anthropic, openai-completions, openai-responses, azure-openai-responses, google-generative-ai, google-vertex, a models.json provider id, or an installed provider package")]
     UnknownProvider(String),
     #[error(
         "Provider \"{requested}\" is ambiguous: {matches}. Use the exact provider id to select one."
@@ -195,16 +195,21 @@ fn provider_http_client(
     }
     // Validate endpoints before creating a usable provider. Error text must
     // never include proxy URLs, which can contain usernames and passwords.
+    // A provider whose endpoint is resolved per *request* (Azure: one resource
+    // per user) has no usable default here, so an empty endpoint is skipped
+    // rather than validated. The provider surfaces the missing endpoint itself,
+    // with an error that names the setting to set.
+    let resolved_default = (!default_base_url.is_empty()).then_some(default_base_url);
     let targets: Vec<_> = if models.is_empty() {
-        vec![default_base_url]
+        resolved_default.into_iter().collect()
     } else {
         models
             .iter()
-            .map(|model| {
-                if model.base_url.is_empty() {
-                    default_base_url
+            .filter_map(|model| {
+                if !model.base_url.is_empty() {
+                    Some(model.base_url.as_str())
                 } else {
-                    model.base_url.as_str()
+                    resolved_default
                 }
             })
             .collect()
@@ -1032,7 +1037,12 @@ fn resolve_openai_credentials_with(
     let mut provider_ids = vec!["openai".to_string()];
     for (provider_id, provider_cfg) in &cfg.providers {
         if (config::provider_is_openai_completions(provider_cfg)
-            || config::provider_is_openai_responses(provider_cfg))
+            || config::provider_is_openai_responses(provider_cfg)
+            || config::provider_is_azure_openai_responses(provider_cfg)
+            // Google uses an API key or a bearer token, both read through the
+            // same credential store, so it joins this set too.
+            || config::provider_is_google_generative_ai(provider_cfg)
+            || config::provider_is_google_vertex(provider_cfg))
             && !provider_ids.contains(provider_id)
         {
             provider_ids.push(provider_id.clone());
@@ -1256,6 +1266,11 @@ fn provider_is_known(requested: &str, cfg: &config::ModelsConfig) -> bool {
         || requested.eq_ignore_ascii_case("openai")
         || requested.eq_ignore_ascii_case("openai-completions")
         || requested.eq_ignore_ascii_case("openai-responses")
+        || requested.eq_ignore_ascii_case("azure")
+        || requested.eq_ignore_ascii_case("azure-openai-responses")
+        || requested.eq_ignore_ascii_case("google")
+        || requested.eq_ignore_ascii_case("google-generative-ai")
+        || requested.eq_ignore_ascii_case("google-vertex")
 }
 
 /// Canonicalize user-facing `--provider` input without weakening provider
@@ -1275,6 +1290,9 @@ fn canonicalize_cli_provider(
         "openai",
         "openai-completions",
         "openai-responses",
+        "azure-openai-responses",
+        "google-generative-ai",
+        "google-vertex",
     ];
     if BUILTIN_PROVIDER_IDS.contains(&requested) {
         return Ok(requested.to_string());
@@ -1331,6 +1349,19 @@ fn provider_matches(model: &Model, requested: &str, cfg: &config::ModelsConfig) 
     if requested.eq_ignore_ascii_case("openai-responses") {
         return matches!(model.api, tom_ai::Api::OpenaiResponses);
     }
+    if requested.eq_ignore_ascii_case("azure-openai-responses")
+        || requested.eq_ignore_ascii_case("azure")
+    {
+        return matches!(model.api, tom_ai::Api::AzureOpenaiResponses);
+    }
+    if requested.eq_ignore_ascii_case("google-generative-ai")
+        || requested.eq_ignore_ascii_case("gemini")
+    {
+        return matches!(model.api, tom_ai::Api::GoogleGenerativeAi);
+    }
+    if requested.eq_ignore_ascii_case("google-vertex") || requested.eq_ignore_ascii_case("vertex") {
+        return matches!(model.api, tom_ai::Api::GoogleVertex);
+    }
     false
 }
 
@@ -1366,9 +1397,15 @@ fn model_is_authed_for_resolution(
             tom_ai::Api::AnthropicMessages => {
                 anthropic_credential_for(anthropic_credentials, &model.provider).is_some()
             }
-            tom_ai::Api::OpenaiCompletions | tom_ai::Api::OpenaiResponses => {
+            tom_ai::Api::OpenaiCompletions
+            | tom_ai::Api::OpenaiResponses
+            | tom_ai::Api::AzureOpenaiResponses => {
                 openai_credential_for(openai_credentials, &model.provider).is_some()
             }
+            // Google credentials arrive as headers or an API key on the model,
+            // both of which `model_has_header_auth` / the CLI key already
+            // covered above.
+            tom_ai::Api::GoogleGenerativeAi | tom_ai::Api::GoogleVertex => false,
             _ => false,
         }
 }

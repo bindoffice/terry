@@ -4,6 +4,7 @@
 //! them, each registry request uses a short timeout, and cached values are
 //! retained only as a fallback for temporary registry failures.
 
+use crate::repository::{releases_api, releases_latest_api};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -21,7 +22,6 @@ const UPDATE_CHECK_CONCURRENCY: usize = 4;
 // Both endpoints come from `repository`, so a fork or a mirror only has to
 // change one place. They are functions rather than constants because
 // `TOM_RELEASES_URL` can redirect a running binary.
-use crate::repository::{releases_api, releases_latest_api};
 const STAGED_TOM_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const MAX_STAGED_TOM_OUTPUT_BYTES: usize = 4 * 1024;
 const MAX_SELF_UPDATE_STATUS_BYTES: u64 = 64 * 1024;

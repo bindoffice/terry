@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use tom_agent::agent_tool::AgentTool;
 use tom_ai::Provider;
 use tom_harness::agent_harness::AgentHarness;
 use tom_harness::context_files::{format_project_context, load_project_context_files};
@@ -50,7 +51,7 @@ use tom_harness::types::{
 #[cfg(windows)]
 use tom_tools::create_powershell_tool;
 use tom_tools::{
-    create_bash_tool, create_edit_tool, create_read_tool, create_write_tool, ExecutionToolContext,
+    create_edit_tool, create_read_tool, create_write_tool, ExecutionToolContext,
     MutationQueueRegistry, OsExecutionEnv,
 };
 
@@ -284,6 +285,8 @@ fn builtin_tool_snippet(name: &str) -> Option<&'static str> {
         "find" => "Find files by glob pattern",
         "ls" => "List directory contents",
         "powershell" => "Execute PowerShell commands on Windows",
+        "tool_search" => "Search tools that are not loaded yet and load the matches",
+        "codemode" => "Run JavaScript that calls tools (batch, chain and filter calls in one script)",
         _ => return None,
     })
 }
@@ -574,7 +577,7 @@ pub async fn build_prepared(
     let ctx =
         ExecutionToolContext::new(env_dyn.clone(), Some(mut_env)).with_file_io(file_io.clone());
 
-    let mut tools = build_tools(&ctx, args);
+    let mut tools = build_tools(&ctx, args, resolved.model.truncation_budget());
 
     // ---- Extensions (Part B2) ----
     // Load cdylib plugins from the resolved extension dirs, merge their tools
@@ -584,7 +587,108 @@ pub async fn build_prepared(
     // the harness lifetime via the returned session guard. `--no-extensions`
     // skips discovery entirely (no dirs scanned, no plugins loaded).
     merge_extension_tools(&mut tools, &extension_session, args, &tool_context);
-    let active = filter_active_tool_names(active_tool_names(&tools, args), args);
+
+    // ---- MCP servers ----
+    // Loaded last so a same-named extension tool cannot silently shadow an MCP
+    // tool; the tool policy is applied inside the merge, and the session guard
+    // is kept alive for the harness lifetime (dropping it would kill every
+    // stdio child mid-session). `--no-extensions` also disables MCP, because
+    // both are "external tools" from the user's point of view.
+    let mcp_session = if args.no_extensions {
+        None
+    } else {
+        crate::mcp::load_for_session(cwd, project_trusted).await
+    };
+    // Tool-search wiring. `tool_search` is registered whenever MCP contributed a
+    // tool: with a server connected, the tool count is no longer the eight
+    // built-ins, and declaring all of them on every request spends context and
+    // hurts selection. A server marked `"exposure": "deferred"` contributes its
+    // tools to the registry but not to the active set, so the model only sees
+    // them after `tool_search` loads a match. `direct` stays the default: deferral
+    // trades a search round trip for context, which only pays off for big servers.
+    let (tool_search, deferred_mcp_tools) = merge_mcp_tools(&mut tools, mcp_session.as_ref(), args);
+    if args.verbose {
+        if let Some(mcp) = &mcp_session {
+            for line in mcp.summary_lines() {
+                eprintln!("mcp: {line}");
+            }
+            if !deferred_mcp_tools.is_empty() {
+                eprintln!(
+                    "mcp: {} tool(s) deferred behind tool_search",
+                    deferred_mcp_tools.len()
+                );
+            }
+        }
+    }
+    if let Some(mcp) = &mcp_session {
+        for failure in mcp.failures() {
+            eprintln!("warning: mcp: {failure}");
+        }
+    }
+
+    // ---- codemode ----
+    // Registered whenever the tool policy allows it, because its value is exactly
+    // the flows the built-in tools cannot express in one call: batch, chain,
+    // filter. `store`/`load` and the nested-call pipeline are harness operations,
+    // so the tool starts with an empty host and is bound right after
+    // `AgentHarness::create` (same late-binding shape as `tool_search`).
+    let codemode_settings = crate::settings::load_settings()
+        .ok()
+        .and_then(|settings| settings.codemode);
+    let codemode = tool_name_allowed(tom_tools::codemode::CODEMODE_TOOL_NAME, args).then(|| {
+        tom_tools::codemode::CodemodeToolImpl::with_options(
+            tom_tools::codemode::CodemodeToolOptions {
+                namespaces: crate::mcp_session::codemode_namespaces(mcp_session.as_ref()),
+                inline_budget: codemode_settings
+                    .as_ref()
+                    .and_then(|settings| settings.inline_budget)
+                    .unwrap_or(tom_tools::codemode::DEFAULT_CODEMODE_INLINE_BUDGET),
+                mode: match codemode_settings.as_ref().map(|settings| settings.mode()) {
+                    Some(crate::settings::CodemodeMode::Only) => {
+                        tom_tools::codemode::CodemodeMode::Only
+                    }
+                    _ => tom_tools::codemode::CodemodeMode::On,
+                },
+                ..Default::default()
+            },
+        )
+    });
+    if let Some(codemode) = &codemode {
+        tools.push(HarnessTool::new(Arc::clone(codemode) as Arc<dyn AgentTool>));
+    }
+
+    // Deferred tools stay registered but out of the declared set; `tool_search`
+    // is the only way in, so it is active whenever a deferred tool exists.
+    let mut active = filter_active_tool_names(active_tool_names(&tools, args), args);
+    active.retain(|name| !deferred_mcp_tools.iter().any(|deferred| deferred == name));
+    if let Some(tool_search) = &tool_search {
+        tools.push(HarnessTool::new(Arc::clone(tool_search)));
+        active.push(tom_tools::TOOL_SEARCH_TOOL_NAME.to_string());
+    }
+    if codemode.is_some()
+        && !active
+            .iter()
+            .any(|name| name == tom_tools::codemode::CODEMODE_TOOL_NAME)
+    {
+        active.push(tom_tools::codemode::CODEMODE_TOOL_NAME.to_string());
+    }
+
+    // `get_context_remaining` is a harness-bound tool: the schema exists now so
+    // the declaration is stable from the first request, and the provider is
+    // attached right after `AgentHarness::create` (same shape as `tool_search`).
+    let context_remaining = tool_name_allowed(tom_tools::GET_CONTEXT_REMAINING_TOOL_NAME, args)
+        .then(tom_tools::create_get_context_remaining_tool);
+    if let Some(context_remaining) = &context_remaining {
+        tools.push(HarnessTool::new(
+            Arc::clone(context_remaining) as Arc<dyn AgentTool>
+        ));
+        if !active
+            .iter()
+            .any(|name| name == tom_tools::GET_CONTEXT_REMAINING_TOOL_NAME)
+        {
+            active.push(tom_tools::GET_CONTEXT_REMAINING_TOOL_NAME.to_string());
+        }
+    }
 
     // ---- Session storage ----
     // The root is the one `prepare_extensions` froze at startup, never a fresh
@@ -1035,6 +1139,33 @@ pub async fn build_prepared(
                 &harness_cell,
                 Arc::new(h.clone()),
             );
+            // Same late binding for `tool_search`: the tool was built with the
+            // other tools, but loading is a harness operation.
+            if tool_search.is_some() {
+                tool_search_cell_handle().set_harness(&h);
+            }
+            // codemode: nested calls and `store()` are harness operations.
+            if let Some(codemode) = &codemode {
+                codemode.set_host(tom_harness::codemode::CodemodeBinding::new(
+                    &h,
+                    crate::mcp_session::codemode_namespaces(mcp_session.as_ref()),
+                ));
+                codemode.set_store(tom_harness::codemode::SessionCodemodeStore::new(&h));
+            }
+            // `get_context_remaining` asks the harness for the live budget.
+            if let Some(context_remaining) = &context_remaining {
+                context_remaining.set_provider(Arc::new(
+                    tom_harness::context_budget::HarnessContextUsage::new(&h),
+                ));
+            }
+            // Declarations are re-sent with every request, so their size is a
+            // fixed per-turn cost paid before the model reads anything. A busy
+            // MCP server can push it into the thousands of tokens; the settings
+            // ceiling trims descriptions (never names or schemas) to keep it
+            // bounded.
+            if let Some(budget) = saved_settings.tools_budget_tokens {
+                h.set_tools_budget(Some(budget));
+            }
             h
         }
         Err(e) => return Err(BuildError::HarnessCreate(e.to_string())),
@@ -1097,6 +1228,7 @@ pub async fn build_prepared(
     reload_args.session_dir = Some(session_dir);
     let reload_context = ReloadContext {
         extension_session: extension_session_cell,
+        mcp: mcp_session.map(Arc::new),
         action_bridge: Arc::new(Mutex::new(Some(Arc::clone(&action_bridge)))),
         tool_context,
         file_io,
@@ -1225,6 +1357,12 @@ pub struct ReloadContext {
     pub file_io: Arc<tom_tools::file_io::FileIORouter>,
     /// The live extension-session cell (swapped on reload).
     pub extension_session: ExtensionSessionCell,
+    /// Live MCP server connections. Held here only to keep the child processes
+    /// alive for the harness lifetime: dropping this kills every stdio server,
+    /// which would make every MCP tool fail mid-session. Reconnecting on
+    /// `/reload` is deliberately not attempted — server state is not the
+    /// extension registry's to rebuild.
+    pub mcp: Option<Arc<crate::mcp_session::McpSession>>,
     /// The session's plugin-tool context (`cwd` + session id), reused — not
     /// rebuilt — on reload so the rebuilt adapters keep serving the SAME
     /// session. A reload that made a fresh context would leave every plugin
@@ -1344,6 +1482,52 @@ pub async fn dispatch_session_event_async(
     match snapshot {
         Some(snapshot) => tom_extensions::dispatch_lifecycle_event(&snapshot, tag, keepalive).await,
         None => None,
+    }
+}
+
+/// A veto-capable dispatcher for session-lifecycle events, resolved on each call.
+///
+/// The RPC server and the TUI both need to ask extensions "may I switch the
+/// session?" without holding `ReloadContext` (which owns the harness-independent
+/// reload machinery). The cell is read per call, so a `/reload` that swaps the
+/// extension session is picked up without re-plumbing the caller.
+#[derive(Clone)]
+pub struct SessionEventGate {
+    extension_session: ExtensionSessionCell,
+}
+
+impl SessionEventGate {
+    pub fn new(extension_session: ExtensionSessionCell) -> Self {
+        Self { extension_session }
+    }
+
+    /// A gate with no extensions: every request is allowed.
+    pub fn none() -> Self {
+        Self::new(Arc::new(std::sync::Mutex::new(
+            tom_extensions::ExtensionSession::none(),
+        )))
+    }
+
+    /// Dispatch `tag` with a JSON payload and return `Some(reason)` when an
+    /// extension vetoed it.
+    ///
+    /// The payload is what makes the event useful: a handler deciding whether to
+    /// allow a switch needs to know `reason` (`new`/`resume`/`fork`) and the
+    /// target, not merely that *something* is happening.
+    pub async fn dispatch(
+        &self,
+        tag: tom_plugin_sdk::EventTag,
+        data: serde_json::Value,
+    ) -> Option<String> {
+        // Take the snapshot + keepalive and drop the cell's lock before awaiting:
+        // a handler may re-enter a reload path that locks the same cell.
+        let (snapshot, keepalive) = {
+            let session = self.extension_session.lock().unwrap();
+            (session.snapshot_arc(), session.keepalive())
+        };
+        let snapshot = snapshot?;
+        tom_extensions::dispatch_lifecycle_data_event(&snapshot, tag, &data.to_string(), keepalive)
+            .await
     }
 }
 
@@ -1782,15 +1966,42 @@ where
     let mut_env: Arc<dyn tom_tools::MutatingEnv> = env.clone();
     let tool_ctx = tom_tools::ExecutionToolContext::new(env_dyn.clone(), Some(mut_env))
         .with_file_io(ctx.file_io.clone());
-    let mut tools = build_tools(&tool_ctx, &effective_args);
+    let mut tools = build_tools(
+        &tool_ctx,
+        &effective_args,
+        refreshed
+            .as_ref()
+            .map(|r| r.model.truncation_budget())
+            .unwrap_or_else(|| ctx.resolved_model.truncation_budget()),
+    );
     merge_extension_tools(
         &mut tools,
         &extension_session,
         &effective_args,
         &ctx.tool_context,
     );
+    // MCP tools are rebuilt from the live connections, not reconnected: the
+    // session guard is held in the reload context precisely so a reload does not
+    // kill every stdio child. Skipping this re-merge dropped every MCP tool from
+    // the harness on `/reload` while the servers stayed alive, so the model lost
+    // the tools and the connection was wasted.
+    let (tool_search, deferred_mcp_tools) =
+        merge_mcp_tools(&mut tools, ctx.mcp.as_deref(), &effective_args);
+    if tool_search.is_some() {
+        tool_search_cell_handle().set_harness(harness);
+    }
     let mut active = active_tool_names(&tools, &effective_args);
     active = filter_active_tool_names(active, &effective_args);
+    // A reloaded registry must keep the declared arm of the split: the tools a
+    // session loaded through `tool_search` are back in `active_tool_names`
+    // (persisted as an `active_tools_change` entry), so they stay declared, but a
+    // tool that was never loaded must not become declared just because the
+    // registry was rebuilt.
+    active.retain(|name| !deferred_mcp_tools.iter().any(|deferred| deferred == name));
+    if let Some(tool_search) = &tool_search {
+        tools.push(HarnessTool::new(Arc::clone(tool_search)));
+        active.push(tom_tools::TOOL_SEARCH_TOOL_NAME.to_string());
+    }
     let prompt_tools = active.clone();
     let prompt_metadata = extension_tool_prompt_metadata(&extension_session);
     let prior_reasoning_replayed = tom_ai::model::prior_reasoning_is_replayed(&ctx.resolved_model);
@@ -2226,6 +2437,62 @@ fn merge_extension_tools(
     }
 }
 
+/// Merge MCP tools into the tool set and decide which of them are declared.
+///
+/// Same-name collision replaces, matching the extension-merge rule, and the CLI
+/// tool policy still applies. Tools of a `deferred` server are registered but
+/// returned in the deferred list instead of the active set: the harness declares
+/// only active tools, so a deferred tool is reachable solely through
+/// `tool_search`.
+///
+/// The returned `tool_search` tool is `None` when MCP contributed nothing — a
+/// session without servers keeps its original tool set and pays no extra token.
+fn merge_mcp_tools(
+    tools: &mut Vec<HarnessTool>,
+    session: Option<&crate::mcp_session::McpSession>,
+    args: &Args,
+) -> (Option<Arc<dyn AgentTool>>, Vec<String>) {
+    let Some(session) = session else {
+        return (None, Vec::new());
+    };
+    let direct: std::collections::BTreeSet<String> =
+        session.direct_tool_names(true).into_iter().collect();
+    let mut deferred = Vec::new();
+    let mut any = false;
+    for tool in session.tools() {
+        let name = tool.schema().name.clone();
+        if !tool_name_allowed(&name, args) {
+            continue;
+        }
+        any = true;
+        if !direct.contains(&name) {
+            deferred.push(name.clone());
+        }
+        let harness_tool = HarnessTool::new(tool);
+        match tools.iter_mut().find(|t| t.tool.schema().name == name) {
+            Some(slot) => *slot = harness_tool,
+            None => tools.push(harness_tool),
+        }
+    }
+    (any.then(tool_search_cell), deferred)
+}
+
+/// The process's late-bound `tool_search` tool, created on first use.
+///
+/// The tool outlives any one harness (it names the harness weakly), so a session
+/// switch or a `/reload` reuses one instance. Holding it here also keeps
+/// `merge_mcp_tools` free of the harness, which does not exist yet at that point.
+pub(crate) fn tool_search_cell() -> Arc<dyn AgentTool> {
+    Arc::clone(&tool_search_cell_handle()) as Arc<dyn AgentTool>
+}
+
+/// The concrete cell, for the late harness binding.
+pub(crate) fn tool_search_cell_handle() -> Arc<tom_harness::tool_search::ToolSearchToolCell> {
+    static CELL: std::sync::OnceLock<Arc<tom_harness::tool_search::ToolSearchToolCell>> =
+        std::sync::OnceLock::new();
+    Arc::clone(CELL.get_or_init(tom_harness::tool_search::ToolSearchToolCell::new))
+}
+
 /// Build the tool list per `--tools`/`--exclude-tools`/`--no-tools`/
 /// `--no-builtin-tools`. Mirrors the TS `tools`/`excludeTools`/`noTools`
 /// resolution in `createAgentSession`.
@@ -2233,6 +2500,13 @@ fn merge_extension_tools(
 /// forgotten `timeout` from hanging the run forever — the "卡住" report).
 /// `TOM_BASH_TIMEOUT` overrides; a model-supplied timeout always wins.
 pub fn bash_options() -> tom_tools::tools::bash::BashToolOptions {
+    bash_options_with(None)
+}
+
+/// Same as [`bash_options`] but with the active model's output budget attached.
+pub fn bash_options_with(
+    truncation_policy: Option<tom_ai::TruncationPolicy>,
+) -> tom_tools::tools::bash::BashToolOptions {
     use tom_tools::tools::bash::BashToolOptions;
     let default = std::env::var("TOM_BASH_TIMEOUT")
         .ok()
@@ -2247,11 +2521,52 @@ pub fn bash_options() -> tom_tools::tools::bash::BashToolOptions {
     BashToolOptions {
         command_prefix: settings.shell_command_prefix.clone(),
         default_timeout: Some(default),
+        shell: settings.shell_path.as_deref().map(shell_override_for),
         prepare: None,
+        truncation_policy,
     }
 }
 
-fn build_tools(ctx: &ExecutionToolContext, args: &Args) -> Vec<HarnessTool> {
+/// Turn a `shellPath` setting into the interpreter invocation the bash tool
+/// expects.
+///
+/// The bash tool hands the command to the interpreter as a single argv entry, so
+/// a POSIX shell needs `-c`. PowerShell cannot understand POSIX syntax at all, so
+/// a `shellPath` naming it gets PowerShell's own non-interactive flags instead of
+/// silently failing on every command.
+fn shell_override_for(path: &str) -> tom_tools::env::ShellOverride {
+    use tom_tools::env::ShellOverride;
+    let program = std::path::PathBuf::from(path);
+    // Take the file name from the raw string rather than `Path::file_stem`:
+    // on Unix a Windows path is one component, so `C:\...\pwsh.exe` would keep
+    // its directories and never match. A shell path is user input from a
+    // settings file that may have been written on another platform.
+    let name = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let args = if name.starts_with("pwsh") || name.starts_with("powershell") {
+        vec![
+            "-NoLogo".to_string(),
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-Command".to_string(),
+        ]
+    } else {
+        vec!["-c".to_string()]
+    };
+    ShellOverride { program, args }
+}
+
+fn build_tools(
+    ctx: &ExecutionToolContext,
+    args: &Args,
+    truncation_policy: Option<tom_ai::TruncationPolicy>,
+) -> Vec<HarnessTool> {
     if args.no_tools {
         return Vec::new();
     }
@@ -2263,6 +2578,10 @@ fn build_tools(ctx: &ExecutionToolContext, args: &Args) -> Vec<HarnessTool> {
     // outcome unknown — everything else must stay `Never`, because replaying
     // `bash`/`write`/`edit` would duplicate a side effect. `HarnessTool::new`
     // already defaults to `Never`, so this is opt-in per read-only tool.
+    // Sessions outlive a single `bash` call, so both tools have to address the
+    // same registry. Built here so `--tools`/`--exclude-tools` and the replay
+    // policy see them like any other builtin.
+    let bash_sessions = Arc::new(tom_tools::pty_session::SessionRegistry::new());
     let mut all: Vec<(&'static str, HarnessTool)> = vec![
         (
             "read",
@@ -2272,6 +2591,7 @@ fn build_tools(ctx: &ExecutionToolContext, args: &Args) -> Vec<HarnessTool> {
                     image_processor: Some(Arc::new(
                         tom_tools::image_processing::InlineImageProcessor,
                     )),
+                    truncation_policy,
                     ..Default::default()
                 }),
             ))
@@ -2279,13 +2599,27 @@ fn build_tools(ctx: &ExecutionToolContext, args: &Args) -> Vec<HarnessTool> {
         ),
         (
             "bash",
-            HarnessTool::new(create_bash_tool(ctx, Some(bash_options()))),
+            HarnessTool::new(tom_tools::create_bash_tool_with_sessions(
+                ctx,
+                Some(bash_options_with(truncation_policy)),
+                Arc::clone(&bash_sessions),
+            )),
+        ),
+        (
+            tom_tools::BASH_SESSION_TOOL_NAME,
+            HarnessTool::new(tom_tools::create_bash_session_tool(Arc::clone(
+                &bash_sessions,
+            ))),
         ),
         ("edit", HarnessTool::new(create_edit_tool(ctx))),
         ("write", HarnessTool::new(create_write_tool(ctx))),
         (
             "docs",
             HarnessTool::new(create_docs_tool()).with_replay(ToolReplay::Safe),
+        ),
+        (
+            "update_plan",
+            HarnessTool::new(tom_tools::create_update_plan_tool()),
         ),
     ];
 
@@ -2365,7 +2699,10 @@ where
 }
 
 /// Build the `Session` facade for the chosen selection.
-async fn build_session(selection: &SessionSelection, cwd: &str) -> Result<Session, BuildError> {
+pub(crate) async fn build_session(
+    selection: &SessionSelection,
+    cwd: &str,
+) -> Result<Session, BuildError> {
     match selection {
         SessionSelection::Ephemeral => Ok(ephemeral_session()),
         SessionSelection::New { dir, .. } => {
@@ -3347,6 +3684,31 @@ mod runtime_session_tests;
 mod tests {
     use super::*;
 
+    #[test]
+    fn shell_path_becomes_a_posix_interpreter_invocation() {
+        let shell = shell_override_for("/usr/bin/zsh");
+        assert_eq!(shell.program, std::path::PathBuf::from("/usr/bin/zsh"));
+        // The command is handed over as one argv entry, so a POSIX shell needs
+        // `-c` or it would read the command as a script path.
+        assert_eq!(shell.args, vec!["-c".to_string()]);
+    }
+
+    #[test]
+    fn shell_path_recognizes_powershell() {
+        for path in [
+            "/usr/bin/pwsh",
+            "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+        ] {
+            let shell = shell_override_for(path);
+            assert!(
+                shell.args.iter().any(|arg| arg == "-NonInteractive"),
+                "{path} should get PowerShell flags, got {:?}",
+                shell.args
+            );
+            assert!(!shell.args.iter().any(|arg| arg == "-c"), "{path}");
+        }
+    }
+
     #[tokio::test]
     async fn unauthenticated_packages_are_not_reintroduced_as_legacy_adapters() {
         extern "C" fn request(
@@ -3896,7 +4258,7 @@ mod tests {
         let env_dyn: Arc<dyn tom_tools::ExecutionEnv> = env.clone();
         let mut_env: Arc<dyn tom_tools::MutatingEnv> = env.clone();
         let context = ExecutionToolContext::new(env_dyn, Some(mut_env));
-        let tools = build_tools(&context, &Args::default());
+        let tools = build_tools(&context, &Args::default(), None);
 
         let replay_of = |name: &str| {
             tools
@@ -3929,7 +4291,7 @@ mod tests {
         let env_dyn: Arc<dyn tom_tools::ExecutionEnv> = env.clone();
         let mut_env: Arc<dyn tom_tools::MutatingEnv> = env.clone();
         let context = ExecutionToolContext::new(env_dyn, Some(mut_env));
-        let names: Vec<String> = build_tools(&context, &Args::default())
+        let names: Vec<String> = build_tools(&context, &Args::default(), None)
             .iter()
             .map(|tool| tool.tool.schema().name.clone())
             .collect();

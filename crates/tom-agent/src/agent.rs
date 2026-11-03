@@ -550,6 +550,7 @@ impl Agent {
             cache_retention: tom_ai::provider::CacheRetention::default(),
             session_id: self.inner.session_id.clone(),
             signal,
+            tools_budget_tokens: None,
         }
     }
 

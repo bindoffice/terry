@@ -7,6 +7,78 @@
 use crate::types::{Api, InputModality, ModelCost, ProviderId, ThinkingLevelMap};
 use serde::{Deserialize, Serialize};
 
+/// Approximate bytes per token used when a token budget must be turned into a
+/// byte budget. Matches the harness' `chars / 4` estimator, so a token budget
+/// and the compaction threshold speak the same units.
+pub const BYTES_PER_TOKEN: usize = 4;
+
+/// Lower clamp for the window-derived default budget (4 k tokens ≈ 16 KB).
+/// Below this a tool result is too small to be useful for anything but a
+/// one-line command.
+pub const MIN_DEFAULT_TOKENS: u64 = 4_000;
+
+/// Upper clamp for the window-derived default budget (25 k tokens ≈ 100 KB).
+/// Above this a single result is larger than any turn can usefully reason over,
+/// even on a 1 M window.
+pub const MAX_DEFAULT_TOKENS: u64 = 25_000;
+
+/// How much tool output to retain before truncating. Mirrors codex's
+/// `TruncationPolicy`: the budget is a property of the *model*, so a 64k-window
+/// model does not spend the same 50 KB on a single tool result as a 1M-window
+/// one. `Bytes` is the historical tom behaviour and stays the default when a
+/// model does not declare a policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TruncationPolicy {
+    /// Retain at most this many bytes of tool output.
+    Bytes(usize),
+    /// Retain at most this many tokens of tool output (converted with
+    /// [`BYTES_PER_TOKEN`]).
+    Tokens(usize),
+}
+
+impl TruncationPolicy {
+    /// The byte budget this policy resolves to. Tokens are converted with
+    /// [`BYTES_PER_TOKEN`].
+    pub fn max_bytes(self) -> usize {
+        match self {
+            TruncationPolicy::Bytes(bytes) => bytes,
+            TruncationPolicy::Tokens(tokens) => tokens.saturating_mul(BYTES_PER_TOKEN),
+        }
+    }
+
+    /// A human-readable budget for tool descriptions (`50KB` or `10000 tokens`).
+    pub fn describe(self) -> String {
+        match self {
+            TruncationPolicy::Bytes(bytes) if bytes < 1024 => format!("{bytes}B"),
+            TruncationPolicy::Bytes(bytes) if bytes < 1024 * 1024 => {
+                format!("({:.1})KB", bytes as f64 / 1024.0)
+            }
+            TruncationPolicy::Bytes(bytes) => {
+                format!("({:.1})MB", bytes as f64 / (1024.0 * 1024.0))
+            }
+            TruncationPolicy::Tokens(tokens) => format!("{tokens} tokens"),
+        }
+    }
+
+    /// The default budget for a model with this context window.
+    ///
+    /// A fixed byte cap is wrong in both directions: 50 KB is a fifth of a 64 k
+    /// window but a rounding error on a 1 M one. Spending roughly 5% of the
+    /// window on a single tool result keeps one call from crowding out the rest
+    /// of the turn, while the clamp stops tiny windows from being handed a
+    /// uselessly small slice and huge windows from being handed an unreadable
+    /// pile. `0` (the window is unknown) returns `None`, so the historical
+    /// 50 KB / 2000 line default still applies.
+    pub fn default_for_window(context_window: u64) -> Option<TruncationPolicy> {
+        if context_window == 0 {
+            return None;
+        }
+        let tokens = (context_window / 20).clamp(MIN_DEFAULT_TOKENS, MAX_DEFAULT_TOKENS);
+        Some(TruncationPolicy::Tokens(tokens as usize))
+    }
+}
+
 /// Compatibility flags for Anthropic Messages-compatible APIs.
 /// Mirrors TS `AnthropicMessagesCompat`. `Default` matches the documented defaults
 /// at each field.
@@ -218,6 +290,23 @@ pub struct Model {
     pub headers: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<StreamingProtocolCompat>,
+    /// How much tool output to keep for this model. `None` keeps the historical
+    /// 50 KB / 2000 line budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_policy: Option<TruncationPolicy>,
+}
+
+impl Model {
+    /// The budget tool output is actually truncated to.
+    ///
+    /// A model that declares a policy wins; otherwise the budget is derived
+    /// from the context window, so a 64 k model does not spend the same 50 KB
+    /// on one tool result as a 1 M one. A model with no declared window still
+    /// falls back to the historical default.
+    pub fn truncation_budget(&self) -> Option<TruncationPolicy> {
+        self.truncation_policy
+            .or_else(|| TruncationPolicy::default_for_window(self.context_window))
+    }
 }
 
 impl Model {
@@ -245,6 +334,7 @@ impl Model {
             sampling_params: None,
             headers: None,
             compat: None,
+            truncation_policy: None,
         }
     }
 
@@ -300,5 +390,70 @@ impl Model {
             }
         }
         Off
+    }
+}
+
+#[cfg(test)]
+mod truncation_policy_tests {
+    use super::*;
+    use crate::types::Api;
+
+    fn model_with_window(context_window: u64) -> Model {
+        let mut m = Model::new(
+            "m",
+            "M",
+            Api::AnthropicMessages,
+            "anthropic",
+            "https://example.test",
+        );
+        m.context_window = context_window;
+        m
+    }
+
+    #[test]
+    fn explicit_policy_wins_over_the_window() {
+        let mut m = model_with_window(1_000_000);
+        m.truncation_policy = Some(TruncationPolicy::Bytes(1234));
+        assert_eq!(m.truncation_budget(), Some(TruncationPolicy::Bytes(1234)));
+    }
+
+    #[test]
+    fn window_derives_a_fifth_of_the_budget() {
+        // 128k window → 6400 tokens, comfortably inside the clamps.
+        assert_eq!(
+            model_with_window(128_000).truncation_budget(),
+            Some(TruncationPolicy::Tokens(6_400))
+        );
+    }
+
+    #[test]
+    fn small_and_huge_windows_are_clamped() {
+        assert_eq!(
+            model_with_window(32_000).truncation_budget(),
+            Some(TruncationPolicy::Tokens(MIN_DEFAULT_TOKENS as usize))
+        );
+        assert_eq!(
+            model_with_window(2_000_000).truncation_budget(),
+            Some(TruncationPolicy::Tokens(MAX_DEFAULT_TOKENS as usize))
+        );
+    }
+
+    #[test]
+    fn unknown_window_keeps_the_historical_default() {
+        assert_eq!(model_with_window(0).truncation_budget(), None);
+        // A 64k model no longer spends the same 50 KB on one tool result as a
+        // 1M model: the two budgets differ.
+        let small = model_with_window(64_000).truncation_budget().unwrap();
+        let large = model_with_window(1_000_000).truncation_budget().unwrap();
+        assert!(small.max_bytes() < large.max_bytes());
+    }
+
+    #[test]
+    fn policy_round_trips_through_models_json_shape() {
+        let policy: TruncationPolicy = serde_json::from_str(r#"{"tokens":10000}"#).unwrap();
+        assert_eq!(policy, TruncationPolicy::Tokens(10_000));
+        assert_eq!(serde_json::to_string(&policy).unwrap(), r#"{"tokens":10000}"#);
+        let bytes: TruncationPolicy = serde_json::from_str(r#"{"bytes":51200}"#).unwrap();
+        assert_eq!(bytes, TruncationPolicy::Bytes(51_200));
     }
 }

@@ -446,6 +446,20 @@ impl ExtensionSession {
         }
     }
 
+    /// A session backed by an in-process registry.
+    ///
+    /// Exists for hosts that need to install handlers without a cdylib: tests,
+    /// and any embedding that builds its extensions programmatically. The ABI is
+    /// unchanged — this only wraps a registry snapshot the host already owns.
+    pub fn for_registry(registry: crate::registry::ExtensionRegistry) -> Self {
+        Self {
+            keepalive: Arc::new(PluginKeepalive::new(Vec::new(), None)),
+            snapshot: Some(Arc::new(registry.snapshot())),
+            loaded_paths: Vec::new(),
+            action_bridge: None,
+        }
+    }
+
     /// An empty session (no plugins loaded — `--no-extensions` or no dirs found).
     pub fn none() -> Self {
         Self {

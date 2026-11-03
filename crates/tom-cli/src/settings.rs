@@ -110,10 +110,9 @@ pub struct Settings {
     #[serde(default)]
     pub session_dir: Option<PathBuf>,
 
-    /// Custom shell binary. upstream's `shellPath`. Parsed for fidelity, but
-    /// **not consumed yet**: nothing in pi-tools carries a shell binary, so
-    /// honouring it means plumbing one through `BashToolOptions` /
-    /// `ShellCaptureOptions` first.
+    /// Custom shell binary. upstream's `shellPath`. Consumed by
+    /// [`crate::session::bash_options`], which turns it into the `bash` tool's
+    /// interpreter (and the RPC `bash` command's, so the two agree).
     #[serde(default)]
     pub shell_path: Option<String>,
 
@@ -139,11 +138,9 @@ pub struct Settings {
 
     /// Branch-summary settings. Mirrors upstream `branchSummary`.
     ///
-    /// Parsed for shape fidelity, but **nothing consumes it yet**: tom's
-    /// `navigate_tree` ignores its `summarize` argument outright (`_summarize`),
-    /// and `generate_branch_summary` has no production caller. Until
-    /// navigation-with-summary is wired, these keys cannot change behaviour — see
-    /// the doc comment on the accessors.
+    /// Consumed when navigating a session tree with summarization: `skipPrompt`
+    /// suppresses the summary entirely and `reserveTokens` bounds its prompt +
+    /// output budget.
     #[serde(default)]
     pub branch_summary: Option<BranchSummarySettings>,
 
@@ -177,10 +174,27 @@ pub struct Settings {
     /// upstream defaults this to `tree`; `none` disables the gesture.
     #[serde(default)]
     pub double_escape_action: Option<String>,
+    /// Default filter applied when `/tree` opens. One of `default`,
+    /// `no-tools`, `user-only`, `labeled-only` or `all`.
+    #[serde(default)]
+    pub tree_filter_mode: Option<String>,
+    /// Command opened by the external-editor keybinding. upstream's
+    /// `externalEditor`; when unset, `$VISUAL`, then `$EDITOR`, then a
+    /// platform default is used.
+    #[serde(default)]
+    pub external_editor: Option<String>,
     /// Default tools to enable at startup. When absent, all built-in tools
     /// are enabled. When present, only the named tools are enabled.
     #[serde(default)]
     pub default_tools: Option<Vec<String>>,
+    /// Ceiling on the tool-declaration payload, in approximate tokens.
+    ///
+    /// Declarations are re-sent with every request, so their size is a fixed
+    /// per-turn cost. When a namespace grows past this, descriptions are
+    /// trimmed (names and parameter schemas never are) so the model still knows
+    /// every tool it can call. Unset leaves the declarations untouched.
+    #[serde(default)]
+    pub tools_budget_tokens: Option<usize>,
     /// Hide the body of thinking blocks while retaining a compact label.
     #[serde(default)]
     pub hide_thinking_block: Option<bool>,
@@ -230,6 +244,11 @@ pub struct Settings {
     /// native `settings.json` is honored.
     #[serde(default)]
     pub terminal: Option<TerminalSettings>,
+    /// `codemode` settings: how the tool presents itself and how much room its
+    /// tool declarations may take. Absent leaves the defaults (mode `on`, 3000
+    /// estimated tokens).
+    #[serde(default)]
+    pub codemode: Option<CodemodeSettings>,
     /// How long idle pooled HTTP connections are kept before being closed.
     /// Accepts a millisecond number or the string `"disabled"`.
     /// `httpIdleTimeout`. tom surface: `httpIdleTimeout`.
@@ -244,6 +263,45 @@ pub struct Settings {
     /// built-in budgets.
     #[serde(default)]
     pub thinking_budgets: Option<tom_ai::ThinkingBudgets>,
+}
+
+/// `codemode` settings block (`codemode`).
+///
+/// `mode` decides how the tool presents itself while it is active: `on` keeps the
+/// declared tools as they are and lists only the tools a script can call that the
+/// model cannot (deferred ones); `only` lists every callable tool in the codemode
+/// description instead of declaring the direct ones. `inlineBudget` is an
+/// estimated-token budget for those declarations, so a large MCP server does not
+/// turn the description into a second tool list.
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CodemodeSettings {
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub inline_budget: Option<usize>,
+}
+
+impl CodemodeSettings {
+    /// `on` (default) or `only`; anything else is the default, because a typo in a
+    /// presentation setting must not disable the tool.
+    pub fn mode(&self) -> CodemodeMode {
+        match self.mode.as_deref() {
+            Some("only") => CodemodeMode::Only,
+            _ => CodemodeMode::On,
+        }
+    }
+}
+
+/// How `codemode` presents the callable tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CodemodeMode {
+    /// Keep direct tools declared; list only the tools a script can reach that the
+    /// model cannot.
+    #[default]
+    On,
+    /// List every script-callable tool in the codemode description.
+    Only,
 }
 
 /// upstream's `terminal` settings block (`TerminalSettings`). Only the fields
@@ -313,17 +371,15 @@ impl Settings {
 
     /// Tokens reserved for a branch summary's prompt + output.
     ///
-    /// Not consumed yet: `AgentLane::navigate_tree` ignores `summarize`, so no
-    /// branch summary is ever generated from this path. Wiring it means
-    /// implementing navigation-with-summary in the harness, not reading a key.
+    /// Consumed by the extension action host and `/tree`, which pass it to
+    /// [`tom_harness::agent_harness::AgentLane::navigate_tree_with_budget`].
     pub fn branch_summary_reserve_tokens(&self) -> Option<i64> {
         self.branch_summary.as_ref().and_then(|s| s.reserve_tokens)
     }
 
     /// Whether branch summaries are suppressed (upstream's `skipPrompt`).
     ///
-    /// Not consumed yet, for the same reason as
-    /// [`Self::branch_summary_reserve_tokens`].
+    /// When true, navigation still happens but no summary is generated.
     pub fn branch_summary_skipped(&self) -> bool {
         self.branch_summary
             .as_ref()
@@ -916,11 +972,24 @@ mod scoped_tests {
             settings.shell_command_prefix.as_deref(),
             Some("shopt -s expand_aliases")
         );
-        // `shellPath` is parsed (native's shape round-trips) but nothing consumes
-        // it yet — see its doc comment for why.
+        // `shellPath` round-trips the native shape and is consumed by
+        // `bash_options`; see the test below for the wiring itself.
         let with_shell: Settings =
             serde_json::from_str(r#"{"shellPath": "/usr/bin/zsh"}"#).unwrap();
         assert_eq!(with_shell.shell_path.as_deref(), Some("/usr/bin/zsh"));
+    }
+
+    /// `externalEditor` and `treeFilterMode` are the two interaction settings
+    /// that used to be parsed nowhere; both are now consumed (the external
+    /// editor chain in `run.rs`, the filter in `open_tree_selector`).
+    #[test]
+    fn interaction_settings_are_read() {
+        let settings: Settings = serde_json::from_str(
+            r#"{"externalEditor": "code --wait", "treeFilterMode": "user-only"}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.external_editor.as_deref(), Some("code --wait"));
+        assert_eq!(settings.tree_filter_mode.as_deref(), Some("user-only"));
     }
 
     /// `httpProxy` is stored in native's shape for the client setup to apply.

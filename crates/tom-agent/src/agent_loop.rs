@@ -1290,6 +1290,29 @@ async fn run_one_tool_call(
     }
 }
 
+/// Run one tool call through the loop's own pipeline: `prepare_arguments` +
+/// schema validation + `before_tool_call`, `execute`, then `after_tool_call`.
+///
+/// This exists for tools that call other tools while they run — `codemode` is
+/// the one that does. A nested call must not get a cheaper path than a
+/// model-issued one: a permission gate that blocks `bash` for the model must
+/// block it for a script too. Re-using the pipeline is the only way to keep that
+/// true as hooks are added.
+///
+/// Returns the result and whether it is an error. The caller owns the nested
+/// call's id and decides whether to surface it as an event.
+pub async fn run_nested_tool_call(
+    context: &AgentContext,
+    assistant_message: &AssistantMessage,
+    tool_call: &ToolCall,
+    config: &AgentLoopConfig,
+) -> Result<(AgentToolResult, bool), AgentError> {
+    let (collector, _events) = crate::events::CollectorEmitter::new();
+    let emit: Arc<dyn AgentEmitter> = Arc::new(collector);
+    let finalized = run_one_tool_call(context, assistant_message, tool_call, config, &emit).await?;
+    Ok((finalized.result, finalized.is_error))
+}
+
 /// Outcome of [`prepare_tool_call`].
 enum Prepared {
     /// Resolved without executing (not-found / blocked / aborted / validation error).

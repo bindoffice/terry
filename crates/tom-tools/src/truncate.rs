@@ -29,6 +29,8 @@ pub enum TruncationLimit {
     Bytes,
 }
 
+pub use tom_ai::model::TruncationPolicy;
+
 /// Options for head/tail truncation. `None` fields fall back to the defaults.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TruncationOptions {
@@ -37,11 +39,33 @@ pub struct TruncationOptions {
 }
 
 impl TruncationOptions {
-    fn resolve(self) -> (usize, usize) {
+    pub fn resolve(self) -> (usize, usize) {
         (
             self.max_lines.unwrap_or(DEFAULT_MAX_LINES),
             self.max_bytes.unwrap_or(DEFAULT_MAX_BYTES),
         )
+    }
+
+    /// Build options from a model's [`TruncationPolicy`]. `None` keeps the
+    /// historical 50 KB / 2000 line defaults.
+    pub fn from_policy(policy: Option<TruncationPolicy>) -> Self {
+        match policy {
+            Some(policy) => Self {
+                max_lines: None,
+                max_bytes: Some(policy.max_bytes()),
+            },
+            None => Self::default(),
+        }
+    }
+
+    /// The effective byte budget, falling back to [`DEFAULT_MAX_BYTES`].
+    pub fn max_bytes_or_default(self) -> usize {
+        self.max_bytes.unwrap_or(DEFAULT_MAX_BYTES)
+    }
+
+    /// The effective line budget, falling back to [`DEFAULT_MAX_LINES`].
+    pub fn max_lines_or_default(self) -> usize {
+        self.max_lines.unwrap_or(DEFAULT_MAX_LINES)
     }
 }
 

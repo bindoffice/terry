@@ -457,6 +457,7 @@ fn parse_models(body: &serde_json::Value) -> Vec<ModelDefinition> {
             input: None,
             headers: None,
             compat: None,
+            truncation_policy: None,
         });
     }
     models.sort_by(|a, b| {
@@ -560,6 +561,7 @@ mod tests {
             input: None,
             headers: None,
             compat: None,
+            truncation_policy: None,
         });
         assert!(!needs_discovery(&provider));
     }

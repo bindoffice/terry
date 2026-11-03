@@ -443,6 +443,59 @@ pub(super) async fn open_tree_selector(
             return;
         }
     };
+    // `settings.treeFilterMode` decides what `/tree` opens with. The default
+    // hides tool results, which are the bulk of a long session and rarely what
+    // someone navigating wants to land on.
+    let filter = crate::settings::load_settings()
+        .ok()
+        .and_then(|settings| settings.tree_filter_mode)
+        .unwrap_or_else(|| "default".to_string());
+    let entries = match filter.as_str() {
+        "all" => entries,
+        "default" => entries
+            .into_iter()
+            .filter(|entry| entry.entry_type() != "tool_result")
+            .collect(),
+        "no-tools" => entries
+            .into_iter()
+            .filter(|entry| {
+                !matches!(
+                    entry.entry_type(),
+                    "tool_result" | "tool_call" | "tool_execution"
+                )
+            })
+            .collect(),
+        "user-only" => entries
+            .into_iter()
+            .filter(|entry| {
+                entry
+                    .message_role()
+                    .is_some_and(|role| role == tom_agent::message::AgentMessageRole::User)
+            })
+            .collect(),
+        "labeled-only" => {
+            let view = harness.session().view("main");
+            let mut labeled = Vec::new();
+            for entry in entries {
+                if view
+                    .get_label(entry.id())
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|label| !label.trim().is_empty())
+                {
+                    labeled.push(entry);
+                }
+            }
+            labeled
+        }
+        // An unknown mode must not hide the whole tree; fall back to default.
+        _ => entries
+            .into_iter()
+            .filter(|entry| entry.entry_type() != "tool_result")
+            .collect(),
+    };
+
     let current = harness.session().get_leaf_id().await.ok().flatten();
     let items: Vec<SelectItem> = entries
         .iter()

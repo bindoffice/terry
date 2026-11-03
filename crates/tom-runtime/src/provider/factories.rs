@@ -25,10 +25,15 @@ impl ProviderFactory for ProtocolFactory {
         settings: &crate::RuntimeSettings,
         values: &dyn ValueSource,
     ) -> Result<Arc<dyn Provider>, ResolveError> {
-        let fallback = if self.0 == tom_ai::Api::AnthropicMessages {
-            "https://api.anthropic.com"
-        } else {
-            "https://api.openai.com/v1"
+        let fallback = match self.0 {
+            tom_ai::Api::AnthropicMessages => "https://api.anthropic.com",
+            // Azure ships no default host: one resource per user. An empty
+            // fallback makes the resolution error name the missing setting
+            // instead of silently pointing at a resource that does not exist.
+            tom_ai::Api::AzureOpenaiResponses => "",
+            tom_ai::Api::GoogleGenerativeAi => "https://generativelanguage.googleapis.com/v1beta",
+            tom_ai::Api::GoogleVertex => "https://aiplatform.googleapis.com/v1",
+            _ => "https://api.openai.com/v1",
         };
         let http = provider_http_client(&models, fallback, settings, values)?;
         let provider: Arc<dyn Provider> = match self.0 {
@@ -50,6 +55,41 @@ impl ProviderFactory for ProtocolFactory {
                     http,
                     models,
                 ))
+            }
+            tom_ai::Api::GoogleGenerativeAi => Arc::new(
+                tom_ai::providers::google::GoogleProvider::new(
+                    provider_id,
+                    tom_ai::providers::google::GoogleApi::GenerativeAi,
+                    None,
+                    http,
+                    models,
+                )
+                .with_env_api_key(),
+            ),
+            tom_ai::Api::GoogleVertex => Arc::new(
+                tom_ai::providers::google::GoogleProvider::new(
+                    provider_id,
+                    tom_ai::providers::google::GoogleApi::Vertex,
+                    None,
+                    http,
+                    models,
+                )
+                .with_env_api_key(),
+            ),
+            tom_ai::Api::AzureOpenaiResponses => {
+                // Azure's dialect of the same protocol: endpoint per request,
+                // deployment as the wire model, `api-version` in the query.
+                Arc::new(
+                    OpenAiResponsesProvider::with_models_without_env_api_key(
+                        provider_id,
+                        None,
+                        http,
+                        models,
+                    )
+                    .with_azure(
+                        tom_ai::providers::openai_responses::azure::AzureOptions::default(),
+                    ),
+                )
             }
             _ => unreachable!("only supported wire protocols are registered"),
         };
@@ -83,6 +123,9 @@ impl Default for RuntimeFactories {
             tom_ai::Api::AnthropicMessages,
             tom_ai::Api::OpenaiCompletions,
             tom_ai::Api::OpenaiResponses,
+            tom_ai::Api::AzureOpenaiResponses,
+            tom_ai::Api::GoogleGenerativeAi,
+            tom_ai::Api::GoogleVertex,
         ]
         .into_iter()
         .map(|api| {
@@ -339,11 +382,11 @@ impl Provider for ConfiguredProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tom_ai::{
         types::{AssistantMessage, DoneReason, ErrorReason, StopReason},
         Api, AssistantMessageEvent,
     };
-    use std::sync::Mutex;
 
     type Calls = Arc<Mutex<Vec<(Model, SimpleStreamOptions)>>>;
     struct RecordingFactory(Calls);

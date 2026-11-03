@@ -37,6 +37,11 @@ pub fn run(args: &[String]) -> i32 {
         Some("list") => list(&args[1..]),
         Some("update") => update(&args[1..]),
         Some("unlink") => unlink(&args[1..]),
+        // Resource packages (skills/prompts/themes/extensions from npm or git)
+        // are a separate subsystem with their own registry and ownership rules;
+        // see `crate::packages_resources`.
+        Some("add" | "remove" | "adopt" | "resources") => crate::packages_resources::run(args),
+        Some("list-resources") => crate::packages_resources::run(&["list".to_string()]),
         Some(other) => {
             eprintln!("error: unknown package command `{other}`");
             print_help();
@@ -617,7 +622,7 @@ pub fn project_package_dirs(cwd: &Path, kind: &str) -> Vec<PathBuf> {
     }
 }
 pub fn print_help() {
-    println!("Usage: tom package <command>\n\nCommands:\n  link [name] [--path <dir>] [--package <name>] [--force]  Build and link a project-local Rust extension\n  list                                                   List project packages\n  update [name] [--debug] [--locked]                    Update project and global installed packages\n  unlink <name>                                          Remove a project package");
+    println!("Usage: tom package <command>\n\nRust extension packages (built locally):\n  link [name] [--path <dir>] [--package <name>] [--force]  Build and link a project-local Rust extension\n  update [name] [--debug] [--locked]                    Update project and global installed packages\n  unlink <name>                                          Remove a project package\n\nResource packages (installed from npm/git, no toolchain needed):\n  add <source>                                           Install skills/prompts/themes/extensions\n  remove <name>                                          Remove a resource package\n  adopt <dir>                                            Take over a directory under packages/\n  list-resources                                         List installed resource packages\n\n  list                                                   List locally linked Rust packages\n\nRun `tom package add --help` for the source syntax.");
 }
 fn print_link_help() {
     println!("Usage: tom package link [name] [options]\n\nOptions:\n  --path <dir>       Extension source directory (default: current directory)\n  --package, -P <n>  Select a Cargo cdylib package\n  --debug            Build debug artifacts instead of release\n  --locked           Pass --locked to Cargo\n  --force, -f        Replace an existing package");

@@ -20,20 +20,20 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 use tom_agent::agent_tool::AgentTool;
 use tom_agent::error::AgentError;
 use tom_agent::types::{AgentToolResult, TextContentOrImage, ToolResultPartial};
 use tom_ai::types::Tool;
-use schemars::JsonSchema;
-use serde::Deserialize;
-use tokio_util::sync::CancellationToken;
 
 use crate::env::ExecutionEnv;
 use crate::env::FileKind;
 use crate::path_utils::resolve_read_tool_path;
 use crate::tools::tool_context::ExecutionToolContext;
 use crate::truncate::{
-    format_size, truncate_head, TruncationOptions, TruncationResult, DEFAULT_MAX_BYTES,
+    format_size, truncate_head, TruncationOptions, TruncationResult,
 };
 
 /// Default max results. Mirrors TS `find.ts::DEFAULT_LIMIT`.
@@ -65,24 +65,28 @@ pub struct FindToolDetails {
 /// pluggable `operations` bag for remote backends; the Rust port always uses
 /// the `FileSystem` trait).
 #[derive(Debug, Clone, Default)]
-pub struct FindToolOptions {}
+pub struct FindToolOptions {
+    /// Model-specific output budget. `None` keeps the 50 KB default.
+    pub truncation_policy: Option<crate::truncate::TruncationPolicy>,
+}
 
 /// The built-in `find` tool. Holds an `Arc<dyn ExecutionEnv>` (read-only view).
 pub struct FindTool {
     schema: Tool,
     env: Arc<dyn ExecutionEnv>,
+    truncation: TruncationOptions,
 }
 
 impl FindTool {
-    fn schema() -> Tool {
+    fn schema(truncation: TruncationOptions) -> Tool {
         let params = schemars::schema_for!(FindInput);
         Tool {
             name: "find".to_string(),
             description: format!(
                 "Search for files by glob pattern. Returns matching file paths relative to the \
                  search directory. Skips `.git/` directories. Output is truncated to {DEFAULT_LIMIT} \
-                 results or {kb}KB (whichever is hit first).",
-                kb = DEFAULT_MAX_BYTES / 1024
+                 results or {} (whichever is hit first).",
+                format_size(truncation.max_bytes_or_default())
             ),
             parameters: tom_ai::types::Schema::new(serde_json::to_value(params).unwrap_or_default()),
             constrained_sampling: None,
@@ -95,10 +99,11 @@ pub fn create_find_tool(
     context: &ExecutionToolContext,
     options: Option<FindToolOptions>,
 ) -> Arc<dyn AgentTool> {
-    let _ = options; // forward-compat seam, no surface in v1
+    let truncation = TruncationOptions::from_policy(options.unwrap_or_default().truncation_policy);
     Arc::new(FindTool {
-        schema: FindTool::schema(),
+        schema: FindTool::schema(truncation),
         env: context.env().clone(),
+        truncation,
     })
 }
 
@@ -219,7 +224,7 @@ impl AgentTool for FindTool {
             &raw_output,
             TruncationOptions {
                 max_lines: Some(usize::MAX),
-                max_bytes: None,
+                max_bytes: Some(self.truncation.max_bytes_or_default()),
             },
         );
         let was_truncated = truncation.truncated;
@@ -237,7 +242,10 @@ impl AgentTool for FindTool {
             details.result_limit_reached = Some(effective_limit as u32);
         }
         if was_truncated {
-            notices.push(format!("{} limit reached", format_size(DEFAULT_MAX_BYTES)));
+            notices.push(format!(
+                "{} limit reached",
+                format_size(self.truncation.max_bytes_or_default())
+            ));
             details.truncation = Some(truncation);
         }
         if !notices.is_empty() {

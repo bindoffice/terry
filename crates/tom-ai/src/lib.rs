@@ -33,7 +33,10 @@ pub mod types;
 // Flat re-exports — consumers do `use tom_ai::Message` not `tom_ai::types::Message`.
 pub use error::AiError;
 pub use event_stream::{AssistantMessageEventStream, AssistantMessageEventStreamProducer};
-pub use model::{Model, StreamingProtocolCompat};
+pub use model::{
+    Model, StreamingProtocolCompat, TruncationPolicy, BYTES_PER_TOKEN, MAX_DEFAULT_TOKENS,
+    MIN_DEFAULT_TOKENS,
+};
 pub use provider::{
     CacheRetention, ContextPatch, NoopProviderHooks, Provider, ProviderHooks, SimpleStreamOptions,
     SimpleStreamOptionsPatch, DEFAULT_LLM_API_TIMEOUT, DEFAULT_STREAM_IDLE_TIMEOUT,

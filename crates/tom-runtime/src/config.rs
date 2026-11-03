@@ -1,7 +1,10 @@
 //! Host-supplied configuration and provider-scoped credentials. No file access.
-use tom_ai::{Api, InputModality, Model, ModelCost, StreamingProtocolCompat, ThinkingLevelMap};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use tom_ai::{
+    Api, InputModality, Model, ModelCost, StreamingProtocolCompat, ThinkingLevelMap,
+    TruncationPolicy,
+};
 pub const DEFAULT_PROVIDER_ID: &str = "anthropic";
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -119,6 +122,10 @@ pub struct ModelDefinition {
     pub headers: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<serde_json::Value>,
+    /// How much tool output this model may receive per call. Omitted keeps the
+    /// historical 50 KB / 2000 line budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_policy: Option<TruncationPolicy>,
 }
 
 pub fn model_compat_warnings(config: &ModelsConfig) -> Vec<String> {
@@ -214,6 +221,30 @@ pub fn provider_is_openai_responses(cfg: &ProviderConfig) -> bool {
     matches!(cfg.api.as_deref(), Some("openai-responses"))
 }
 
+/// Azure's Responses dialect. Checked before the plain Responses predicate so
+/// an `azure-openai-responses` entry keeps the API that carries its endpoint,
+/// deployment and `api-version` rules.
+/// Google's Generative Language API.
+pub fn provider_is_google_generative_ai(cfg: &ProviderConfig) -> bool {
+    matches!(
+        cfg.api.as_deref(),
+        Some("google-generative-ai") | Some("google") | Some("gemini")
+    )
+}
+
+/// Google Vertex AI. Shares the wire format with the Generative Language API,
+/// so the only difference that matters here is the endpoint and the auth shape.
+pub fn provider_is_google_vertex(cfg: &ProviderConfig) -> bool {
+    matches!(cfg.api.as_deref(), Some("google-vertex") | Some("vertex"))
+}
+
+pub fn provider_is_azure_openai_responses(cfg: &ProviderConfig) -> bool {
+    matches!(
+        cfg.api.as_deref(),
+        Some("azure-openai-responses") | Some("azure")
+    )
+}
+
 pub fn provider_to_models(
     provider_id: &str,
     cfg: &ProviderConfig,
@@ -223,6 +254,12 @@ pub fn provider_to_models(
         Api::AnthropicMessages
     } else if provider_is_openai_completions(cfg) {
         Api::OpenaiCompletions
+    } else if provider_is_google_generative_ai(cfg) {
+        Api::GoogleGenerativeAi
+    } else if provider_is_google_vertex(cfg) {
+        Api::GoogleVertex
+    } else if provider_is_azure_openai_responses(cfg) {
+        Api::AzureOpenaiResponses
     } else if provider_is_openai_responses(cfg) {
         Api::OpenaiResponses
     } else {
@@ -230,6 +267,14 @@ pub fn provider_to_models(
     };
     let provider_base = cfg.base_url.clone().unwrap_or_else(|| match api {
         Api::OpenaiCompletions | Api::OpenaiResponses => "https://api.openai.com".to_string(),
+        // Azure has no shared host: one resource per user. An empty default
+        // makes the request fail with "set AZURE_OPENAI_BASE_URL" instead of
+        // resolving to a resource that cannot exist.
+        Api::AzureOpenaiResponses => String::new(),
+        Api::GoogleGenerativeAi => "https://generativelanguage.googleapis.com/v1beta".to_string(),
+        // Vertex resolves a regional host from the location, so an empty default
+        // would be wrong; the provider falls back to the shared endpoint.
+        Api::GoogleVertex => "https://aiplatform.googleapis.com/v1".to_string(),
         _ => default_anthropic_base_url(),
     });
     let mut merged: Vec<Model> = Vec::with_capacity(cfg.models.len());
@@ -250,6 +295,7 @@ pub fn provider_to_models(
         m.thinking_level_map = def.thinking_level_map.clone();
         m.context_window = def.context_window.unwrap_or(0);
         m.max_tokens = def.max_tokens.unwrap_or(0);
+        m.truncation_policy = def.truncation_policy;
         if let Some(cost) = &def.cost {
             m.cost = cost.clone();
             m.cost_configured = true;

@@ -65,7 +65,8 @@ async fn tui_fork_locks_the_copy_and_keeps_the_selected_root_for_switch_and_pick
             &state.chat_container,
             &state,
             &context,
-            &empty_catalog()
+            &empty_catalog(),
+            &crate::session::SessionEventGate::none()
         )
         .await
     );
@@ -282,7 +283,8 @@ async fn session_switch_banner_reports_real_capabilities() {
             &state.chat_container,
             &state,
             &context,
-            &empty_catalog()
+            &empty_catalog(),
+            &crate::session::SessionEventGate::none()
         )
         .await
     );
@@ -625,7 +627,8 @@ async fn switching_back_to_a_session_restores_its_model() {
             &state.chat_container,
             &state,
             &context,
-            &catalog
+            &catalog,
+            &crate::session::SessionEventGate::none()
         )
         .await
     );
@@ -713,7 +716,8 @@ async fn switching_back_to_a_session_restores_its_footer_usage() {
             &state.chat_container,
             &state,
             &tom_extensions::ToolCallContext::new(cwd.to_string_lossy()),
-            &empty_catalog()
+            &empty_catalog(),
+            &crate::session::SessionEventGate::none()
         )
         .await
     );
@@ -788,7 +792,8 @@ async fn unknown_session_model_leaves_the_current_model_in_place() {
             &state.chat_container,
             &state,
             &tom_extensions::ToolCallContext::new(cwd.to_string_lossy()),
-            &catalog
+            &catalog,
+            &crate::session::SessionEventGate::none()
         )
         .await,
         "switching must succeed even when the recorded model is unavailable"
@@ -878,6 +883,7 @@ async fn review_pr104_replay_preserves_the_live_cache_hit_rate() {
             &state,
             &tom_extensions::ToolCallContext::new(cwd.to_string_lossy()),
             &empty_catalog(),
+            &crate::session::SessionEventGate::none(),
         )
         .await
     );
@@ -939,6 +945,7 @@ async fn review_pr104_restore_model_must_follow_the_selected_branch() {
             &state,
             &tom_extensions::ToolCallContext::new(cwd.to_string_lossy()),
             &catalog,
+            &crate::session::SessionEventGate::none(),
         )
         .await
     );
@@ -1007,6 +1014,7 @@ async fn review_pr104_restore_model_must_ignore_a_child_lane() {
             &state,
             &tom_extensions::ToolCallContext::new(cwd.to_string_lossy()),
             &catalog,
+            &crate::session::SessionEventGate::none(),
         )
         .await
     );
@@ -1113,6 +1121,7 @@ async fn rereview_pr104_context_must_not_come_from_a_child_lane() {
             &state,
             &tom_extensions::ToolCallContext::new(cwd.to_string_lossy()),
             &catalog,
+            &crate::session::SessionEventGate::none(),
         )
         .await
     );
@@ -1177,6 +1186,7 @@ async fn rereview_pr104_compaction_must_invalidate_pre_compaction_context() {
             &state,
             &tom_extensions::ToolCallContext::new(cwd.to_string_lossy()),
             &catalog,
+            &crate::session::SessionEventGate::none(),
         )
         .await
     );
@@ -1791,5 +1801,71 @@ fn review_pr202_theme_watch_notify_repaints_idle_session() {
     assert!(
         frames.load(Ordering::SeqCst) > after_ok,
         "error notice must schedule a repaint too"
+    );
+}
+
+/// A vetoed switch must decline in the TUI too, and leave the session alone.
+///
+/// The guard is only worth having if it covers every front end: an extension
+/// that refuses a switch to protect unsaved state would otherwise be bypassed by
+/// switching from the TUI instead of RPC.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_vetoed_switch_leaves_the_tui_on_the_current_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    let root = dir.path().join("sessions");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let source = crate::session::create_jsonl_session(&root, &cwd.to_string_lossy())
+        .await
+        .unwrap();
+    source
+        .append_message(user_message_with_images("target history", vec![]))
+        .await
+        .unwrap();
+    let target_id = source.storage().metadata().id.clone();
+    let harness = AgentHarness::create(Default::default()).await.unwrap();
+    harness.set_session(source).await.unwrap();
+    let current = harness.session().storage().metadata().id.clone();
+    let state = state_with_root(&root);
+    let lane: Arc<dyn AgentLane> = harness.lane("main");
+
+    // A gate whose extension aborts every lifecycle event.
+    extern "C" fn deny(_ev: tom_plugin_sdk::StablePluginEvent, _ud: *mut std::ffi::c_void) -> i32 {
+        tom_plugin_sdk::EVENT_HANDLER_ABORT
+    }
+    let mut registry = tom_extensions::ExtensionRegistry::new();
+    registry.register_event_handler(
+        "guard-ext".to_string(),
+        tom_plugin_sdk::EventTag::SessionBeforeSwitch,
+        deny,
+        std::ptr::null_mut(),
+    );
+    let gate = crate::session::SessionEventGate::new(std::sync::Arc::new(std::sync::Mutex::new(
+        tom_extensions::ExtensionSession::for_registry(registry),
+    )));
+
+    let switched = switch_to_session(
+        &harness,
+        &lane,
+        &target_id,
+        &cwd,
+        &state.chat_container,
+        &state,
+        &tom_extensions::ToolCallContext::new(cwd.to_string_lossy()),
+        &empty_catalog(),
+        &gate,
+    )
+    .await;
+
+    assert!(!switched, "a vetoed switch must report failure");
+    assert_eq!(
+        harness.session().storage().metadata().id,
+        current,
+        "the session must not change"
+    );
+    let rendered = strip_ansi(&state.chat_container.render(160).join("\n"));
+    assert!(
+        rendered.contains("declined"),
+        "the user must be told why nothing happened: {rendered}"
     );
 }

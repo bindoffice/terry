@@ -104,7 +104,8 @@ pub use panel::{ExtensionPanel, PanelAnchor, PanelHighlight, PanelHighlightColor
 pub use tool::{PluginToolAdapter, PluginToolHandle, ToolCallContext};
 pub use translate::{
     dispatch_data_event, dispatch_data_event_claiming, dispatch_empty_event,
-    dispatch_lifecycle_event, dispatch_tool_call_event, ExtensionEmitter, TeeEmitter,
+    dispatch_lifecycle_data_event, dispatch_lifecycle_event, dispatch_tool_call_event,
+    ExtensionEmitter, TeeEmitter,
 };
 
 pub use stdio::StdioLifecycle;

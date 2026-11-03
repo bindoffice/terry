@@ -2143,3 +2143,102 @@ fn available_catalog_keeps_all_models_on_provider_key_path() {
     assert_eq!(catalog.len(), r.provider.models().len());
     assert!(catalog.iter().any(|m| m.id == DEFAULT_MODEL_ID));
 }
+
+#[test]
+fn azure_openai_responses_is_a_registered_protocol() {
+    // Without a registered factory the registry rejects the API outright; with
+    // one, resolution succeeds and the model is bound to an Azure-dialect
+    // provider. Nothing here touches the network: `resolve` only selects and
+    // binds.
+    let _env = TestEnv::new();
+    std::env::set_var(OPENAI_API_KEY_ENV, "azure-key");
+    std::fs::write(
+        config::models_path().unwrap(),
+        r#"{"providers":{
+            "azure":{"api":"azure-openai-responses","apiKey":"azure-key",
+                     "baseUrl":"https://my-resource.openai.azure.com",
+                     "models":[{"id":"gpt-4o-mini"}]}
+        }}"#,
+    )
+    .unwrap();
+    let resolved =
+        resolve(Some("azure"), Some("gpt-4o-mini"), None, None, None).expect("azure resolves");
+    assert_eq!(resolved.model.api, tom_ai::Api::AzureOpenaiResponses);
+    assert_eq!(resolved.model.id, "gpt-4o-mini");
+    // The catalog entry keeps the catalog id and the endpoint it was configured
+    // with: the deployment/version substitution happens per request.
+    assert_eq!(
+        resolved.model.base_url,
+        "https://my-resource.openai.azure.com"
+    );
+    assert_eq!(resolved.provider.id(), "azure");
+}
+
+#[test]
+fn the_azure_protocol_alias_selects_only_azure_models() {
+    let model = Model::new(
+        "gpt-4o-mini",
+        "GPT-4o mini",
+        tom_ai::Api::AzureOpenaiResponses,
+        "azure",
+        "https://r.openai.azure.com/openai/v1",
+    );
+    let cfg = config::ModelsConfig::default();
+    assert!(provider_matches(&model, "azure", &cfg));
+    assert!(provider_matches(&model, "azure-openai-responses", &cfg));
+    // The OpenAI aliases must not reach an Azure model: the credentials and
+    // endpoints are unrelated.
+    assert!(!provider_matches(&model, "openai", &cfg));
+    assert!(!provider_matches(&model, "openai-responses", &cfg));
+    assert!(provider_is_known("azure", &cfg));
+}
+
+#[test]
+fn google_protocols_are_registered_and_resolve_to_their_own_apis() {
+    let _env = TestEnv::new();
+    for (api, expected) in [
+        ("google-generative-ai", tom_ai::Api::GoogleGenerativeAi),
+        ("google-vertex", tom_ai::Api::GoogleVertex),
+    ] {
+        std::fs::write(
+            config::models_path().unwrap(),
+            format!(
+                r#"{{"providers":{{
+                    "g":{{"api":"{api}","apiKey":"google-key","models":[{{"id":"gemini-2.5-pro"}}]}}
+                }}}}"#
+            ),
+        )
+        .unwrap();
+        let resolved = resolve(Some("g"), Some("gemini-2.5-pro"), None, None, None)
+            .unwrap_or_else(|error| panic!("{api} resolves: {error:?}"));
+        assert_eq!(resolved.model.api, expected);
+        assert_eq!(resolved.provider.id(), "g");
+    }
+}
+
+#[test]
+fn the_google_protocol_aliases_do_not_cross() {
+    let cfg = config::ModelsConfig::default();
+    let generative = Model::new(
+        "gemini-2.5-pro",
+        "Gemini 2.5 Pro",
+        tom_ai::Api::GoogleGenerativeAi,
+        "google",
+        "https://generativelanguage.googleapis.com/v1beta",
+    );
+    let vertex = Model::new(
+        "gemini-2.5-pro",
+        "Gemini 2.5 Pro",
+        tom_ai::Api::GoogleVertex,
+        "google-vertex",
+        "https://aiplatform.googleapis.com/v1",
+    );
+    assert!(provider_matches(&generative, "google-generative-ai", &cfg));
+    assert!(provider_matches(&generative, "gemini", &cfg));
+    assert!(!provider_matches(&generative, "google-vertex", &cfg));
+    assert!(provider_matches(&vertex, "google-vertex", &cfg));
+    assert!(!provider_matches(&vertex, "google-generative-ai", &cfg));
+    // Neither Google API is reachable through the OpenAI aliases.
+    assert!(!provider_matches(&generative, "openai-responses", &cfg));
+    assert!(provider_is_known("google-vertex", &cfg));
+}
