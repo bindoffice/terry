@@ -2265,6 +2265,432 @@ mod tests {
         }
     }
 
+    // ---- per-state coverage for rules that only had one direction tested ----
+
+    fn expect(agent: &str, lines: &[&str], title: &str, state: AgentState) {
+        assert_eq!(
+            detect(agent, &screen(lines, title)),
+            Some(state),
+            "{agent} with {lines:?} / {title:?}"
+        );
+    }
+
+    #[test]
+    fn gemini_states() {
+        expect(
+            "gemini",
+            &["│ Do you want to proceed?", "│  yes", "│  no"],
+            "gemini",
+            AgentState::Blocked,
+        );
+        expect(
+            "gemini",
+            &["Reading files…", "press esc to cancel"],
+            "gemini",
+            AgentState::Working,
+        );
+        // Gemini's rule set has no idle rule, so a quiet screen is unclassified
+        // rather than guessed. Callers fall back to the quiet-window heuristic.
+        assert_eq!(detect("gemini", &screen(&["$"], "gemini")), None);
+    }
+
+    #[test]
+    fn opencode_states() {
+        expect(
+            "opencode",
+            &["△ Permission required", "enter confirm", "esc dismiss"],
+            "opencode",
+            AgentState::Blocked,
+        );
+        expect(
+            "opencode",
+            &["Working on it", "esc to interrupt"],
+            "opencode",
+            AgentState::Working,
+        );
+        assert_eq!(detect("opencode", &screen(&["$"], "opencode")), None);
+    }
+
+    #[test]
+    fn cursor_states() {
+        expect(
+            "cursor",
+            &["Waiting for approval", "Run this command?", "run (once) (y)"],
+            "cursor",
+            AgentState::Blocked,
+        );
+        expect(
+            "cursor",
+            &["Editing files", "ctrl+c to stop"],
+            "cursor",
+            AgentState::Working,
+        );
+        expect(
+            "cursor",
+            &["Compiling", "2 background tasks"],
+            "cursor",
+            AgentState::Working,
+        );
+        assert_eq!(detect("cursor", &screen(&["$"], "cursor")), None);
+    }
+
+    #[test]
+    fn copilot_states() {
+        expect(
+            "copilot",
+            &["Choose an option", "enter to select", "esc to cancel"],
+            "copilot",
+            AgentState::Blocked,
+        );
+        expect(
+            "copilot",
+            &["thinking", "esc to cancel"],
+            "copilot",
+            AgentState::Working,
+        );
+        assert_eq!(detect("copilot", &screen(&["$"], "copilot")), None);
+    }
+
+    #[test]
+    fn pi_states() {
+        expect(
+            "pi",
+            &["── ⠋ Working ──────────"],
+            "pi",
+            AgentState::Working,
+        );
+        // `pi` has working rules only: it never claims idle or blocked, and an
+        // integration report is what covers those states.
+        assert_eq!(detect("pi", &screen(&["❯ "], "pi")), None);
+        assert_eq!(detect("pi", &screen(&["y allow  n deny"], "pi")), None);
+    }
+
+    #[test]
+    fn droid_states() {
+        expect(
+            "droid",
+            &[
+                "enter to select  esc to cancel",
+                "↑↓ to navigate",
+                "> yes, allow",
+            ],
+            "droid",
+            AgentState::Blocked,
+        );
+        expect(
+            "droid",
+            &["Running", "esc to stop"],
+            "droid",
+            AgentState::Working,
+        );
+        assert_eq!(detect("droid", &screen(&["$"], "droid")), None);
+    }
+
+    #[test]
+    fn kimi_states() {
+        expect(
+            "kimi",
+            &["↵ confirm", "run this command?", " choose approve"],
+            "kimi",
+            AgentState::Blocked,
+        );
+        expect("kimi", &["🌕"], "kimi", AgentState::Working);
+        expect(
+            "kimi",
+            &["⠋ thinking..."],
+            "kimi",
+            AgentState::Working,
+        );
+        // No idle rule: a quiet kimi screen is unclassified.
+        assert_eq!(detect("kimi", &screen(&["$"], "kimi")), None);
+    }
+
+    #[test]
+    fn qoder_states() {
+        expect(
+            "qoder",
+            &["Permission required"],
+            "qoder",
+            AgentState::Blocked,
+        );
+        expect(
+            "qoder",
+            &["thinking", "(esc to cancel, 3s)"],
+            "qoder",
+            AgentState::Working,
+        );
+        // `qoder-cn` shares the rule set.
+        expect(
+            "qoder-cn",
+            &["Permission required"],
+            "qoder",
+            AgentState::Blocked,
+        );
+        assert_eq!(detect("qoder", &screen(&["$"], "qoder")), None);
+    }
+
+    #[test]
+    fn antigravity_states() {
+        expect(
+            "antigravity",
+            &["↑/↓ navigate · tab amend"],
+            "agy",
+            AgentState::Blocked,
+        );
+        expect(
+            "antigravity",
+            &["──── esc to cancel"],
+            "agy",
+            AgentState::Working,
+        );
+        // No idle rule, and a bare spinner line is the only working signal.
+        assert_eq!(detect("antigravity", &screen(&["$"], "agy")), None);
+    }
+
+    #[test]
+    fn kilo_states() {
+        expect(
+            "kilo",
+            &["△ Permission required"],
+            "kilo",
+            AgentState::Blocked,
+        );
+        expect(
+            "kilo",
+            &["running", "esc interrupt"],
+            "kilo",
+            AgentState::Working,
+        );
+        assert_eq!(detect("kilo", &screen(&["$"], "kilo")), None);
+    }
+
+    #[test]
+    fn kiro_states() {
+        expect(
+            "kiro",
+            &["esc to close", "  allow"],
+            "kiro",
+            AgentState::Blocked,
+        );
+        expect(
+            "kiro",
+            &["kiro is working · type to steer · ctrl+s to queue"],
+            "kiro",
+            AgentState::Working,
+        );
+        expect(
+            "kiro",
+            &["> ask a question or describe a task"],
+            "kiro",
+            AgentState::Idle,
+        );
+    }
+
+    #[test]
+    fn cline_states() {
+        expect(
+            "cline",
+            &["[act mode] execute command? yes"],
+            "cline",
+            AgentState::Blocked,
+        );
+        expect(
+            "cline",
+            &["Thinking... (esc to cancel)"],
+            "cline",
+            AgentState::Working,
+        );
+        expect(
+            "cline",
+            &["❯ ", "───── (Tab) Shift+Tab"],
+            "cline",
+            AgentState::Idle,
+        );
+    }
+
+    #[test]
+    fn devin_states() {
+        expect(
+            "devin",
+            &["approve once", "select", "confirm", "esc cancel"],
+            "devin",
+            AgentState::Blocked,
+        );
+        expect(
+            "devin",
+            &["running tools", "esc to interrupt"],
+            "devin",
+            AgentState::Working,
+        );
+        expect(
+            "devin",
+            &["context: 12k", "❭ "],
+            "devin",
+            AgentState::Idle,
+        );
+    }
+
+    #[test]
+    fn letta_states() {
+        expect(
+            "letta",
+            &["Run this command?", "Enter to select · Esc to cancel"],
+            "letta",
+            AgentState::Blocked,
+        );
+        expect(
+            "letta",
+            &["letta is thinking… (esc to interrupt)"],
+            "letta",
+            AgentState::Working,
+        );
+        expect("letta", &["└ Running..."], "letta", AgentState::Working);
+        expect("letta", &["› "], "letta", AgentState::Idle);
+    }
+
+    #[test]
+    fn maki_states() {
+        expect(
+            "maki",
+            &["permission required", "y allow  n deny"],
+            "maki",
+            AgentState::Blocked,
+        );
+        expect(
+            "maki",
+            &[" ⠋ [BUILD] editing"],
+            "maki",
+            AgentState::Working,
+        );
+        expect("maki", &[" [BUILD]"], "maki", AgentState::Idle);
+        expect("maki", &["❯ "], "maki", AgentState::Idle);
+    }
+
+    #[test]
+    fn muse_states() {
+        expect(
+            "muse",
+            &[
+                "Allow this stage once",
+                "Always allow in this workspace",
+            ],
+            "muse",
+            AgentState::Blocked,
+        );
+        expect(
+            "muse",
+            &["working", "esc to interrupt"],
+            "muse",
+            AgentState::Working,
+        );
+        expect("muse", &["⟩ "], "muse", AgentState::Idle);
+    }
+
+    #[test]
+    fn amp_states() {
+        expect(
+            "amp",
+            &["x"],
+            "Plugin confirmation needed",
+            AgentState::Blocked,
+        );
+        expect("amp", &["x"], "⠋ amp", AgentState::Working);
+        expect("amp", &["x"], "project - amp - build", AgentState::Idle);
+    }
+
+    #[test]
+    fn hermes_states() {
+        expect("hermes", &["x"], "⚠ hermes", AgentState::Blocked);
+        expect("hermes", &["x"], "⏳ hermes", AgentState::Working);
+        expect("hermes", &["x"], "✓ hermes", AgentState::Idle);
+        expect(
+            "hermes",
+            &["ctrl+c to interrupt"],
+            "hermes",
+            AgentState::Working,
+        );
+    }
+
+    #[test]
+    fn grok_states() {
+        expect("grok", &["x"], "⚠ Action Required", AgentState::Blocked);
+        expect("grok", &["x"], "⠠ grok", AgentState::Working);
+        expect("grok", &["x"], "project - grok", AgentState::Idle);
+        expect(
+            "grok",
+            &["  ⠋ Read main.rs [stop]"],
+            "grok",
+            AgentState::Working,
+        );
+    }
+
+    #[test]
+    fn codex_and_claude_working_markers() {
+        // Codex: the elapsed-time status line is the live-turn signal.
+        expect(
+            "codex",
+            &["• Working (2m 13s • esc to interrupt)"],
+            "codex",
+            AgentState::Working,
+        );
+        // Claude: the interrupt hint on the bottom lines.
+        expect(
+            "claude",
+            &["⏵⏵ esc to interrupt"],
+            "claude",
+            AgentState::Working,
+        );
+    }
+
+    /// Every rule set must be reachable through [`supports`] under each id it is
+    /// registered for, and an unrelated id must never borrow another agent's
+    /// rules.
+    #[test]
+    fn only_catalogued_agents_have_rules() {
+        for id in [
+            "claude",
+            "codex",
+            "gemini",
+            "opencode",
+            "cursor",
+            "qwen",
+            "copilot",
+            "pi",
+            "tom",
+            "grok",
+            "droid",
+            "kimi",
+            "amp",
+            "hermes",
+            "qoder",
+            "qoder-cn",
+            "antigravity",
+            "cline",
+            "devin",
+            "kiro",
+            "kilo",
+            "letta",
+            "maki",
+            "muse",
+        ] {
+            assert!(supports(id), "{id} should have rules");
+        }
+        for id in ["goose", "aider", "auggie", "crush", "vibe", "empryo", "zsh", ""] {
+            assert!(!supports(id), "{id} should not have rules");
+            assert_eq!(detect(id, &screen(&["anything"], id)), None);
+        }
+    }
+
+    /// A screen only means something for the agent whose rules are being run:
+    /// the same text classifies differently, or not at all, across agents.
+    #[test]
+    fn a_screen_is_only_read_with_its_own_agent_rules() {
+        let lines = ["$ ls", "src  Cargo.toml"];
+        assert_eq!(detect("codex", &screen(&lines, "zsh")), Some(AgentState::Idle));
+        assert_eq!(detect("claude", &screen(&lines, "zsh")), None);
+        assert_eq!(detect("goose", &screen(&lines, "zsh")), None);
+    }
+
     #[test]
     fn horizontal_rule_detection() {
         assert!(is_horizontal_rule("────────────"));
