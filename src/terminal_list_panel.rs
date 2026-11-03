@@ -188,6 +188,11 @@ fn shell_command(shell_kind: task::ShellKind, program: &str, args: &[String]) ->
 /// Directly making SSH or tmux the PTY's foreground process means exiting the
 /// remote command also exits the terminal. Starting from the user's shell keeps
 /// the tab alive and returns it to a local prompt instead.
+///
+/// The command is handed to the shell as an argument instead of being typed into
+/// it: a typed command line is echoed by the shell's line editor, and the SSH
+/// bootstrap payload is a multi-kilobyte script full of newlines, so it used to
+/// scroll past the user and stall on `dquote>` / `quote>` continuation prompts.
 fn local_command_profile(
     shell_kind: task::ShellKind,
     program: String,
@@ -195,14 +200,79 @@ fn local_command_profile(
     title: String,
 ) -> TerminalProfile {
     let command = shell_command(shell_kind, &program, &args);
+    let shell = local_shell_command(shell_kind, &command);
     TerminalProfile {
         name: format!("program:{title}"),
-        // No shell override: use the user's configured local shell.
-        shell: None,
+        // A `None` shell means "type this into the configured shell", which is
+        // only kept for shells whose command line cannot be passed directly.
+        shell: shell
+            .as_ref()
+            .map(|(program, args)| task::Shell::WithArguments {
+                program: program.clone(),
+                args: args.clone(),
+                title_override: None,
+            }),
         working_directory: None,
         env: Default::default(),
-        command: Some(command),
+        command: shell.is_none().then_some(command),
         color_scheme: None,
+    }
+}
+
+/// Wraps `command` so the user's shell runs it and then hands the terminal back
+/// to an interactive prompt.
+///
+/// Returns `None` for shells that cannot express this, so the caller falls back
+/// to typing the command into the shell.
+///
+/// The trailing `exec` is what keeps the tab alive: without it the shell exits as
+/// soon as the remote command ends and the terminal closes with it.
+///
+/// The wrapping shell is deliberately non-interactive (`-c` without `-i`): an
+/// interactive wrapper would source the user's rc files once on its own and then
+/// again in the shell it `exec`s. Its environment comes from Terry's login-shell
+/// capture, so nothing is missing.
+fn local_shell_command(
+    shell_kind: task::ShellKind,
+    command: &str,
+) -> Option<(String, Vec<String>)> {
+    let shell = task::Shell::System.program();
+    match shell_kind {
+        task::ShellKind::PowerShell | task::ShellKind::Pwsh => {
+            // `-NoExit` keeps the host alive after the command finishes.
+            Some((
+                shell,
+                vec![
+                    "-NoExit".to_string(),
+                    "-Command".to_string(),
+                    command.to_string(),
+                ],
+            ))
+        }
+        task::ShellKind::Cmd => Some((
+            shell,
+            vec!["/S".to_string(), "/K".to_string(), format!("\"{command}\"")],
+        )),
+        task::ShellKind::Posix
+        | task::ShellKind::Csh
+        | task::ShellKind::Tcsh
+        | task::ShellKind::Rc
+        | task::ShellKind::Fish
+        | task::ShellKind::Xonsh
+        | task::ShellKind::Elvish => {
+            let quoted_shell = shell_kind
+                .try_quote(&shell)
+                .map(|quoted| quoted.into_owned())
+                .unwrap_or_else(|| agent_catalog::shell_quote(&shell));
+            // macOS terminals start login shells, so the shell we hand over to
+            // asks for the same startup files the original one would have read.
+            let login = if cfg!(target_os = "macos") { " -l" } else { "" };
+            Some((
+                shell,
+                shell_kind.args_for_shell(false, format!("{command}; exec {quoted_shell}{login}")),
+            ))
+        }
+        task::ShellKind::Nushell => None,
     }
 }
 
@@ -8468,14 +8538,60 @@ mod tests {
         let profile =
             local_command_profile(shell_kind, program.clone(), args.clone(), "web".to_string());
 
+        // The command is a shell argument, not a command typed into the shell:
+        // typing it would echo the multi-kilobyte SSH bootstrap payload.
+        let Some(task::Shell::WithArguments {
+            program: shell_program,
+            args: shell_args,
+            ..
+        }) = profile.shell.as_ref()
+        else {
+            panic!(
+                "SSH must run through the local shell, got {:?}",
+                profile.shell
+            );
+        };
+        assert_eq!(shell_program, &task::Shell::System.program());
         assert!(
-            profile.shell.is_none(),
-            "SSH must not replace the PTY's local shell"
+            profile.command.is_none(),
+            "the command must not be typed into the shell"
         );
-        assert_eq!(
-            profile.command.as_deref(),
-            Some(shell_command(shell_kind, &program, &args).as_str()),
-            "the local shell should run the SSH command instead"
+
+        let command = shell_command(shell_kind, &program, &args);
+        let joined = shell_args.join(" ");
+        assert!(
+            joined.contains(&command),
+            "missing SSH command in {joined:?}"
+        );
+        assert!(
+            joined.contains("exec"),
+            "the shell must stay alive after SSH exits, got {joined:?}"
+        );
+    }
+
+    #[test]
+    fn program_terminals_keep_the_command_out_of_the_transcript() {
+        // The remote bootstrap command embeds newlines, which made a typed
+        // command line fall into the shell's `dquote>` / `quote>` continuation
+        // prompts. Running it as an argument keeps all of it off the screen.
+        let bootstrap = terminal::shell_integration::remote_bootstrap_command();
+        let args = vec!["web".to_string(), bootstrap];
+        let profile = local_command_profile(
+            task::ShellKind::Posix,
+            "ssh".to_string(),
+            args,
+            "web".to_string(),
+        );
+
+        assert!(profile.command.is_none());
+        let Some(task::Shell::WithArguments { args, .. }) = profile.shell.as_ref() else {
+            panic!("expected a shell invocation");
+        };
+        assert_eq!(args.first().map(String::as_str), Some("-c"));
+        assert!(args.last().expect("command").contains("sh -c"));
+        assert!(
+            !args.iter().any(|arg| arg == "-i"),
+            "an interactive wrapper would source the user's rc files twice"
         );
     }
 
