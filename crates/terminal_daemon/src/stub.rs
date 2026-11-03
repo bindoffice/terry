@@ -18,6 +18,40 @@ pub fn serve(_socket: &Path) -> anyhow::Result<()> {
     anyhow::bail!(UNSUPPORTED)
 }
 
+/// Extra listeners to start alongside the daemon socket.
+///
+/// Unix-only in practice; the stub keeps the type so `terry daemon` compiles
+/// and reports the platform limitation instead of failing to build.
+#[derive(Debug, Clone, Default)]
+pub struct ServeOptions {
+    pub http: Option<String>,
+    pub token_file: Option<std::path::PathBuf>,
+}
+
+impl ServeOptions {
+    pub fn with_http(
+        bind: impl Into<String>,
+        token_file: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            http: Some(bind.into()),
+            token_file: Some(token_file.into()),
+        }
+    }
+}
+
+pub fn serve_with_options(_socket: &Path, _options: ServeOptions) -> anyhow::Result<()> {
+    anyhow::bail!(UNSUPPORTED)
+}
+
+pub fn serve_with_options_and_port(
+    _socket: &Path,
+    _options: ServeOptions,
+    _on_http_port: impl FnOnce(u16),
+) -> anyhow::Result<()> {
+    anyhow::bail!(UNSUPPORTED)
+}
+
 pub fn ensure_daemon(_socket: &Path) -> anyhow::Result<()> {
     anyhow::bail!(UNSUPPORTED)
 }
