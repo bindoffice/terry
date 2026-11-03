@@ -607,7 +607,6 @@ pub struct HoveredWord {
 /// without gpui; they are re-exported here to keep `terminal::` paths working.
 pub use terminal_core::{ScreenCell, ScreenCursor, ScreenSnapshot};
 
-
 impl Default for Content {
     fn default() -> Self {
         Content {
@@ -1922,6 +1921,34 @@ impl Terminal {
             }
             TerminalBackendEvent::CommandStarted => {
                 self.last_exit_code = None;
+                // The command the user just submitted may not have replaced the
+                // shell as the PTY's foreground process yet, and the process
+                // snapshot is otherwise refreshed only by terminal output. A
+                // typed `ssh host` is silent while connecting, so without these
+                // reads the status bar kept showing a local shell until the
+                // login banner arrived (or never, when the server said
+                // nothing). Poll briefly instead of reading once: the shell may
+                // take a moment to `exec` the child, and the child itself may
+                // print nothing at all.
+                if let TerminalType::Pty { info, .. } = &self.terminal_type {
+                    info.emit_title_changed_if_changed(cx);
+                    let info = info.clone();
+                    cx.spawn(async move |terminal, cx| {
+                        for delay in [120u64, 300, 600, 1200] {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(delay))
+                                .await;
+                            let keep_going = terminal.update(cx, |terminal, cx| {
+                                info.emit_title_changed_if_changed(cx);
+                                !terminal.has_exited()
+                            });
+                            if !keep_going.unwrap_or(false) {
+                                return;
+                            }
+                        }
+                    })
+                    .detach();
+                }
                 cx.emit(Event::CommandStarted);
             }
             TerminalBackendEvent::CommandFinished(code) => {
@@ -6750,6 +6777,89 @@ mod tests {
                 Some(PathBuf::from("/srv/www"))
             );
             assert_eq!(terminal.title(true), "www");
+        });
+    }
+
+    /// A command that takes over the PTY without printing anything (`ssh host`
+    /// while it connects) must still be noticed.
+    ///
+    /// The foreground-process snapshot used to be refreshed only when the
+    /// terminal *wrote output*, so a silent command was invisible: the status
+    /// bar kept reporting a local shell until the login banner arrived, and
+    /// never updated when the server said nothing at all.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn test_silent_foreground_command_is_reported_after_command_start(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+        cx.executor().allow_parking();
+
+        // An interactive shell, like the one a user types `ssh host` into.
+        let builder = cx
+            .update(|cx| {
+                TerminalBuilder::new(
+                    None,
+                    None,
+                    task::Shell::WithArguments {
+                        program: "sh".to_string(),
+                        args: vec!["-i".to_string()],
+                        title_override: None,
+                    },
+                    HashMap::default(),
+                    SettingsCursorShape::default(),
+                    AlternateScroll::On,
+                    None,
+                    vec![],
+                    0,
+                    false,
+                    0,
+                    None,
+                    cx,
+                    vec![],
+                    PathStyle::local(),
+                )
+            })
+            .await
+            .unwrap();
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        cx.background_executor
+            .timer(Duration::from_millis(300))
+            .await;
+        // A silent, long-running foreground command.
+        terminal.update(cx, |terminal, _| terminal.paste("sleep 60\n"));
+
+        // Let the echo of the typed line settle, so the only remaining thing
+        // that may refresh the snapshot is the shell integration's
+        // `OSC 133;C` report below. The cached value is cleared first, so the
+        // assertion cannot pass on a stale-but-correct value.
+        cx.background_executor
+            .timer(Duration::from_millis(400))
+            .await;
+        terminal.update(cx, |terminal, _| {
+            if let TerminalType::Pty { info, .. } = &terminal.terminal_type {
+                *info.current.write() = None;
+            }
+        });
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]133;C\x07", cx);
+        });
+        cx.background_executor
+            .timer(Duration::from_millis(600))
+            .await;
+
+        terminal.update(cx, |terminal, _| {
+            assert_eq!(
+                terminal.foreground_process_command_name().as_deref(),
+                Some("sleep"),
+                "a silent foreground command must still be reported"
+            );
+            if let TerminalType::Pty { info, .. } = &terminal.terminal_type {
+                info.kill_current_process();
+            }
         });
     }
 
