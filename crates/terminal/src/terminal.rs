@@ -4185,13 +4185,22 @@ fn normalize_path_command_name(command: &str) -> Option<String> {
     const MAX_COMMAND_NAME_LENGTH: usize = 64;
 
     let command = command.trim();
-    if command.is_empty()
-        || command.len() > MAX_COMMAND_NAME_LENGTH
-        || command.starts_with('.')
-        || command.starts_with('-')
-        || command.contains('/')
-        || command.contains('\\')
-    {
+    if command.is_empty() || command.starts_with('.') || command.starts_with('-') {
+        return None;
+    }
+
+    // `argv[0]` is frequently an absolute path: a launcher script `exec`s the
+    // real binary by path (`/home/me/.local/share/pi-node/current/bin/node`), and
+    // the kernel keeps that spelling. Reduce it to the basename so the command
+    // is recognisable at all; the caller only ever compares it against bare
+    // names such as `node`.
+    let command = command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .trim();
+
+    if command.is_empty() || command.len() > MAX_COMMAND_NAME_LENGTH {
         return None;
     }
 
@@ -4398,21 +4407,75 @@ fn is_shell_command_name(command: &str) -> bool {
 
 fn normalize_script_command_name(argument: &str) -> Option<String> {
     let path = Path::new(argument);
-    let file_stem = path
+    let stem = path
         .file_stem()
         .and_then(|file_stem| file_stem.to_str())
-        .and_then(normalize_path_command_name)?;
+        .and_then(normalize_path_command_name);
 
-    if file_stem != "index" {
-        return Some(file_stem);
+    // Inside an npm package a generic entry point (`dist/cli.js`,
+    // `dist/bundle/cli.js`, `dist/main.mjs`) says nothing about the tool, so the
+    // package name is the better answer.
+    if stem.as_deref().is_none_or(is_generic_entry_point) {
+        if let Some(package) = package_directory_of(path) {
+            return normalize_path_command_name(&package);
+        }
     }
 
-    path.parent()
-        .and_then(|parent| parent.parent())
-        .and_then(|package_path| package_path.file_name())
-        .and_then(|package_name| package_name.to_str())
-        .and_then(|package_name| package_name.strip_suffix("-cli").or(Some(package_name)))
-        .and_then(normalize_path_command_name)
+    // Otherwise a script is identified by its own name, e.g.
+    // `scripts/customer-data-export.js`.
+    stem
+}
+
+/// The npm package a script inside `node_modules/` belongs to.
+///
+/// Returns `None` for anything outside a `node_modules` tree, so a project's own
+/// `scripts/index.js` is not mistaken for a package.
+///
+/// Entry points sit one or two directories below the package root
+/// (`dist/cli.js`, `dist/bundle/cli.js`, `bin/codex.js`), so walk up until the
+/// `node_modules` segment is found rather than guessing a fixed depth. The npm
+/// scope (`@openai/codex`) is part of the directory name but is not what a
+/// caller matches against executable names, so it is dropped.
+fn package_directory_of(path: &Path) -> Option<String> {
+    let mut current = path.parent()?;
+    loop {
+        let name = current.file_name()?.to_str()?;
+        // The package root is the directory directly under `node_modules/`, or
+        // under a scope directory (`node_modules/@openai/codex`).
+        let parent = current.parent().and_then(|parent| parent.file_name());
+        let under_node_modules = parent.is_some_and(|parent| parent == "node_modules");
+        let under_scope = parent.is_some_and(|parent| parent.to_str().is_some_and(|parent| {
+            parent.starts_with('@')
+                && current
+                    .parent()
+                    .and_then(|scope| scope.parent())
+                    .and_then(|above| above.file_name())
+                    .is_some_and(|above| above == "node_modules")
+        }));
+        if under_node_modules || under_scope {
+            return Some(name.strip_suffix("-cli").unwrap_or(name).to_string());
+        }
+        if !is_runtime_directory(name) {
+            return None;
+        }
+        current = current.parent()?;
+    }
+}
+
+/// Directories that sit between an npm package root and its entry point.
+fn is_runtime_directory(name: &str) -> bool {
+    matches!(
+        name,
+        "dist" | "bundle" | "bin" | "build" | "lib" | "src" | "esm" | "cjs"
+    )
+}
+
+/// Entry-point file stems that identify the packaging, not the tool.
+fn is_generic_entry_point(stem: &str) -> bool {
+    matches!(
+        stem,
+        "index" | "cli" | "main" | "bin" | "bundle" | "entry" | "app" | "start" | "run"
+    )
 }
 
 fn content_index_for_mouse(pos: GpuiPoint<Pixels>, terminal_bounds: &TerminalBounds) -> usize {
@@ -4623,13 +4686,21 @@ mod tests {
             normalize_path_command_name("my-agent_cli.1"),
             Some("my-agent_cli.1".into())
         );
-        assert_eq!(normalize_path_command_name("./local-agent"), None);
-        assert_eq!(normalize_path_command_name("../local-agent"), None);
-        assert_eq!(normalize_path_command_name("/usr/local/bin/cargo"), None);
+        // `argv[0]` is often a path: a launcher `exec`s the real binary by
+        // absolute path, so reducing it to the basename is what makes the
+        // command recognisable. Relative paths stay rejected: `./local-agent`
+        // names a file in the cwd, not a tool on PATH.
+        assert_eq!(
+            normalize_path_command_name("/usr/local/bin/cargo"),
+            Some("cargo".into())
+        );
         assert_eq!(
             normalize_path_command_name("target\\debug\\agent.exe"),
-            None
+            Some("agent".into())
         );
+        assert_eq!(normalize_path_command_name("./local-agent"), None);
+        assert_eq!(normalize_path_command_name("../local-agent"), None);
+        assert_eq!(normalize_path_command_name("/usr/local/bin/"), None);
         assert_eq!(normalize_path_command_name(".hidden-agent"), None);
         assert_eq!(normalize_path_command_name("agent with spaces"), None);
         assert_eq!(normalize_path_command_name("zsh"), Some("zsh".into()));
@@ -4681,6 +4752,109 @@ mod tests {
                 "/Users/me/private-project/scripts/customer-data-export.js".to_string(),
             ]),
             Some("customer-data-export".to_string())
+        );
+    }
+
+    /// npm packages ship generic entry points (`dist/cli.js`,
+    /// `dist/bundle/cli.js`, `dist/main.mjs`). Resolving those to their file
+    /// stem identifies the packaging rather than the tool, which left agents
+    /// installed this way unrecognisable.
+    #[test]
+    fn test_foreground_process_command_from_generic_entry_points() {
+        let cases = [
+            (
+                "/home/me/.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+                "pi-coding-agent",
+            ),
+            (
+                "/opt/homebrew/lib/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+                "pi-coding-agent",
+            ),
+            (
+                "/usr/lib/node_modules/@moonshot-ai/kimi-code/dist/main.mjs",
+                "kimi-code",
+            ),
+            (
+                "/usr/lib/node_modules/@qwen-code/qwen-code/dist/index.js",
+                "qwen-code",
+            ),
+        ];
+        for (script, expected) in cases {
+            assert_eq!(
+                foreground_process_command_from_argv(&[
+                    "node".to_string(),
+                    script.to_string()
+                ]),
+                Some(expected.to_string()),
+                "{script}"
+            );
+        }
+
+        // A distinctive entry point still wins over the package directory.
+        assert_eq!(
+            foreground_process_command_from_argv(&[
+                "node".to_string(),
+                "/usr/local/lib/node_modules/@openai/codex/bin/codex.js".to_string(),
+            ]),
+            Some("codex".to_string())
+        );
+    }
+
+    /// Only a path inside `node_modules/` belongs to a package: a project's own
+    /// `scripts/index.js` is identified by its own name, not by its directory.
+    #[test]
+    fn test_foreground_process_command_outside_node_modules() {
+        assert_eq!(
+            foreground_process_command_from_argv(&[
+                "node".to_string(),
+                "/Users/me/private-project/scripts/customer-data-export.js".to_string(),
+            ]),
+            Some("customer-data-export".to_string())
+        );
+        assert_eq!(
+            foreground_process_command_from_argv(&[
+                "node".to_string(),
+                "/Users/me/private-project/scripts/index.js".to_string(),
+            ]),
+            Some("index".to_string()),
+            "a project script must not borrow its directory as a name"
+        );
+        assert_eq!(
+            foreground_process_command_from_argv(&[
+                "node".to_string(),
+                "/opt/my-tool/dist/cli.js".to_string(),
+            ]),
+            Some("cli".to_string()),
+            "without node_modules there is no package to name"
+        );
+    }
+
+    /// A launcher script `exec`s the real binary by absolute path, and the
+    /// kernel keeps that spelling in `argv[0]`. Rejecting anything containing a
+    /// slash hid every agent started through such a wrapper.
+    #[test]
+    fn test_foreground_process_command_from_absolute_argv0() {
+        assert_eq!(
+            normalize_path_command_name("/home/me/.local/share/pi-node/current/bin/node"),
+            Some("node".to_string())
+        );
+        assert_eq!(
+            normalize_path_command_name("/usr/local/bin/claude"),
+            Some("claude".to_string())
+        );
+        // Windows spellings, including the `.exe` suffix and `\` separators.
+        assert_eq!(
+            normalize_path_command_name(r"C:\Tools\node.exe"),
+            Some("node".to_string())
+        );
+        // An absolute wrapper path still resolves through the interpreter rule.
+        assert_eq!(
+            foreground_process_command_from_argv(&[
+                "/home/me/.local/share/pi-node/current/bin/node".to_string(),
+                "/home/me/.pi/agent/install/1.4.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"
+                    .to_string(),
+            ]),
+            Some("pi-coding-agent".to_string())
         );
     }
 

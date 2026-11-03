@@ -425,6 +425,7 @@ fn agent_badge_for(
     terminal_activity: &HashMap<EntityId, std::time::Instant>,
     agent_waiting: &HashSet<EntityId>,
     agent_states: &HashMap<EntityId, AgentState>,
+    reported_agents: &HashMap<EntityId, String>,
     cx: &App,
 ) -> Option<AgentBadge> {
     // Only trust the foreground process here: title/breadcrumb matching is fine
@@ -434,7 +435,15 @@ fn agent_badge_for(
     let busy = agent_is_busy(view, cx);
     let view = view.read(cx);
     let terminal = view.terminal().read(cx);
-    let agent = coding_agent_for_terminal(&terminal)?;
+    // A daemon-backed terminal is `DisplayOnly`: its processes belong to the
+    // session host, so there is no foreground process to inspect. Its agent is
+    // whatever its integration reported, which is the same signal the daemon
+    // itself uses to decide which rules apply.
+    let agent = coding_agent_for_terminal(&terminal).or_else(|| {
+        reported_agents
+            .get(&view_id)
+            .and_then(|id| agent_by_id(id))
+    })?;
     // Screen-tail detection is authoritative when it has an answer; the
     // quiet-window heuristic only covers agents without rules and screens the
     // rules do not recognise.
@@ -1361,6 +1370,10 @@ pub struct TerminalListPanel {
     /// `TERRY_TERMINAL_TOKEN` value per terminal, so integration reports can be
     /// attributed to the right terminal.
     terminal_tokens: HashMap<String, EntityId>,
+    /// Agent identity reported by an in-terminal integration. A daemon-backed
+    /// terminal has no foreground process to inspect, so this is the only way
+    /// the sidebar can know which agent runs in it.
+    reported_agents: HashMap<EntityId, String>,
     /// Resumable agent session per terminal, reported by an integration.
     agent_session_refs: HashMap<EntityId, PersistedAgentSession>,
     /// Debounced re-scan of the terminal bottom after output settles.
@@ -1553,6 +1566,7 @@ impl TerminalListPanel {
             agent_states: HashMap::default(),
             reported_agent_states: HashMap::default(),
             terminal_tokens: HashMap::default(),
+            reported_agents: HashMap::default(),
             agent_session_refs: HashMap::default(),
             agent_detect_task: None,
             cwd_persist_task: Task::ready(()),
@@ -1869,6 +1883,7 @@ impl TerminalListPanel {
                         &this.terminal_activity,
                         &this.agent_waiting,
                         &this.agent_states,
+                        &this.reported_agents,
                         cx,
                     )
                     .is_none()
@@ -1930,7 +1945,14 @@ impl TerminalListPanel {
             let detected = {
                 let view_ref = view.read(cx);
                 let terminal = view_ref.terminal().read(cx);
-                let Some(agent) = coding_agent_for_terminal(&terminal) else {
+                // A daemon-backed terminal has no foreground process; its agent
+                // comes from an integration report instead.
+                let agent = coding_agent_for_terminal(&terminal).or_else(|| {
+                    self.reported_agents
+                        .get(&view.entity_id())
+                        .and_then(|id| agent_by_id(id))
+                });
+                let Some(agent) = agent else {
                     continue;
                 };
                 if !agent_detect::supports(agent.id) {
@@ -2131,6 +2153,7 @@ impl TerminalListPanel {
                     &self.terminal_activity,
                     &self.agent_waiting,
                     &self.agent_states,
+                    &self.reported_agents,
                     cx,
                 ) else {
                     continue;
@@ -2165,6 +2188,7 @@ impl TerminalListPanel {
                     &self.terminal_activity,
                     &self.agent_waiting,
                     &self.agent_states,
+                    &self.reported_agents,
                     cx,
                 )
                 .is_some_and(|badge| badge.waiting)
@@ -3850,6 +3874,7 @@ impl TerminalListPanel {
             self.agent_waiting.remove(id);
             self.agent_states.remove(id);
             self.reported_agent_states.remove(id);
+            self.reported_agents.remove(id);
             self.agent_session_refs.remove(id);
             self.terminal_tokens.retain(|_, view| view != id);
         }
@@ -4012,6 +4037,10 @@ impl TerminalListPanel {
                 value,
             },
         );
+        // An integration naming its agent is also the only identity a
+        // daemon-backed terminal has: its processes live in the session host.
+        self.reported_agents
+            .insert(view_id, agent.to_string());
         cx.notify();
 
         Ok(serde_json::json!({
@@ -4041,6 +4070,12 @@ impl TerminalListPanel {
             "blocked" => AgentState::Blocked,
             _ => AgentState::Idle,
         };
+
+        // Keep the identity the report named. A daemon-backed terminal has no
+        // foreground process to inspect, so this is what the badge draws from.
+        if let Some(agent) = agent.filter(|agent| agent_by_id(agent).is_some()) {
+            self.reported_agents.insert(view_id, agent.to_string());
+        }
 
         self.reported_agent_states
             .insert(view_id, ReportedAgentState { state, message });
@@ -4080,6 +4115,7 @@ impl TerminalListPanel {
                 &self.terminal_activity,
                 &self.agent_waiting,
                 &self.agent_states,
+                &self.reported_agents,
                 cx,
             ) else {
                 continue;
@@ -6254,6 +6290,8 @@ impl TerminalListPanel {
             self.terminal_spawn_cwds.remove(view_id);
             self.agent_waiting.remove(view_id);
             self.agent_states.remove(view_id);
+            self.reported_agent_states.remove(view_id);
+            self.reported_agents.remove(view_id);
         }
         self.suppress_recently_closed = true;
         if let Some(pane) = self.display_pane_entity(cx) {
@@ -7648,6 +7686,7 @@ impl TerminalListPanel {
         self.agent_waiting.remove(&item_id);
         self.agent_states.remove(&item_id);
         self.reported_agent_states.remove(&item_id);
+        self.reported_agents.remove(&item_id);
         self.agent_session_refs.remove(&item_id);
         self.terminal_tokens.retain(|_, id| *id != item_id);
         let daemon_session = self.terminal_daemon_sessions.remove(&item_id);
@@ -7823,6 +7862,7 @@ impl Render for TerminalListPanel {
                         &self.terminal_activity,
                         &self.agent_waiting,
                         &self.agent_states,
+                        &self.reported_agents,
                         cx,
                     ),
                     session.view.read(cx).notification_progress(),
@@ -7865,6 +7905,7 @@ impl Render for TerminalListPanel {
                         &self.terminal_activity,
                         &self.agent_waiting,
                         &self.agent_states,
+                        &self.reported_agents,
                         cx,
                     );
                     let progress = tv.read(cx).notification_progress();
@@ -8681,6 +8722,39 @@ mod tests {
         assert!(agent_for_package_path("").is_none());
     }
 
+    /// The entry point a package happens to ship is not its identity: `pi` and
+    /// `omp` both enter through `dist/cli.js`, and `kimi` through `main.mjs`.
+    /// Matching the package directory is what makes those installs recognisable
+    /// however a release lays its files out.
+    #[test]
+    fn agents_are_recognised_from_their_real_install_layout() {
+        let cases = [
+            (
+                "/home/solos/.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+                "pi",
+            ),
+            (
+                "/usr/local/lib/node_modules/@openai/codex/bin/codex.js",
+                "codex",
+            ),
+            (
+                "/usr/lib/node_modules/@qwen-code/qwen-code/dist/index.js",
+                "qwen",
+            ),
+            (
+                "/usr/lib/node_modules/@moonshot-ai/kimi-code/dist/main.mjs",
+                "kimi",
+            ),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(
+                agent_for_package_path(path).map(|agent| agent.id),
+                Some(expected),
+                "{path}"
+            );
+        }
+    }
+
     #[test]
     fn layout_presets_generate_expected_axes() {
         let horizontal = GroupLayoutMode::Horizontal.generate_layout(3).unwrap();
@@ -8724,6 +8798,98 @@ mod tests {
         }
 
         assert!(GroupLayoutMode::Manual.generate_layout(3).is_none());
+    }
+
+    /// The two halves of recognition have to agree: `terminal` resolves a
+    /// foreground process to a plain command name, and the catalogue decides
+    /// whether that name is an agent. A name one side produces but the other
+    /// does not know is silently unbadgeable, which is exactly how node-hosted
+    /// agents lost their badges.
+    #[test]
+    fn process_names_resolved_for_each_agent_are_catalogued() {
+        // Detection by executable name, including versioned shims and aliases.
+        for (agent_id, executable) in [
+            ("claude", "claude"),
+            ("codex", "codex"),
+            ("gemini", "gemini"),
+            ("cursor", "cursor-agent"),
+            ("qwen", "qwen"),
+            ("copilot", "copilot"),
+            ("pi", "pi"),
+            ("grok", "grok"),
+            ("droid", "droid"),
+            ("kimi", "kimi"),
+            ("amp", "amp"),
+            ("hermes", "hermes"),
+            ("qoder", "qoder"),
+            ("antigravity", "agy"),
+            ("cline", "cline"),
+            ("devin", "devin"),
+            ("kiro", "kiro-cli"),
+            ("kilo", "kilo"),
+            ("letta", "letta"),
+            ("maki", "maki"),
+            ("muse", "muse"),
+        ] {
+            // `terminal` reports the basename of `argv[0]`; the catalogue has to
+            // recognise exactly that spelling.
+            let base = agent_catalog::command_basename(executable);
+            assert_eq!(
+                agent_for_basename(&base).map(|agent| agent.id),
+                Some(agent_id),
+                "the foreground-process name {base:?} must resolve to {agent_id}"
+            );
+        }
+    }
+
+    /// npm-hosted agents run as `node`, so the catalogue has to see through the
+    /// runtime to the package. Every package a release may enter through has to
+    /// resolve, not just the one the table happened to list first.
+    #[test]
+    fn npm_hosted_agents_resolve_through_their_runtime() {
+        let cases = [
+            (
+                "node",
+                "/home/me/.pi/agent/install/1.4.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+                "pi",
+            ),
+            (
+                "node",
+                "/opt/homebrew/lib/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+                "omp",
+            ),
+            (
+                "node",
+                "/usr/lib/node_modules/@moonshot-ai/kimi-code/dist/main.mjs",
+                "kimi",
+            ),
+            (
+                "node",
+                "/usr/lib/node_modules/@qwen-code/qwen-code/dist/index.js",
+                "qwen",
+            ),
+            (
+                "node",
+                "/usr/local/lib/node_modules/@openai/codex/bin/codex.js",
+                "codex",
+            ),
+            (
+                "bun",
+                "/usr/lib/node_modules/@letta-ai/letta-code/letta",
+                "letta",
+            ),
+        ];
+        for (runtime, script, expected) in cases {
+            assert!(
+                !is_coding_agent_name(runtime),
+                "{runtime} alone must not be treated as an agent"
+            );
+            assert_eq!(
+                agent_for_package_path(script).map(|agent| agent.id),
+                Some(expected),
+                "{script}"
+            );
+        }
     }
 
     #[test]
@@ -8981,6 +9147,191 @@ mod tests {
     /// hang the app or drop terminals from the group's model. A rebuild removes
     /// and re-adds items in the panes; those events must not feed back into
     /// `remove_terminal_by_id` / `sync_active_group_to_pane` in a loop.
+    /// A daemon-backed terminal is `DisplayOnly`: its processes live in the
+    /// session host, so there is no foreground process for the sidebar to read.
+    /// Its agent has to come from an integration report, and the badge must
+    /// appear once one arrives — otherwise every persistent terminal looks like
+    /// a plain shell.
+    #[gpui::test]
+    async fn reported_agent_gives_a_display_only_terminal_a_badge(cx: &mut TestAppContext) {
+        ensure_test_data_dir();
+        let params = cx.update(AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let project = Project::test(params.fs.clone(), [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let panel = window_handle
+            .update(cx, |mw, window, cx| {
+                let workspace = mw.workspace().clone();
+                let project = workspace.read(cx).project().clone();
+                let display_pane = workspace.read(cx).active_pane().clone();
+                cx.new(|cx| {
+                    TerminalListPanel::new(workspace, display_pane, project, None, window, cx)
+                })
+            })
+            .unwrap();
+
+        window_handle
+            .update(cx, |_mw, window, cx| {
+                panel.update(cx, |panel, cx| {
+                    let group_id = panel.groups.first().map(|group| group.id);
+                    let group_id = match group_id {
+                        Some(id) => id,
+                        None => {
+                            let id = panel.new_group_id();
+                            panel.groups.push(TerminalGroup {
+                                id,
+                                name: SharedString::from("test group"),
+                                terminals: Vec::new(),
+                                collapsed: false,
+                                has_unread: false,
+                                saved_layout: None,
+                                layout_mode: GroupLayoutMode::Manual,
+                                broadcast_input: false,
+                                session_terminal_count: None,
+                                restore_slots: Vec::new(),
+                            });
+                            panel.active_group_id = id;
+                            id
+                        }
+                    };
+                    let view = new_display_only_terminal_view(&workspace, &project, window, cx);
+                    let view_id = view.entity_id();
+                    let token = "terminal-token".to_string();
+                    panel.terminal_tokens.insert(token.clone(), view_id);
+                    panel.add_terminal_to_group(group_id, view, None, None, cx);
+
+                    // Without a report, a display-only terminal is not an agent:
+                    // there is no process to identify.
+                    assert!(
+                        panel.reported_agents.get(&view_id).is_none(),
+                        "nothing has reported yet"
+                    );
+
+                    // An integration names its agent; the panel trusts it.
+                    panel
+                        .apply_reported_agent_session(
+                            &token,
+                            "claude",
+                            None,
+                            Some("session-1".to_string()),
+                            cx,
+                        )
+                        .expect("report accepted");
+                    assert_eq!(
+                        panel.reported_agents.get(&view_id).map(String::as_str),
+                        Some("claude")
+                    );
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // The reported agent resolves through the catalogue, which is what the
+        // badge draws its name, icon and colour from.
+        let view_id = panel.read_with(cx, |panel, _| panel.groups[0].terminals[0].entity_id());
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel
+                .reported_agents
+                .get(&view_id)
+                .cloned()),
+            Some("claude".to_string())
+        );
+        assert_eq!(
+            agent_by_id("claude").map(|agent| agent_display_name(agent)),
+            Some(SharedString::from("Claude")),
+        );
+
+        // Closing the terminal drops the bookkeeping, so a later view that
+        // reuses the id cannot inherit a stale agent.
+        window_handle
+            .update(cx, |_mw, window, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.close_terminal(view_id, window, cx);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            panel.read_with(cx, |panel, _| panel.reported_agents.get(&view_id).is_none()),
+            "a closed terminal must forget its reported agent"
+        );
+    }
+
+    /// An unknown or misspelled agent id must not paint a badge: the catalogue
+    /// is the only source of names and icons.
+    #[gpui::test]
+    async fn an_unknown_reported_agent_is_ignored(cx: &mut TestAppContext) {
+        ensure_test_data_dir();
+        let params = cx.update(AppState::test);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let project = Project::test(params.fs.clone(), [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let panel = window_handle
+            .update(cx, |mw, window, cx| {
+                let workspace = mw.workspace().clone();
+                let project = workspace.read(cx).project().clone();
+                let display_pane = workspace.read(cx).active_pane().clone();
+                cx.new(|cx| {
+                    TerminalListPanel::new(workspace, display_pane, project, None, window, cx)
+                })
+            })
+            .unwrap();
+
+        window_handle
+            .update(cx, |_mw, window, cx| {
+                panel.update(cx, |panel, cx| {
+                    let group_id = match panel.groups.first().map(|group| group.id) {
+                        Some(id) => id,
+                        None => {
+                            let id = panel.new_group_id();
+                            panel.groups.push(TerminalGroup {
+                                id,
+                                name: SharedString::from("test group"),
+                                terminals: Vec::new(),
+                                collapsed: false,
+                                has_unread: false,
+                                saved_layout: None,
+                                layout_mode: GroupLayoutMode::Manual,
+                                broadcast_input: false,
+                                session_terminal_count: None,
+                                restore_slots: Vec::new(),
+                            });
+                            panel.active_group_id = id;
+                            id
+                        }
+                    };
+                    let view = new_display_only_terminal_view(&workspace, &project, window, cx);
+                    let view_id = view.entity_id();
+                    let token = "terminal-token".to_string();
+                    panel.terminal_tokens.insert(token.clone(), view_id);
+                    panel.add_terminal_to_group(group_id, view, None, None, cx);
+
+                    panel
+                        .apply_reported_agent_state(&token, "working", None, Some("not-an-agent"), cx)
+                        .expect("a state report is still accepted");
+                    assert!(
+                        panel.reported_agents.get(&view_id).is_none(),
+                        "an unknown agent id must not be recorded"
+                    );
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(agent_by_id("not-an-agent").is_none());
+    }
+
     #[gpui::test]
     async fn tiling_reflow_keeps_group_terminals_and_does_not_hang(cx: &mut TestAppContext) {
         // Isolate session-file writes from the real data directory.

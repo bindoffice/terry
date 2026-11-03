@@ -380,34 +380,56 @@ pub fn invocation_bin(agent: &AgentCli, base: &str) -> &'static str {
 ///
 /// npm-installed CLIs run as `node .../node_modules/<package>/dist/cli.js`, so
 /// the foreground process name is the runtime (`node`) rather than the agent.
-/// Matching the package entry point keeps those terminals identifiable.
+/// Matching the package directory keeps those terminals identifiable.
+///
+/// Packages are matched by *directory*, not by entry-point file: the same
+/// package ships several entry points (`dist/cli.js`, `dist/bundle/cli.js`,
+/// `dist/index.js`), and version upgrades move them around. Matching the
+/// package name across `node_modules/<package>/` covers every entry point a
+/// release happens to use, including the `node_modules/.pnpm/<pkg>@<ver>/`
+/// layout pnpm produces.
+///
+/// The directory is required to be a complete path segment, so a package such
+/// as `@qwen-code/qwen-code` does not also match an unrelated
+/// `@qwen-code/qwen-code-extra` checkout.
 pub fn agent_for_package_path(path: &str) -> Option<&'static AgentCli> {
     let normalized = path.replace('\\', "/").to_ascii_lowercase();
 
+    /// npm package directory -> agent id.
     const PACKAGES: &[(&str, &str)] = &[
-        (
-            "node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
-            "pi",
-        ),
-        (
-            "node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
-            "pi",
-        ),
-        ("node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js", "omp"),
-        ("node_modules/@moonshot-ai/kimi-code/dist/main.mjs", "kimi"),
-        ("node_modules/@qwen-code/qwen-code/dist/index.js", "qwen"),
-        ("node_modules/@qwen-code/qwen-code/dist/index.mjs", "qwen"),
-        ("node_modules/mastracode/dist/cli", "mastracode"),
-        ("node_modules/mastracode/dist/cli.js", "mastracode"),
-        ("node_modules/@letta-ai/letta-code/letta", "letta"),
+        ("@earendil-works/pi-coding-agent", "pi"),
+        ("@oh-my-pi/pi-coding-agent", "omp"),
+        ("@moonshot-ai/kimi-code", "kimi"),
+        ("@qwen-code/qwen-code", "qwen"),
+        ("@openai/codex", "codex"),
+        ("@letta-ai/letta-code", "letta"),
+        ("mastracode", "mastracode"),
     ];
 
-    for (suffix, id) in PACKAGES {
-        if normalized.ends_with(suffix) {
+    for (package, id) in PACKAGES {
+        if package_in_path(&normalized, package) {
             return agent_by_id(id);
         }
     }
     None
+}
+
+/// Whether `package` appears as a whole directory under a `node_modules/`.
+fn package_in_path(normalized_path: &str, package: &str) -> bool {
+    let mut from = 0;
+    while let Some(index) = normalized_path[from..].find("node_modules/") {
+        let start = from + index + "node_modules/".len();
+        let rest = &normalized_path[start..];
+        if rest.strip_prefix(package).is_some_and(|tail| {
+            // The package name must end at a path separator, never inside a
+            // longer name such as `qwen-code-extra`.
+            tail.starts_with('/')
+        }) {
+            return true;
+        }
+        from = start;
+    }
+    false
 }
 
 /// Whether `name` is a coding agent's executable.
@@ -537,6 +559,62 @@ mod tests {
         )
         .expect("qwen installed with npm runs as node");
         assert_eq!(agent.id, "qwen");
+    }
+
+    /// A release can move its entry point, and the same package ships several
+    /// (`dist/cli.js`, `dist/bundle/cli.js`, `bin/codex.js`). Matching the
+    /// package directory keeps the agent identifiable either way.
+    #[test]
+    fn every_entry_point_of_a_package_identifies_the_agent() {
+        let cases = [
+            (
+                "/home/me/.pi/agent/install/1.4.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+                "pi",
+            ),
+            (
+                "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+                "pi",
+            ),
+            (
+                "/opt/homebrew/lib/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+                "omp",
+            ),
+            (
+                "/usr/lib/node_modules/@moonshot-ai/kimi-code/dist/main.mjs",
+                "kimi",
+            ),
+            (
+                "/usr/local/lib/node_modules/@openai/codex/bin/codex.js",
+                "codex",
+            ),
+            (
+                "/x/node_modules/.pnpm/@qwen-code+qwen-code@1.0.0/node_modules/@qwen-code/qwen-code/dist/index.js",
+                "qwen",
+            ),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(
+                agent_for_package_path(path).map(|agent| agent.id),
+                Some(expected),
+                "{path}"
+            );
+        }
+    }
+
+    /// The package name must end at a path separator: a different package that
+    /// merely starts with the same characters is not that agent.
+    #[test]
+    fn a_longer_package_name_is_not_a_prefix_match() {
+        assert!(
+            agent_for_package_path(
+                "/usr/lib/node_modules/@qwen-code/qwen-code-extra/dist/index.js"
+            )
+            .is_none(),
+            "`qwen-code-extra` must not be reported as `qwen`"
+        );
+        assert!(
+            agent_for_package_path("/usr/lib/node_modules/my-mastracode/dist/cli.js").is_none()
+        );
     }
 
     #[test]
