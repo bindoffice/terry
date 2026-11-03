@@ -94,7 +94,7 @@ if [[ ! -f "$BIN" ]]; then
 fi
 
 # The archive must hold the binary at its root: the updater matches the declared
-# path exactly, so a leading directory such as `tom-v0.16.0/tom` would not be
+# path exactly, so a leading directory such as `tom-v0.17.0/tom` would not be
 # found.
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT

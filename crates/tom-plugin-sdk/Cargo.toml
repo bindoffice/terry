@@ -1,6 +1,6 @@
 [package]
 name = "tom-plugin-sdk"
-version = "0.16.0"
+version = "0.17.0"
 # Vendored from the tom workspace, which targets edition 2021 (the code
 # predates the edition-2024 `unsafe` requirements on `std::env::set_var`).
 edition = "2021"

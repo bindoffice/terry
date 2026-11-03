@@ -11,6 +11,8 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/solos/tom/compare/v0.16.0...v0.17.0) - 2026-11-03
+
 ### Added
 
 - *(codemode)* new `codemode` tool: the model writes JavaScript that runs in a
