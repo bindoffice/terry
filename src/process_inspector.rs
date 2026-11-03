@@ -51,10 +51,14 @@ struct Snapshot {
 /// Collects the process tree under `root_pid` and the ports it listens on.
 /// Blocking; run it on the background executor.
 fn collect(root_pid: u32) -> Snapshot {
+    // Refresh only this terminal's subtree. Scanning every process on the
+    // machine (one `/proc/<pid>/stat` handle each) on every 2s tick was pure
+    // overhead: the window only ever shows one shell's descendants.
+    let tree = crate::resource_usage::collect_tree_pids(&[root_pid]);
     let mut system = System::new();
     system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
+        ProcessesToUpdate::Some(&tree),
+        false,
         ProcessRefreshKind::nothing()
             .with_cmd(UpdateKind::Always)
             .without_tasks(),
