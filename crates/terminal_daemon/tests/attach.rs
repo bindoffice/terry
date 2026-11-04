@@ -271,7 +271,10 @@ fn reading_the_screen_leaves_the_session_attachable() {
     let mut control = Control::connect(&socket).expect("control");
 
     let session = control
-        .spawn(&spec("keep", "printf 'ready\\n'; read x; echo GOT:$x; sleep 5"))
+        .spawn(&spec(
+            "keep",
+            "printf 'ready\\n'; read x; echo GOT:$x; sleep 5",
+        ))
         .expect("spawn");
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -366,7 +369,10 @@ fn a_session_running_an_agent_is_never_pruned() {
     // registry the hook posts to. The daemon must attribute the report to this
     // session and expose the agent in the listing the reaper uses.
     let session = control
-        .spawn(&spec("agent-reported", "printf 'TOKEN is not visible here\n'; sleep 5"))
+        .spawn(&spec(
+            "agent-reported",
+            "printf 'TOKEN is not visible here\n'; sleep 5",
+        ))
         .expect("spawn");
 
     // Before any report the session is a plain shell: prunable.
@@ -422,4 +428,74 @@ fn a_plain_shell_reports_no_agent() {
     );
 
     control.kill(&session).expect("kill");
+}
+
+/// The daemon can identify agents directly from the PTY's foreground process
+/// group, without any in-agent integration reporting state.
+///
+/// This is the persistent-session counterpart of the GUI's local-process
+/// detection. Every catalogued executable must remain identifiable when its
+/// PTY belongs to the daemon, including when many agent terminals coexist.
+#[test]
+fn foreground_process_agents_are_recognised_without_reports() {
+    use std::os::unix::fs::symlink;
+
+    let socket = start_daemon();
+    let mut control = Control::connect(&socket).expect("control");
+    let sleep = ["/bin/sleep", "/usr/bin/sleep"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).exists())
+        .expect("sleep executable");
+    let directory = std::env::temp_dir().join(format!(
+        "terry-daemon-agent-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(&directory).expect("temp dir");
+
+    let mut sessions = Vec::new();
+    for agent in agent_catalog::coding_agents() {
+        let executable = directory.join(agent.bin);
+        symlink(sleep, &executable).expect("agent shim");
+        let spec = SessionSpec {
+            session: format!("foreground-{}", agent.id),
+            cwd: None,
+            program: Some(executable.display().to_string()),
+            args: vec!["30".to_string()],
+            env: Vec::new(),
+            cols: 80,
+            rows: 24,
+        };
+        let session = control.spawn(&spec).expect("spawn");
+        sessions.push((session, agent.id));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let listing = control.list().expect("list");
+        let missing: Vec<_> = sessions
+            .iter()
+            .filter_map(|(session, expected)| {
+                let actual = listing
+                    .iter()
+                    .find(|info| info.session == *session)
+                    .and_then(|info| info.agent.as_deref());
+                (actual != Some(*expected)).then_some((expected, actual))
+            })
+            .collect();
+        if missing.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon did not identify foreground agents: {missing:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    for (session, _) in sessions {
+        control.kill(&session).expect("kill");
+    }
+
+    std::fs::remove_dir_all(directory).ok();
 }

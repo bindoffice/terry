@@ -426,6 +426,7 @@ fn agent_badge_for(
     agent_waiting: &HashSet<EntityId>,
     agent_states: &HashMap<EntityId, AgentState>,
     reported_agents: &HashMap<EntityId, String>,
+    daemon_agents: &HashMap<EntityId, String>,
     cx: &App,
 ) -> Option<AgentBadge> {
     // Only trust the foreground process here: title/breadcrumb matching is fine
@@ -435,13 +436,13 @@ fn agent_badge_for(
     let busy = agent_is_busy(view, cx);
     let view = view.read(cx);
     let terminal = view.terminal().read(cx);
-    // A daemon-backed terminal is `DisplayOnly`: its processes belong to the
-    // session host, so there is no foreground process to inspect. Its agent is
-    // whatever its integration reported, which is the same signal the daemon
-    // itself uses to decide which rules apply.
+    // A daemon-backed terminal is `DisplayOnly`, so this process cannot inspect
+    // its foreground process. The daemon publishes the identity it detected;
+    // integration reports remain another source.
     let agent = coding_agent_for_terminal(&terminal).or_else(|| {
         reported_agents
             .get(&view_id)
+            .or_else(|| daemon_agents.get(&view_id))
             .and_then(|id| agent_by_id(id))
     })?;
     // Screen-tail detection is authoritative when it has an answer; the
@@ -1370,14 +1371,17 @@ pub struct TerminalListPanel {
     /// `TERRY_TERMINAL_TOKEN` value per terminal, so integration reports can be
     /// attributed to the right terminal.
     terminal_tokens: HashMap<String, EntityId>,
-    /// Agent identity reported by an in-terminal integration. A daemon-backed
-    /// terminal has no foreground process to inspect, so this is the only way
-    /// the sidebar can know which agent runs in it.
+    /// Agent identity reported by an in-terminal integration.
     reported_agents: HashMap<EntityId, String>,
+    /// Agent identity detected by the terminal daemon from its PTY's
+    /// foreground process group.
+    daemon_agents: HashMap<EntityId, String>,
     /// Resumable agent session per terminal, reported by an integration.
     agent_session_refs: HashMap<EntityId, PersistedAgentSession>,
     /// Debounced re-scan of the terminal bottom after output settles.
     agent_detect_task: Option<Task<()>>,
+    /// Polls daemon-owned sessions so process-detected agents reach the badge.
+    daemon_agent_poll: Option<Task<()>>,
     /// Debounced disk write after a terminal cwd change.
     cwd_persist_task: Task<()>,
     /// Debounced disk write after the command history changes.
@@ -1523,7 +1527,7 @@ impl TerminalListPanel {
             ));
         }
 
-        Self {
+        let mut this = Self {
             workspace: workspace.downgrade(),
             project: project.downgrade(),
             focus_handle,
@@ -1567,8 +1571,10 @@ impl TerminalListPanel {
             reported_agent_states: HashMap::default(),
             terminal_tokens: HashMap::default(),
             reported_agents: HashMap::default(),
+            daemon_agents: HashMap::default(),
             agent_session_refs: HashMap::default(),
             agent_detect_task: None,
+            daemon_agent_poll: None,
             cwd_persist_task: Task::ready(()),
             command_history_persist: Task::ready(()),
             restore_cwd_guard_until: None,
@@ -1582,7 +1588,9 @@ impl TerminalListPanel {
             _session_release_subscription,
             renaming_group_id: None,
             rename_editor,
-        }
+        };
+        this.start_daemon_agent_poll(cx);
+        this
     }
 
     /// Creates the initial group (with one terminal) if none exists yet.
@@ -1884,6 +1892,7 @@ impl TerminalListPanel {
                         &this.agent_waiting,
                         &this.agent_states,
                         &this.reported_agents,
+                        &this.daemon_agents,
                         cx,
                     )
                     .is_none()
@@ -1925,6 +1934,63 @@ impl TerminalListPanel {
         }));
     }
 
+    /// Keeps daemon-owned terminal identities in sync with the foreground
+    /// process the daemon can see.
+    ///
+    /// A persistent terminal is display-only in this process, so its local
+    /// process inspection always returns nothing. The daemon owns that PTY and
+    /// publishes the detected agent id in its session listing; polling it is
+    /// what lets the sidebar badge, agent switcher, and IPC status include
+    /// Codex, Pi, and other agents even when they have no integration installed.
+    fn start_daemon_agent_poll(&mut self, cx: &mut Context<Self>) {
+        if !persistent_sessions::is_enabled(cx) || self.daemon_agent_poll.is_some() {
+            return;
+        }
+
+        self.daemon_agent_poll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let sessions = cx
+                    .background_executor()
+                    .spawn(async { persistent_sessions::list() })
+                    .await;
+                let Ok(sessions) = sessions else {
+                    continue;
+                };
+
+                let updated =
+                    this.update(cx, |this, cx| {
+                        let mut detected = HashMap::default();
+                        for info in sessions {
+                            let Some(agent) =
+                                info.agent.filter(|agent| agent_by_id(agent).is_some())
+                            else {
+                                continue;
+                            };
+                            let Some(view_id) = this.terminal_daemon_sessions.iter().find_map(
+                                |(view_id, session)| (session == &info.session).then_some(*view_id),
+                            ) else {
+                                continue;
+                            };
+                            detected.insert(view_id, agent);
+                        }
+
+                        if this.daemon_agents == detected {
+                            return;
+                        }
+                        this.daemon_agents = detected;
+                        cx.notify();
+                        if this.agent_detect_task.is_none() {
+                            this.schedule_agent_detection(AGENT_DETECT_DEBOUNCE, cx);
+                        }
+                    });
+                if updated.is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
     /// Applies the screen-tail rules to every terminal running an agent with a
     /// rule set, notifying once when an agent newly blocks on a question.
     fn refresh_agent_states(&mut self, cx: &mut Context<Self>) {
@@ -1945,11 +2011,13 @@ impl TerminalListPanel {
             let detected = {
                 let view_ref = view.read(cx);
                 let terminal = view_ref.terminal().read(cx);
-                // A daemon-backed terminal has no foreground process; its agent
-                // comes from an integration report instead.
+                // A daemon-backed terminal's foreground process is on the
+                // daemon side. Use its detected identity or an integration
+                // report when available.
                 let agent = coding_agent_for_terminal(&terminal).or_else(|| {
                     self.reported_agents
                         .get(&view.entity_id())
+                        .or_else(|| self.daemon_agents.get(&view.entity_id()))
                         .and_then(|id| agent_by_id(id))
                 });
                 let Some(agent) = agent else {
@@ -2154,6 +2222,7 @@ impl TerminalListPanel {
                     &self.agent_waiting,
                     &self.agent_states,
                     &self.reported_agents,
+                    &self.daemon_agents,
                     cx,
                 ) else {
                     continue;
@@ -2189,6 +2258,7 @@ impl TerminalListPanel {
                     &self.agent_waiting,
                     &self.agent_states,
                     &self.reported_agents,
+                    &self.daemon_agents,
                     cx,
                 )
                 .is_some_and(|badge| badge.waiting)
@@ -3875,6 +3945,7 @@ impl TerminalListPanel {
             self.agent_states.remove(id);
             self.reported_agent_states.remove(id);
             self.reported_agents.remove(id);
+            self.daemon_agents.remove(id);
             self.agent_session_refs.remove(id);
             self.terminal_tokens.retain(|_, view| view != id);
         }
@@ -4039,8 +4110,7 @@ impl TerminalListPanel {
         );
         // An integration naming its agent is also the only identity a
         // daemon-backed terminal has: its processes live in the session host.
-        self.reported_agents
-            .insert(view_id, agent.to_string());
+        self.reported_agents.insert(view_id, agent.to_string());
         cx.notify();
 
         Ok(serde_json::json!({
@@ -4116,6 +4186,7 @@ impl TerminalListPanel {
                 &self.agent_waiting,
                 &self.agent_states,
                 &self.reported_agents,
+                &self.daemon_agents,
                 cx,
             ) else {
                 continue;
@@ -6292,6 +6363,7 @@ impl TerminalListPanel {
             self.agent_states.remove(view_id);
             self.reported_agent_states.remove(view_id);
             self.reported_agents.remove(view_id);
+            self.daemon_agents.remove(view_id);
         }
         self.suppress_recently_closed = true;
         if let Some(pane) = self.display_pane_entity(cx) {
@@ -6373,6 +6445,7 @@ impl TerminalListPanel {
         self.terminal_spawn_cwds.remove(&view_id);
         self.agent_waiting.remove(&view_id);
         self.agent_states.remove(&view_id);
+        self.daemon_agents.remove(&view_id);
         if group_id == self.active_group_id {
             self.suppress_recently_closed = true;
             if let Some(pane) = self.display_pane_entity(cx) {
@@ -6418,6 +6491,7 @@ impl TerminalListPanel {
             self.terminal_spawn_cwds.remove(view_id);
             self.agent_waiting.remove(view_id);
             self.agent_states.remove(view_id);
+            self.daemon_agents.remove(view_id);
             self.tmux_mirrored.remove(view_id);
         }
         self.suppress_recently_closed = true;
@@ -7016,6 +7090,7 @@ impl TerminalListPanel {
         self.terminal_launches.remove(&id);
         self.agent_waiting.remove(&id);
         self.agent_states.remove(&id);
+        self.daemon_agents.remove(&id);
         drop(session.view);
         cx.notify();
     }
@@ -7687,6 +7762,7 @@ impl TerminalListPanel {
         self.agent_states.remove(&item_id);
         self.reported_agent_states.remove(&item_id);
         self.reported_agents.remove(&item_id);
+        self.daemon_agents.remove(&item_id);
         self.agent_session_refs.remove(&item_id);
         self.terminal_tokens.retain(|_, id| *id != item_id);
         let daemon_session = self.terminal_daemon_sessions.remove(&item_id);
@@ -7863,6 +7939,7 @@ impl Render for TerminalListPanel {
                         &self.agent_waiting,
                         &self.agent_states,
                         &self.reported_agents,
+                        &self.daemon_agents,
                         cx,
                     ),
                     session.view.read(cx).notification_progress(),
@@ -7906,6 +7983,7 @@ impl Render for TerminalListPanel {
                         &self.agent_waiting,
                         &self.agent_states,
                         &self.reported_agents,
+                        &self.daemon_agents,
                         cx,
                     );
                     let progress = tv.read(cx).notification_progress();
@@ -9148,10 +9226,9 @@ mod tests {
     /// and re-adds items in the panes; those events must not feed back into
     /// `remove_terminal_by_id` / `sync_active_group_to_pane` in a loop.
     /// A daemon-backed terminal is `DisplayOnly`: its processes live in the
-    /// session host, so there is no foreground process for the sidebar to read.
-    /// Its agent has to come from an integration report, and the badge must
-    /// appear once one arrives — otherwise every persistent terminal looks like
-    /// a plain shell.
+    /// session host, so the GUI cannot inspect the foreground process itself.
+    /// The daemon's process detection and integration reports are both identity
+    /// sources; either one must produce a badge.
     #[gpui::test]
     async fn reported_agent_gives_a_display_only_terminal_a_badge(cx: &mut TestAppContext) {
         ensure_test_data_dir();
@@ -9227,24 +9304,27 @@ mod tests {
                         panel.reported_agents.get(&view_id).map(String::as_str),
                         Some("claude")
                     );
+
+                    // The daemon can identify an agent even when its integration
+                    // reports nothing. The sidebar must resolve that identity
+                    // through the same catalogue.
+                    panel.reported_agents.remove(&view_id);
+                    panel.daemon_agents.insert(view_id, "codex".to_string());
+                    let states = panel.agent_states_json(cx);
+                    assert_eq!(states["terminals"][0]["agent"], "Codex");
                 });
             })
             .unwrap();
         cx.run_until_parked();
 
-        // The reported agent resolves through the catalogue, which is what the
-        // badge draws its name, icon and colour from.
         let view_id = panel.read_with(cx, |panel, _| panel.groups[0].terminals[0].entity_id());
         assert_eq!(
-            panel.read_with(cx, |panel, _| panel
-                .reported_agents
-                .get(&view_id)
-                .cloned()),
-            Some("claude".to_string())
+            panel.read_with(cx, |panel, _| panel.daemon_agents.get(&view_id).cloned()),
+            Some("codex".to_string())
         );
         assert_eq!(
-            agent_by_id("claude").map(|agent| agent_display_name(agent)),
-            Some(SharedString::from("Claude")),
+            agent_by_id("codex").map(|agent| agent_display_name(agent)),
+            Some(SharedString::from("Codex")),
         );
 
         // Closing the terminal drops the bookkeeping, so a later view that
@@ -9258,8 +9338,9 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         assert!(
-            panel.read_with(cx, |panel, _| panel.reported_agents.get(&view_id).is_none()),
-            "a closed terminal must forget its reported agent"
+            panel.read_with(cx, |panel, _| panel.reported_agents.get(&view_id).is_none()
+                && panel.daemon_agents.get(&view_id).is_none()),
+            "a closed terminal must forget both agent identity sources"
         );
     }
 
@@ -9319,7 +9400,13 @@ mod tests {
                     panel.add_terminal_to_group(group_id, view, None, None, cx);
 
                     panel
-                        .apply_reported_agent_state(&token, "working", None, Some("not-an-agent"), cx)
+                        .apply_reported_agent_state(
+                            &token,
+                            "working",
+                            None,
+                            Some("not-an-agent"),
+                            cx,
+                        )
                         .expect("a state report is still accepted");
                     assert!(
                         panel.reported_agents.get(&view_id).is_none(),

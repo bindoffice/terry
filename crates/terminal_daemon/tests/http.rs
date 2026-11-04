@@ -40,11 +40,9 @@ fn start_daemon() -> Daemon {
     let token_path_for_daemon = token_file.clone();
     std::thread::spawn(move || {
         let options = ServeOptions::with_http("127.0.0.1:0", token_path_for_daemon);
-        if let Err(error) =
-            terminal_daemon::serve_with_options_and_port(&path, options, |port| {
-                let _ = tx.send(port);
-            })
-        {
+        if let Err(error) = terminal_daemon::serve_with_options_and_port(&path, options, |port| {
+            let _ = tx.send(port);
+        }) {
             eprintln!("test daemon failed: {error}");
         }
     });
@@ -261,6 +259,84 @@ fn a_plain_shell_is_not_listed_as_an_agent() {
     );
 }
 
+/// Remote clients get every concurrently running agent from the HTTP list. A
+/// foreground process is enough identity even when no integration reports.
+#[test]
+fn foreground_process_agents_are_listed_over_http() {
+    use std::os::unix::fs::symlink;
+
+    let daemon = start_daemon();
+    let sleep = ["/bin/sleep", "/usr/bin/sleep"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).exists())
+        .expect("sleep executable");
+    let directory = std::env::temp_dir().join(format!(
+        "td-http-agent-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(&directory).expect("temp dir");
+
+    let mut sessions = Vec::new();
+    for agent in agent_catalog::coding_agents() {
+        let executable = directory.join(agent.bin);
+        symlink(sleep, &executable).expect("agent shim");
+        let (status, body) = post_json(
+            daemon.port,
+            "/api/new_tab",
+            &serde_json::json!({
+                "program": executable,
+                "args": ["30"],
+                "cols": 80,
+                "rows": 24,
+            }),
+        );
+        assert_eq!(status, 200, "new_tab failed: {body}");
+        let session = body["session"].as_str().expect("session id").to_string();
+        sessions.push((session, agent.id));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (status, body) = post_json(
+            daemon.port,
+            "/api/list_agent_states",
+            &serde_json::json!({}),
+        );
+        assert_eq!(status, 200, "list_agent_states failed: {body}");
+        let terminals = body["terminals"].as_array().expect("terminals");
+        let missing: Vec<_> = sessions
+            .iter()
+            .filter_map(|(session, expected)| {
+                let actual = terminals
+                    .iter()
+                    .find(|entry| entry["session"] == session.as_str())
+                    .and_then(|entry| entry["agent"].as_str());
+                (actual != Some(*expected)).then_some((expected, actual))
+            })
+            .collect();
+        if missing.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon did not list foreground agents: {missing:?}; response: {body}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    for (session, _) in sessions {
+        let (status, body) = post_json(
+            daemon.port,
+            "/api/close_session",
+            &serde_json::json!({ "session": session }),
+        );
+        assert_eq!(status, 200, "close_session failed: {body}");
+    }
+
+    std::fs::remove_dir_all(directory).ok();
+}
+
 /// The agent integration path, end to end.
 ///
 /// A session spawned over HTTP is handed `TERRY_TERMINAL_TOKEN` and
@@ -272,7 +348,10 @@ fn a_hook_report_drives_the_agent_state() {
     let daemon = start_daemon();
 
     // Echo the injected token first, so the test can act as the hook.
-    let session = new_tab_reading_token(&daemon, "printf 'TOKEN:%s\\n' \"$TERRY_TERMINAL_TOKEN\"; sleep 30");
+    let session = new_tab_reading_token(
+        &daemon,
+        "printf 'TOKEN:%s\\n' \"$TERRY_TERMINAL_TOKEN\"; sleep 30",
+    );
     let screen = wait_for_output(&daemon, &session, "TOKEN:");
     let token = screen
         .lines()
@@ -579,7 +658,9 @@ fn new_tab_can_launch_an_agent_by_id() {
         .collect();
 
     let installed = candidates.iter().find(|id| {
-        let bin = agent_catalog::agent_by_id(id).map(|agent| agent.bin).unwrap_or("");
+        let bin = agent_catalog::agent_by_id(id)
+            .map(|agent| agent.bin)
+            .unwrap_or("");
         !bin.is_empty() && which(bin)
     });
     let Some(agent_id) = installed else {
@@ -620,8 +701,7 @@ fn get(port: u16, path: &str) -> (u16, String, String) {
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("timeout");
-    let request =
-        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).expect("write");
 
     let mut response = String::new();
@@ -652,7 +732,10 @@ fn the_client_is_served_without_a_token() {
     let (status, content_type, body) = get(daemon.port, "/");
     assert_eq!(status, 200, "the app shell must load before pairing");
     assert!(content_type.starts_with("text/html"), "{content_type}");
-    assert!(body.contains("<title>Terry"), "not the app shell: {body:.80}");
+    assert!(
+        body.contains("<title>Terry"),
+        "not the app shell: {body:.80}"
+    );
 
     for (path, expected) in [
         ("/app.js", "text/javascript"),
@@ -707,7 +790,8 @@ fn the_catalogue_says_which_agents_are_installed() {
     for agent in agents {
         let bin = agent["launch"].as_str().expect("launch");
         assert_eq!(
-            agent["installed"], which(bin),
+            agent["installed"],
+            which(bin),
             "{bin}: the catalogue disagrees with PATH"
         );
     }
@@ -750,7 +834,6 @@ fn launching_a_missing_agent_explains_the_problem() {
     );
 }
 
-
 /// Rotating the token must revoke the old one on the *running* daemon.
 ///
 /// This is the only way to revoke a leaked or lost-device token without stopping
@@ -775,7 +858,12 @@ fn rotating_the_token_revokes_the_old_one_immediately() {
         "the old token must stop working without a restart: {body}"
     );
 
-    let (status, _) = post(daemon.port, "/api/list_sessions", Some("rotated-token"), "{}");
+    let (status, _) = post(
+        daemon.port,
+        "/api/list_sessions",
+        Some("rotated-token"),
+        "{}",
+    );
     assert_eq!(status, 200, "the new token must work right away");
 }
 
@@ -791,5 +879,8 @@ fn a_missing_token_file_authorises_nobody() {
     std::fs::remove_file(&daemon.token_file).expect("remove token file");
 
     let (status, _) = post(daemon.port, "/api/list_sessions", Some(TOKEN), "{}");
-    assert_eq!(status, 401, "a missing token file must not authorise anything");
+    assert_eq!(
+        status, 401,
+        "a missing token file must not authorise anything"
+    );
 }

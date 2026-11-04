@@ -1,18 +1,18 @@
 //! Agent state for sessions owned by the daemon.
 //!
-//! The GUI knows which agent runs in a terminal from the foreground process
-//! (`/proc` + tty). The daemon owns a PTY master and has no such view, so it
-//! uses two sources instead, in this order:
+//! The daemon owns the PTY master and can inspect its foreground process group
+//! to identify a running agent. State comes from these sources, in this order:
 //!
 //! 1. **What the agent reported.** The agent integration scripts
 //!    (`assets/agent-integrations/*`) POST `/api/report_agent_state` with the
 //!    per-terminal token the daemon injected into their environment. This is
 //!    authoritative and also covers agents the rule table cannot read.
-//! 2. **What the screen looks like.** `agent_detect` matches the bottom lines
+//! 2. **What the screen looks like.** For a foreground-identified agent,
+//!    `agent_detect` matches the bottom lines
 //!    and the title against a per-agent rule table.
 //!
-//! Identity follows the same logic: a session learns its agent from a report,
-//! and otherwise from whichever agent's rules match the screen.
+//! Identity comes from a report when available, otherwise from the foreground
+//! process. If neither exists, the session is not treated as an agent session.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -150,21 +150,22 @@ pub struct AgentStatus {
 
 /// Resolves a session's agent state.
 ///
-/// A report wins when there is one. Otherwise the screen is matched against the
-/// rules of `agent` only — the agent the session is *known* to be running.
+/// A report wins when there is one. Otherwise `agent` comes from the daemon's
+/// foreground-process inspection and the screen is matched against that agent's
+/// rules only.
 ///
 /// That second argument is not optional bookkeeping. Rules are written to be
 /// tried against the agent they belong to: codex's rule table, for instance,
 /// matches a plain shell prompt and reports `Idle`. Probing every agent's rules
-/// would therefore turn ordinary terminals into idle agents. The GUI has the
-/// same constraint and gets the agent from the foreground process; here it has
-/// to come from a report, which is why an un-reported session stays unknown
-/// (and is simply not listed as an agent terminal).
+/// would therefore turn ordinary terminals into idle agents. When an agent has
+/// no matching screen rule, `active` provides a coarse working/idle fallback so
+/// process-identified agents still stay visible.
 pub fn resolve(
     reported: Option<&Reported>,
     agent: Option<&str>,
     title: &str,
     lines: &[String],
+    active: bool,
 ) -> Option<AgentStatus> {
     if let Some(reported) = reported {
         return Some(AgentStatus {
@@ -175,14 +176,21 @@ pub fn resolve(
     }
 
     let agent = agent?;
-    if !agent_detect::supports(agent) {
+    if agent_catalog::agent_by_id(agent).is_none() {
         return None;
     }
     let screen = Screen {
         lines: lines.to_vec(),
         title: title.to_string(),
     };
-    let state = agent_detect::detect(agent, &screen)?;
+    // Foreground-process identity is authoritative. If the agent has no screen
+    // rules (or none match), keep it listed and use recent output as a coarse
+    // working/idle fallback instead of treating it as an ordinary shell.
+    let state = agent_detect::detect(agent, &screen).unwrap_or(if active {
+        AgentState::Working
+    } else {
+        AgentState::Idle
+    });
     Some(AgentStatus {
         agent: Some(agent.to_string()),
         state,
@@ -225,9 +233,7 @@ mod tests {
         registry.bind_session("t-1", "tok-1");
 
         assert!(
-            registry
-                .report("tok-1", None, "busy", None)
-                .is_err(),
+            registry.report("tok-1", None, "busy", None).is_err(),
             "only working/blocked/idle are valid"
         );
     }
@@ -253,7 +259,7 @@ mod tests {
         };
 
         // The screen says nothing recognisable, but the report is authoritative.
-        let status = resolve(Some(&reported), None, "", &[]).expect("resolved");
+        let status = resolve(Some(&reported), None, "", &[], false).expect("resolved");
         assert_eq!(status.state, AgentState::Blocked);
         assert!(status.reported);
     }
@@ -270,9 +276,14 @@ mod tests {
         ];
 
         let status =
-            resolve(None, Some("claude"), "claude", &lines).expect("a rule should match");
+            resolve(None, Some("claude"), "claude", &lines, false).expect("a rule should match");
         assert!(!status.reported);
-        assert_eq!(status.state, AgentState::Blocked, "agent: {:?}", status.agent);
+        assert_eq!(
+            status.state,
+            AgentState::Blocked,
+            "agent: {:?}",
+            status.agent
+        );
     }
 
     #[test]
@@ -284,11 +295,11 @@ mod tests {
         let lines = vec!["$ ls".to_string(), "src  Cargo.toml".to_string()];
 
         assert!(
-            resolve(None, None, "zsh", &lines).is_none(),
+            resolve(None, None, "zsh", &lines, false).is_none(),
             "an unknown session must stay unknown, not be probed"
         );
         assert!(
-            resolve(None, Some("zsh"), "zsh", &lines).is_none(),
+            resolve(None, Some("zsh"), "zsh", &lines, false).is_none(),
             "a non-agent program has no rules to match"
         );
     }
@@ -297,12 +308,21 @@ mod tests {
     fn the_known_agent_alone_decides_which_rules_run() {
         // Same screen, known agent: codex reads it as idle.
         let lines = vec!["$ ls".to_string()];
-        let as_codex = resolve(None, Some("codex"), "codex", &lines);
+        let as_codex = resolve(None, Some("codex"), "codex", &lines, false);
         assert_eq!(
             as_codex.map(|status| status.state),
             Some(AgentState::Idle),
             "codex rules do match this screen; that is exactly why the agent \
              must come from a report rather than from probing"
         );
+    }
+
+    #[test]
+    fn a_process_identified_agent_stays_listed_without_screen_rules() {
+        // Aider is in the process catalogue but has no agent_detect rule set.
+        // Foreground-process identity must still make the terminal visible.
+        let status = resolve(None, Some("aider"), "aider", &[], true).expect("resolved");
+        assert_eq!(status.agent.as_deref(), Some("aider"));
+        assert_eq!(status.state, AgentState::Working);
     }
 }

@@ -15170,6 +15170,7 @@ dependencies = [
  "paths",
  "serde",
  "serde_json",
+ "sysinfo 0.37.2",
  "terminal_core",
  "tokio",
  "uuid",

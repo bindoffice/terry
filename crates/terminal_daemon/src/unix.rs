@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use alacritty_terminal::event::WindowSize;
 use alacritty_terminal::tty::{self, Pty, ToWinsize};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use terminal_core::Emulator;
 use tokio::sync::broadcast;
 
@@ -68,16 +69,21 @@ impl DaemonState {
 
     /// Currently live sessions, sorted by id and annotated with their agent.
     fn list(&self) -> Vec<SessionInfo> {
-        let mut sessions: Vec<SessionInfo> = {
+        let mut sessions: Vec<(SessionInfo, Arc<Session>)> = {
             let registry = self.registry.lock().expect("registry mutex poisoned");
-            registry.values().map(|session| session.info()).collect()
+            registry
+                .values()
+                .map(|session| (session.info(), session.clone()))
+                .collect()
         };
-        for info in &mut sessions {
+        for (info, session) in &mut sessions {
             info.agent = self
                 .agents
                 .reported_for(&info.session)
-                .and_then(|reported| reported.agent);
+                .and_then(|reported| reported.agent)
+                .or_else(|| session.foreground_agent().map(str::to_string));
         }
+        let mut sessions: Vec<SessionInfo> = sessions.into_iter().map(|(info, _)| info).collect();
         sessions.sort_by(|a, b| a.session.cmp(&b.session));
         sessions
     }
@@ -200,6 +206,47 @@ impl Session {
             .lock()
             .expect("emulator mutex poisoned")
             .tail_lines(count)
+    }
+
+    /// The coding agent in the PTY's foreground process group, if the daemon
+    /// can inspect it.
+    ///
+    /// Daemon-owned PTYs have no other process-level view: the GUI only receives
+    /// bytes and a terminal token, and integrations are not installed for every
+    /// agent. Reading the PTY's foreground group here makes direct launches of
+    /// Codex, Pi and the rest of the catalogue visible just like local PTYs.
+    fn foreground_agent(&self) -> Option<&'static str> {
+        let pgid = {
+            let writer = self.writer.lock().expect("writer mutex poisoned");
+            let file = writer.as_ref()?;
+            let pgid = unsafe { libc::tcgetpgrp(file.as_raw_fd()) };
+            // Zero means no foreground group has been assigned yet; negative is
+            // an error. Neither identifies a process we can inspect.
+            (pgid > 0).then_some(pgid as u32)?
+        };
+
+        let pid = Pid::from_u32(pgid);
+        let mut system = System::new();
+        let refresh_kind = ProcessRefreshKind::nothing()
+            .with_cmd(UpdateKind::Always)
+            .with_exe(UpdateKind::Always)
+            .without_tasks();
+        system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, refresh_kind);
+        let process = system.process(pid)?;
+        let argv: Vec<String> = process
+            .cmd()
+            .iter()
+            .filter_map(|argument| argument.to_str().map(ToOwned::to_owned))
+            .collect();
+
+        agent_catalog::agent_for_argv(&argv)
+            .or_else(|| {
+                process
+                    .name()
+                    .to_str()
+                    .and_then(agent_catalog::agent_for_basename)
+            })
+            .map(|agent| agent.id)
     }
 
     fn publish(&self, data: &[u8]) {
@@ -484,8 +531,7 @@ fn read_screen(registry: &Registry, id: &str, lines: Option<usize>) -> Reply {
             // Session ids are `t-<uuid>`; the numeric id in the payload is the
             // GUI's `EntityId`, which the daemon does not have. Clients talking
             // to the daemon address sessions by string, so 0 is honest here.
-            let screen =
-                terminal_core::screen_json::screen_payload(0, &snapshot, &palette);
+            let screen = terminal_core::screen_json::screen_payload(0, &snapshot, &palette);
             Reply::Screen { screen }
         }
     }
@@ -521,10 +567,7 @@ pub struct ServeOptions {
 impl ServeOptions {
     /// Options for a daemon that also answers HTTP requests, reading its token
     /// from `token_file`.
-    pub fn with_http(
-        bind: impl Into<String>,
-        token_file: impl Into<std::path::PathBuf>,
-    ) -> Self {
+    pub fn with_http(bind: impl Into<String>, token_file: impl Into<std::path::PathBuf>) -> Self {
         Self {
             http: Some(bind.into()),
             token_file: Some(token_file.into()),
@@ -579,9 +622,11 @@ impl crate::http::Sessions for HttpSessions {
                 let title = session.title();
                 let lines = session.tail_lines(agent_detect::SCREEN_LINES);
                 let reported = self.state.agents.reported_for(&info.session);
+                let process_agent = session.foreground_agent();
                 let agent_hint = reported
                     .as_ref()
-                    .and_then(|reported| reported.agent.as_deref());
+                    .and_then(|reported| reported.agent.as_deref())
+                    .or(process_agent);
                 let application_cursor = session.key_modes().application_cursor;
                 crate::http::summarize(
                     &info,
@@ -696,7 +741,9 @@ impl crate::http::Sessions for HttpSessions {
     fn detach(&self, session: &str) -> Result<(), String> {
         // Detach means "stop watching, keep the process", which is exactly the
         // process-internal behaviour of dropping every subscriber.
-        let session = self.session(session).ok_or_else(|| "unknown session".to_string())?;
+        let session = self
+            .session(session)
+            .ok_or_else(|| "unknown session".to_string())?;
         session.detach_all();
         Ok(())
     }
@@ -890,9 +937,7 @@ fn handle_connection(stream: UnixStream, state: Arc<DaemonState>) -> anyhow::Res
                 rows,
                 readonly,
             } => {
-                return attach_connection(
-                    reader, writer, registry, session, cols, rows, readonly,
-                );
+                return attach_connection(reader, writer, registry, session, cols, rows, readonly);
             }
             Request::ReadScreen { session, lines } => {
                 let reply = read_screen(&registry, &session, lines);

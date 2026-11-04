@@ -145,7 +145,9 @@ impl AuthToken {
                 .map(|token| token.trim().to_string()),
         };
         match expected {
-            Some(expected) if !expected.is_empty() => constant_time_eq(expected.as_bytes(), candidate.as_bytes()),
+            Some(expected) if !expected.is_empty() => {
+                constant_time_eq(expected.as_bytes(), candidate.as_bytes())
+            }
             _ => false,
         }
     }
@@ -498,7 +500,9 @@ async fn send_text(State(state): State<HttpState>, body: String) -> Response {
         // An unknown session is a 404 on every route, so a client can tell
         // "wrong id" apart from "bad request" without matching message text.
         Err(message) if message.starts_with("unknown session") => unknown_session(&session),
-        Err(message) => (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response(),
+        Err(message) => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
+        }
     }
 }
 
@@ -543,7 +547,9 @@ async fn send_keys(State(state): State<HttpState>, body: String) -> Response {
     match state.sessions.send_keys(&session, &keys) {
         Ok(()) => Json(json!({ "status": "ok", "action": "send_keys" })).into_response(),
         Err(message) if message.starts_with("unknown session") => unknown_session(&session),
-        Err(message) => (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response(),
+        Err(message) => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
+        }
     }
 }
 
@@ -580,7 +586,10 @@ async fn new_tab(State(state): State<HttpState>, body: String) -> Response {
         Ok(payload) => payload,
         Err(response) => return response,
     };
-    let cwd = payload.get("cwd").and_then(Value::as_str).map(PathBuf::from);
+    let cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(PathBuf::from);
     // Either an `agent` id from the catalogue, or an explicit program. The
     // catalogue wins when both are given: it is the one that knows how the CLI
     // is actually invoked.
@@ -719,7 +728,9 @@ async fn report_agent_state(State(state): State<HttpState>, body: String) -> Res
         .report_agent_state(token, agent, state_word, message)
     {
         Ok(()) => Json(json!({ "status": "ok" })).into_response(),
-        Err(message) => (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response(),
+        Err(message) => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
+        }
     }
 }
 
@@ -745,7 +756,9 @@ async fn report_agent_session(State(state): State<HttpState>, body: String) -> R
 
     match state.sessions.report_agent_session(token, agent) {
         Ok(()) => Json(json!({ "status": "ok" })).into_response(),
-        Err(message) => (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response(),
+        Err(message) => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
+        }
     }
 }
 
@@ -755,7 +768,9 @@ async fn report_agent_session(State(state): State<HttpState>, body: String) -> R
 /// comment every 15s, and a stream can legitimately carry no data for minutes
 /// when the agent is simply thinking. Treating "no data" as a dead connection
 /// would make the phone reconnect in a loop.
-async fn events(State(state): State<HttpState>) -> Sse<impl futures::Stream<Item = Result<SseEvent, Infallible>>> {
+async fn events(
+    State(state): State<HttpState>,
+) -> Sse<impl futures::Stream<Item = Result<SseEvent, Infallible>>> {
     let receiver = state.events.subscribe();
     let stream = futures::stream::unfold(receiver, |mut receiver| async move {
         loop {
@@ -833,7 +848,7 @@ pub fn summarize(
     lines: &[String],
     application_cursor: bool,
 ) -> SessionSummary {
-    let status = agents::resolve(reported, agent_hint, &title, lines);
+    let status = agents::resolve(reported, agent_hint, &title, lines, info.idle_secs < 5);
     SessionSummary {
         session: info.session.clone(),
         title,

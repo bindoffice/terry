@@ -354,13 +354,33 @@ pub fn command_basename(name: &str) -> String {
 ///
 /// Versioned shims such as `claude-2` count as the same agent.
 pub fn agent_for_basename(base: &str) -> Option<&'static AgentCli> {
-    coding_agents().iter().find(|agent| {
-        agent.names.iter().any(|name| {
-            base == *name
-                || base.starts_with(&format!("{name}-"))
-                || base.starts_with(&format!("{name}_"))
+    // Exact aliases win across the whole catalogue. A separate agent such as
+    // `qoder-cn` must not be captured by the earlier `qoder` entry merely
+    // because one name is a prefix of the other.
+    coding_agents()
+        .iter()
+        .find(|agent| agent.names.iter().any(|name| base == *name))
+        .or_else(|| {
+            coding_agents()
+                .iter()
+                .find(|agent| agent.names.iter().any(|name| is_versioned_shim(base, name)))
         })
-    })
+}
+
+fn is_versioned_shim(base: &str, name: &str) -> bool {
+    let Some(suffix) = base.strip_prefix(name) else {
+        return false;
+    };
+    match suffix.as_bytes().first() {
+        Some(b'-') => suffix[1..]
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit()),
+        // Underscore shims are used by some package managers for release
+        // channels (`kimi_code`), so any non-empty suffix is accepted.
+        Some(b'_') => suffix.len() > 1,
+        _ => false,
+    }
 }
 
 /// The executable name to use for this agent when it was invoked as `base`.
@@ -410,6 +430,268 @@ pub fn agent_for_package_path(path: &str) -> Option<&'static AgentCli> {
         if package_in_path(&normalized, package) {
             return agent_by_id(id);
         }
+    }
+    None
+}
+
+/// Recognises an agent from the full argv of a foreground process.
+///
+/// The executable name alone is not enough for the ways CLIs are commonly
+/// installed and launched:
+///
+/// - npm packages run as `node .../node_modules/<package>/dist/cli.js`;
+/// - launchers run as `node .../node_modules/npm/bin/npx-cli.js exec codex`;
+/// - wrapper scripts may turn the process title into a bare `pi` or leave the
+///   original absolute path in `argv[0]`.
+///
+/// Only the interpreter's script and launcher package arguments are inspected,
+/// rather than every argument, so a command such as `git commit -m pi` is not
+/// mistaken for a running Pi session.
+pub fn agent_for_argv(argv: &[String]) -> Option<&'static AgentCli> {
+    let executable = argv.first()?;
+    let executable_base = command_basename(executable);
+
+    if let Some(agent) = agent_for_basename(&executable_base) {
+        return Some(agent);
+    }
+
+    // A package path anywhere after argv[0] is a strong signal. This also covers
+    // wrappers that keep the real script in an option value.
+    if let Some(agent) = argv
+        .iter()
+        .skip(1)
+        .find_map(|argument| agent_for_package_path(argument))
+    {
+        return Some(agent);
+    }
+
+    if is_interpreter(&executable_base) {
+        for argument in argv.iter().skip(1).filter(|arg| !arg.starts_with('-')) {
+            if let Some(agent) = agent_for_script_path(argument) {
+                return Some(agent);
+            }
+        }
+    }
+
+    let launcher = if is_launcher(&executable_base) {
+        Some(executable_base.clone())
+    } else if is_interpreter(&executable_base) {
+        argv.iter()
+            .skip(1)
+            .filter(|arg| !arg.starts_with('-'))
+            .find_map(|argument| {
+                let stem = script_stem(argument)?;
+                is_launcher(&stem).then_some(stem)
+            })
+    } else {
+        None
+    };
+    if let Some(launcher) = launcher {
+        if let Some(agent) = agent_for_launcher_args(&launcher, &argv[1..]) {
+            return Some(agent);
+        }
+    }
+
+    if is_shell(&executable_base) {
+        if let Some(command) = shell_dash_c_command(argv) {
+            if let Some(agent) = agent_for_shell_words(command) {
+                return Some(agent);
+            }
+        }
+    }
+
+    None
+}
+
+/// Recognises an agent from the script path passed to an interpreter.
+///
+/// The package directory wins over generic entry-point names (`cli.js`,
+/// `main.mjs`), while a distinctive script stem such as `codex.js` identifies
+/// the agent directly.
+pub fn agent_for_script_path(path: &str) -> Option<&'static AgentCli> {
+    if let Some(agent) = agent_for_package_path(path) {
+        return Some(agent);
+    }
+
+    let stem = script_stem(path)?;
+    if let Some(agent) = agent_for_basename(&stem) {
+        return Some(agent);
+    }
+    if !is_generic_entry_point(&stem) {
+        return None;
+    }
+
+    let package = package_directory_name(path)?;
+    let package = package.strip_suffix("-cli").unwrap_or(&package);
+    agent_for_basename(package)
+}
+
+fn script_stem(path: &str) -> Option<String> {
+    let base = path
+        .rsplit(|character| character == '/' || character == '\\')
+        .next()?
+        .trim();
+    if base.is_empty() || base.starts_with('-') || base.starts_with('.') {
+        return None;
+    }
+
+    let stem = match base.rsplit_once('.') {
+        Some((stem, extension))
+            if matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "js" | "mjs"
+                    | "cjs"
+                    | "ts"
+                    | "mts"
+                    | "cts"
+                    | "py"
+                    | "sh"
+                    | "exe"
+                    | "cmd"
+                    | "bat"
+                    | "ps1"
+            ) =>
+        {
+            stem
+        }
+        _ => base,
+    };
+    (!stem.is_empty()).then(|| stem.to_ascii_lowercase())
+}
+
+fn package_directory_name(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let node_modules = normalized.rfind("node_modules/")?;
+    let mut components = normalized[node_modules + "node_modules/".len()..]
+        .split('/')
+        .filter(|component| !component.is_empty());
+    let first = components.next()?;
+    let package = if first.starts_with('@') {
+        components.next()?
+    } else {
+        first
+    };
+    (!package.is_empty()).then(|| package.to_string())
+}
+
+fn is_generic_entry_point(stem: &str) -> bool {
+    matches!(
+        stem,
+        "index" | "cli" | "main" | "bin" | "bundle" | "entry" | "app" | "start" | "run"
+    )
+}
+
+fn is_interpreter(base: &str) -> bool {
+    matches!(
+        base,
+        "node" | "nodejs" | "bun" | "deno" | "python" | "python3" | "py"
+    )
+}
+
+fn is_launcher(base: &str) -> bool {
+    matches!(
+        base,
+        "npx" | "bunx" | "uvx" | "pipx" | "npm" | "pnpm" | "yarn" | "corepack"
+    )
+}
+
+fn is_shell(base: &str) -> bool {
+    matches!(
+        base,
+        "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "csh" | "tcsh"
+    )
+}
+
+fn agent_for_launcher_args(launcher: &str, arguments: &[String]) -> Option<&'static AgentCli> {
+    let mut expects_subcommand = matches!(launcher, "npm" | "pnpm" | "yarn" | "corepack" | "pipx");
+    let mut skip_next = false;
+
+    for argument in arguments {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if argument.starts_with('-') {
+            if !argument.contains('=') && launcher_option_takes_value(launcher, argument) {
+                skip_next = true;
+            }
+            continue;
+        }
+
+        if expects_subcommand {
+            expects_subcommand = false;
+            if matches!(
+                argument.as_str(),
+                "exec" | "dlx" | "x" | "run" | "run-script" | "tool"
+            ) {
+                continue;
+            }
+        }
+
+        if let Some(agent) = agent_for_package_reference(argument) {
+            return Some(agent);
+        }
+    }
+    None
+}
+
+fn launcher_option_takes_value(launcher: &str, argument: &str) -> bool {
+    match launcher {
+        "npm" | "pnpm" | "yarn" | "corepack" => matches!(
+            argument,
+            "--prefix" | "--registry" | "--workspace" | "--filter" | "--cwd" | "-C" | "-w"
+        ),
+        "pipx" => matches!(argument, "--python" | "--pip-args"),
+        _ => matches!(argument, "--package" | "--registry" | "-p"),
+    }
+}
+
+fn agent_for_package_reference(reference: &str) -> Option<&'static AgentCli> {
+    if reference.contains('/') || reference.contains('\\') {
+        if let Some(agent) = agent_for_script_path(reference) {
+            return Some(agent);
+        }
+    }
+
+    let mut reference = reference.trim();
+    if reference.starts_with('@') {
+        if let Some(version_separator) = reference[1..].find('@') {
+            reference = &reference[..version_separator + 1];
+        }
+    } else if let Some((name, _version)) = reference.split_once('@') {
+        reference = name;
+    }
+    let package = reference.rsplit(['/', '\\']).next().unwrap_or(reference);
+    let package = package.strip_suffix("-cli").unwrap_or(package);
+    agent_for_basename(&command_basename(package))
+}
+
+fn shell_dash_c_command(argv: &[String]) -> Option<&str> {
+    argv.iter()
+        .position(|argument| argument == "-c")
+        .and_then(|index| argv.get(index + 1))
+        .map(String::as_str)
+}
+
+fn agent_for_shell_words(command: &str) -> Option<&'static AgentCli> {
+    let mut words = command.split_whitespace();
+    let command = loop {
+        let word = words.next()?;
+        if word.contains('=') {
+            continue;
+        }
+        break word.trim_matches(|character| matches!(character, '\'' | '"'));
+    };
+
+    let base = command_basename(command);
+    if let Some(agent) = agent_for_basename(&base) {
+        return Some(agent);
+    }
+    if is_launcher(&base) {
+        return agent_for_launcher_args(
+            base.as_str(),
+            &words.map(str::to_string).collect::<Vec<_>>(),
+        );
     }
     None
 }
@@ -542,6 +824,10 @@ mod tests {
         assert_eq!(agent.id, "claude");
         let agent = agent_for_basename("kimi_code").expect("underscore shim");
         assert_eq!(agent.id, "kimi");
+        // A hyphenated agent name is an exact alias, not a version of its
+        // shorter neighbour.
+        let agent = agent_for_basename("qoder-cn").expect("qoder-cn");
+        assert_eq!(agent.id, "qoder-cn");
     }
 
     #[test]
@@ -554,11 +840,89 @@ mod tests {
 
     #[test]
     fn npm_hosted_agents_are_recognised_by_package_path() {
-        let agent = agent_for_package_path(
-            "/usr/lib/node_modules/@qwen-code/qwen-code/dist/index.js",
-        )
-        .expect("qwen installed with npm runs as node");
+        let agent =
+            agent_for_package_path("/usr/lib/node_modules/@qwen-code/qwen-code/dist/index.js")
+                .expect("qwen installed with npm runs as node");
         assert_eq!(agent.id, "qwen");
+    }
+
+    #[test]
+    fn foreground_argv_identifies_direct_and_npm_hosted_agents() {
+        let cases = [
+            (vec!["codex"], "codex"),
+            (
+                vec![
+                    "node",
+                    "/Users/me/.local/state/fnm_multishells/1/bin/codex",
+                    "-s",
+                    "danger-full-access",
+                ],
+                "codex",
+            ),
+            (
+                vec![
+                    "node",
+                    "/Users/me/.pi/agent/install/releases/1.4.0/node_modules/.bin/pi",
+                ],
+                "pi",
+            ),
+            (
+                vec![
+                    "/Users/me/.local/share/pi-node/current/bin/node",
+                    "/Users/me/.pi/agent/install/releases/1.4.0/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+                ],
+                "omp",
+            ),
+            (
+                vec!["node", "/opt/homebrew/lib/node_modules/.bin/npx", "codex"],
+                "codex",
+            ),
+            (vec!["npm", "exec", "@openai/codex@0.166.0"], "codex"),
+            (vec!["sh", "-c", "CODEX_HOME=/tmp codex --version"], "codex"),
+        ];
+
+        for (argv, expected) in cases {
+            let argv = argv.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert_eq!(
+                agent_for_argv(&argv).map(|agent| agent.id),
+                Some(expected),
+                "{argv:?}"
+            );
+        }
+
+        // Ordinary arguments that merely mention a short agent name are not
+        // enough: the command has to be the executable or a launcher target.
+        assert!(agent_for_argv(&["git", "commit", "-m", "pi"].map(str::to_string)).is_none());
+    }
+
+    #[test]
+    fn every_direct_executable_is_recognised_from_argv() {
+        for agent in coding_agents() {
+            let argv = vec![agent.bin.to_string()];
+            assert_eq!(
+                agent_for_argv(&argv).map(|found| found.id),
+                Some(agent.id),
+                "{}",
+                agent.bin
+            );
+        }
+    }
+
+    #[test]
+    fn generic_npm_entry_points_use_the_package_name() {
+        assert_eq!(
+            agent_for_script_path("/usr/lib/node_modules/@google/gemini-cli/dist/index.js")
+                .map(|agent| agent.id),
+            Some("gemini")
+        );
+        assert_eq!(
+            agent_for_argv(&[
+                "node".to_string(),
+                "/usr/local/lib/node_modules/@openai/codex/bin/codex.js".to_string(),
+            ])
+            .map(|agent| agent.id),
+            Some("codex")
+        );
     }
 
     /// A release can move its entry point, and the same package ships several
