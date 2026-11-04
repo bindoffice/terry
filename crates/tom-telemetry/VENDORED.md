@@ -12,9 +12,9 @@ Synced from tom at tag `v0.17.0` (commit `1c078e8`, 2026-11-03).
 
 Upstream tagged `v0.17.0` at `1c078e8` without bumping the workspace version
 (tagging happens before release-plz bumps and publishes), so its `Cargo.toml`
-still reads `0.16.0`. The crates here carry `0.17.0` to match the tag they were
-copied from; without that, `tom --version` and plugin `host.version` would
-report one release behind the code they run.
+still reads `0.16.0`. The sources here are that snapshot; the crates carry
+`0.17.1` so `tom --version` and plugin `host.version` report the patch release
+Terry ships instead of falling behind the code they run.
 
 Upstream crate: `crates/` + this directory name. Local adaptations:
 

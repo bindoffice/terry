@@ -11,6 +11,22 @@ from; the matching [GitHub Release](../../releases) carries the same notes.
 
 ## [Unreleased]
 
+## [0.17.1](https://github.com/solos/tom/compare/v0.17.0...v0.17.1) - 2026-11-04
+
+### Added
+
+- *(tui)* derive panel, code-block and selection backgrounds from the
+  terminal's reported background color (OSC 11): a translucent white veil on
+  dark terminals and a light black veil on light ones, so raised surfaces
+  follow the terminal theme instead of staying hard-coded dark. Terminals that
+  do not answer keep the fixed fallback palette.
+
+### Fixed
+
+- *(cli)* probe the terminal background once at interactive startup, before
+  any themed component is built, so presets and custom themes see the real
+  canvas.
+
 ## [0.17.0](https://github.com/solos/tom/compare/v0.16.0...v0.17.0) - 2026-11-03
 
 ### Added

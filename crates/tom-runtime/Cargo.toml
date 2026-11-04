@@ -5,7 +5,7 @@ name = "tom-runtime"
 edition = "2021"
 publish.workspace = true
 license = "MIT"
-version = "0.17.0"
+version = "0.17.1"
 description = "Embeddable model catalog, credential resolution and provider execution bindings"
 readme = "README.md"
 

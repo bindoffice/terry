@@ -404,7 +404,7 @@ machine. See [`docs/remote/user-guide.md`](docs/remote/user-guide.md).
 
 | | |
 | --- | --- |
-| Current release | **[0.17.0](https://github.com/solos/tom/releases)** (eleven crates, published together) |
+| Current release | **[0.17.1](https://github.com/solos/tom/releases)** (eleven crates, published together) |
 | Stability | `tom-ai`, `tom-agent`, `tom-tools`, `tom-harness`, `tom-plugin-sdk` are the intended stable surface |
 | MSRV | 1.88 |
 | Platforms | Linux, macOS, Windows (CI runs the suite on Linux) |
