@@ -35,7 +35,18 @@ pub use stub::*;
 
 use std::path::PathBuf;
 
-pub use protocol::SessionInfo;
+pub use protocol::{DaemonInfo, SessionInfo};
+
+/// Fingerprint of the code this build came from, set by `build.rs`.
+///
+/// Two binaries built from the same daemon sources share it, so the GUI can
+/// check the daemon it reused instead of trusting the socket blindly.
+pub const BUILD_ID: &str = env!("TERRY_DAEMON_BUILD_ID");
+
+/// Version of the `terminal_daemon` crate.
+pub fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
 
 /// A fresh session id.
 ///

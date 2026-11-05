@@ -499,3 +499,25 @@ fn foreground_process_agents_are_recognised_without_reports() {
 
     std::fs::remove_dir_all(directory).ok();
 }
+
+#[test]
+fn info_and_shutdown_use_the_build_handshake() {
+    let socket = start_daemon();
+    let mut control = Control::connect(&socket).expect("control");
+
+    let info = control.info().expect("info");
+    assert_eq!(info.build_id, terminal_daemon::BUILD_ID);
+    assert_eq!(info.version, terminal_daemon::version());
+    // `serve` runs in this process in the test harness.
+    assert_eq!(info.pid, std::process::id());
+    assert_eq!(info.http, None);
+
+    let stopped = control.shutdown().expect("shutdown");
+    assert_eq!(stopped.build_id, terminal_daemon::BUILD_ID);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+        assert!(Instant::now() < deadline, "daemon did not stop");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}

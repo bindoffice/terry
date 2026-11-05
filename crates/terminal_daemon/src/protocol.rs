@@ -77,6 +77,25 @@ pub struct SessionInfo {
     pub agent: Option<String>,
 }
 
+/// Identity of a running daemon.
+///
+/// The GUI compares `build_id` with its own before reusing a daemon: an older
+/// daemon may predate endpoints that the newer build expects.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DaemonInfo {
+    /// Version of the `terminal_daemon` crate.
+    pub version: String,
+    /// Fingerprint of the sources the daemon was built from.
+    pub build_id: String,
+    pub pid: u32,
+    /// `host:port` the optional HTTP endpoint listens on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http: Option<String>,
+    /// Bearer token file the HTTP endpoint reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_file: Option<String>,
+}
+
 /// Client -> daemon.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -132,6 +151,13 @@ pub enum Request {
         #[serde(default)]
         lines: Option<usize>,
     },
+    /// Identify the daemon and the build it came from.
+    ///
+    /// Daemons that predate this request fail to parse it and drop the
+    /// connection, which clients treat as "unknown, probably old".
+    Info,
+    /// Stop the daemon and end every session it owns.
+    Shutdown,
 }
 
 /// Daemon -> client.
@@ -163,6 +189,8 @@ pub enum Reply {
     Text {
         lines: Vec<String>,
     },
+    /// Answer to `Request::Info` and `Request::Shutdown`.
+    Info(DaemonInfo),
     Error {
         message: String,
     },
@@ -207,6 +235,25 @@ mod tests {
             ),
             other => panic!("expected Attach, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn info_reply_carries_the_build_id() {
+        let reply = Reply::Info(DaemonInfo {
+            version: "0.1.0".to_string(),
+            build_id: "abc123".to_string(),
+            pid: 7,
+            http: None,
+            token_file: None,
+        });
+        let json = serde_json::to_value(&reply).unwrap();
+        assert_eq!(json["op"], "info");
+        assert_eq!(json["build_id"], "abc123");
+        // Optional fields stay out of the payload when unused.
+        assert!(json.get("http").is_none());
+
+        let parsed: Reply = serde_json::from_value(json).unwrap();
+        assert!(matches!(parsed, Reply::Info(info) if info.pid == 7));
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! The GUI keeps rendering locally: it attaches to the daemon, feeds the raw
 //! bytes into its own emulator, and forwards input and resizes back.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -38,8 +38,16 @@ const FEED_BUDGET: Duration = Duration::from_millis(8);
 const FEED_PAUSE: Duration = Duration::from_millis(1);
 
 /// One daemon connection, shared by every window and workspace.
-fn daemon_slot() -> &'static Mutex<Option<Control>> {
-    static SLOT: OnceLock<Mutex<Option<Control>>> = OnceLock::new();
+struct DaemonConnection {
+    control: Control,
+    /// The daemon was not built from this code. Probing would either fail (a
+    /// daemon older than the handshake cannot answer `Info`) or reconnect on
+    /// every use (a differing build id), so the connection is used as-is.
+    outdated: bool,
+}
+
+fn daemon_slot() -> &'static Mutex<Option<DaemonConnection>> {
+    static SLOT: OnceLock<Mutex<Option<DaemonConnection>>> = OnceLock::new();
     SLOT.get_or_init(|| Mutex::new(None))
 }
 
@@ -89,13 +97,29 @@ pub fn list() -> anyhow::Result<Vec<terminal_daemon::SessionInfo>> {
 }
 
 /// Runs `f` against the shared control connection, starting the daemon on
-/// first use and reconnecting once if the connection went stale.
+/// first use and reconnecting when the connection went stale.
 fn with_control<R>(f: impl FnOnce(&mut Control) -> anyhow::Result<R>) -> anyhow::Result<R> {
     let mut slot = daemon_slot().lock().expect("daemon mutex poisoned");
+    if let Some(connection) = slot.as_mut() {
+        // A daemon that was restarted behind our back (`terry daemon restart`,
+        // an upgrade, a crash) leaves a dead connection here. Probe current
+        // builds cheaply so the next operation does not fail once first. An
+        // outdated daemon cannot answer, and is not probed.
+        if !connection.outdated {
+            let current = connection
+                .control
+                .info()
+                .is_ok_and(|info| info.build_id == terminal_daemon::BUILD_ID);
+            if !current {
+                *slot = None;
+            }
+        }
+    }
     if slot.is_none() {
         *slot = Some(start_daemon()?);
     }
-    let result = f(slot.as_mut().expect("daemon connection checked above"));
+    let connection = slot.as_mut().expect("daemon connection checked above");
+    let result = f(&mut connection.control);
     if result.is_err() {
         // Force a reconnect on the next call.
         *slot = None;
@@ -103,10 +127,24 @@ fn with_control<R>(f: impl FnOnce(&mut Control) -> anyhow::Result<R>) -> anyhow:
     result
 }
 
-fn start_daemon() -> anyhow::Result<Control> {
+fn start_daemon() -> anyhow::Result<DaemonConnection> {
     let socket = terminal_daemon::socket_path();
-    if let Ok(control) = Control::connect(&socket) {
-        return Ok(control);
+    match inspect_existing_daemon(&socket) {
+        ExistingDaemon::Current(control) => {
+            return Ok(DaemonConnection {
+                control,
+                outdated: false,
+            });
+        }
+        // An outdated daemon that still owns sessions is kept: restarting it
+        // would kill work the user cannot get back.
+        ExistingDaemon::Outdated(control) => {
+            return Ok(DaemonConnection {
+                control,
+                outdated: true,
+            });
+        }
+        ExistingDaemon::Absent => {}
     }
 
     // The GUI binary hosts the daemon itself (`terry daemon-serve`), so no
@@ -125,12 +163,95 @@ fn start_daemon() -> anyhow::Result<Control> {
         .map_err(|error| anyhow::anyhow!("failed to start the terminal daemon: {error}"))?;
 
     for _ in 0..100 {
-        if let Ok(control) = Control::connect(&socket) {
-            return Ok(control);
+        if let Ok(mut control) = Control::connect(&socket) {
+            // A daemon that raced us to the socket may not be ours; do not
+            // hand back one from another build as if it were current.
+            if control
+                .info()
+                .is_ok_and(|info| info.build_id == terminal_daemon::BUILD_ID)
+            {
+                return Ok(DaemonConnection {
+                    control,
+                    outdated: false,
+                });
+            }
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     anyhow::bail!("terminal daemon did not start at {}", socket.display())
+}
+
+/// What `inspect_existing_daemon` found on the socket.
+enum ExistingDaemon {
+    /// Nothing is listening.
+    Absent,
+    /// A daemon built from this exact code.
+    Current(Control),
+    /// A daemon from a different build that still owns sessions, so it was
+    /// kept: restarting it would kill work the user cannot get back.
+    Outdated(Control),
+}
+
+/// Connects to the daemon on `socket`, retiring a stale one when that loses
+/// nothing.
+///
+/// The GUI used to reuse whatever daemon was listening, which meant an
+/// upgraded app kept talking to the old build's daemon forever.
+fn inspect_existing_daemon(socket: &Path) -> ExistingDaemon {
+    let Ok(mut control) = Control::connect(socket) else {
+        return ExistingDaemon::Absent;
+    };
+    if control
+        .info()
+        .is_ok_and(|info| info.build_id == terminal_daemon::BUILD_ID)
+    {
+        return ExistingDaemon::Current(control);
+    }
+
+    // A daemon older than the handshake drops the connection instead of
+    // answering. `List` predates it, so ask on a fresh connection whether a
+    // restart would lose anything.
+    let Ok(mut control) = Control::connect(socket) else {
+        return ExistingDaemon::Absent;
+    };
+    let sessions = match control.list() {
+        Ok(sessions) => sessions,
+        Err(_) => {
+            // The connection died, so we cannot tell whether sessions exist.
+            // Never kill a daemon behind the user's back on a guess.
+            return match Control::connect(socket) {
+                Ok(control) => ExistingDaemon::Outdated(control),
+                Err(_) => ExistingDaemon::Absent,
+            };
+        }
+    };
+    if !sessions.is_empty() {
+        log::warn!(
+            "the terminal daemon was built from different code but owns {} persistent session(s); \
+             keeping it — run `terry daemon restart --force` to upgrade",
+            sessions.len()
+        );
+        return ExistingDaemon::Outdated(control);
+    }
+
+    log::info!("restarting the terminal daemon to match this build");
+    let stopped = match control.shutdown() {
+        Ok(_) => true,
+        Err(_) => terminal_daemon::terminate_daemon(socket)
+            .map(|pids| !pids.is_empty())
+            .unwrap_or(false),
+    };
+    if !stopped || !terminal_daemon::wait_until_stopped(socket, Duration::from_secs(3)) {
+        // Never spawn a second daemon next to one that is still listening.
+        if let Ok(control) = Control::connect(socket) {
+            log::warn!(
+                "could not stop the old terminal daemon at {}; keeping it",
+                socket.display()
+            );
+            return ExistingDaemon::Outdated(control);
+        }
+    }
+    ExistingDaemon::Absent
 }
 
 /// Environment for a daemon-spawned shell.

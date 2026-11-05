@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::protocol::SessionInfo;
-use crate::{Event, SessionSpec};
+use crate::{DaemonInfo, Event, SessionSpec};
 
 const UNSUPPORTED: &str = "the terminal daemon is not supported on this platform yet";
 
@@ -56,6 +56,22 @@ pub fn ensure_daemon(_socket: &Path) -> anyhow::Result<()> {
     anyhow::bail!(UNSUPPORTED)
 }
 
+pub fn is_daemon_running(_socket: &Path) -> bool {
+    false
+}
+
+pub fn wait_until_stopped(_socket: &Path, _timeout: Duration) -> bool {
+    false
+}
+
+pub fn wait_until_running(_socket: &Path, _timeout: Duration) -> bool {
+    false
+}
+
+pub fn terminate_daemon(_socket: &Path) -> anyhow::Result<Vec<u32>> {
+    anyhow::bail!(UNSUPPORTED)
+}
+
 pub struct Control;
 
 impl Control {
@@ -72,6 +88,14 @@ impl Control {
     }
 
     pub fn kill(&mut self, _session: &str) -> anyhow::Result<()> {
+        anyhow::bail!(UNSUPPORTED)
+    }
+
+    pub fn info(&mut self) -> anyhow::Result<DaemonInfo> {
+        anyhow::bail!(UNSUPPORTED)
+    }
+
+    pub fn shutdown(&mut self) -> anyhow::Result<DaemonInfo> {
         anyhow::bail!(UNSUPPORTED)
     }
 }

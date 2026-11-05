@@ -253,7 +253,7 @@ fn run_agent_integration_cli(args: &[String]) -> i32 {
 fn run_daemon_cli(args: &[String]) -> i32 {
     let Some(command) = args.first().map(String::as_str) else {
         eprintln!(
-            "用法: terry daemon list | kill SESSION | prune [--dry-run] [--min-idle-secs N] | rotate-token | serve [--socket PATH] [--http ADDR] [--token-file PATH]"
+            "用法: terry daemon list | kill SESSION | prune [--dry-run] [--min-idle-secs N] | rotate-token | restart [--force] | serve [--socket PATH] [--http ADDR] [--token-file PATH]"
         );
         return 2;
     };
@@ -261,7 +261,7 @@ fn run_daemon_cli(args: &[String]) -> i32 {
     match command {
         "help" | "--help" | "-h" => {
             println!(
-                "用法: terry daemon list | kill SESSION | prune [--dry-run] [--min-idle-secs N] | rotate-token | serve [--socket PATH] [--http ADDR] [--token-file PATH]"
+                "用法: terry daemon list | kill SESSION | prune [--dry-run] [--min-idle-secs N] | rotate-token | restart [--force] | serve [--socket PATH] [--http ADDR] [--token-file PATH]"
             );
             0
         }
@@ -314,6 +314,7 @@ fn run_daemon_cli(args: &[String]) -> i32 {
             }
         }
         "serve" => run_daemon_serve(&args[1..]),
+        "restart" => run_daemon_restart(&args[1..]),
         "rotate-token" => run_daemon_rotate_token(&args[1..]),
         "prune" => {
             let dry_run = args.iter().any(|arg| arg == "--dry-run");
@@ -347,7 +348,7 @@ fn run_daemon_cli(args: &[String]) -> i32 {
         other => {
             eprintln!("未知 daemon 子命令: {other}");
             eprintln!(
-                "用法: terry daemon list | kill SESSION | prune [--dry-run] [--min-idle-secs N] | serve [--socket PATH]"
+                "用法: terry daemon list | kill SESSION | prune [--dry-run] [--min-idle-secs N] | restart [--force] | serve [--socket PATH]"
             );
             2
         }
@@ -362,6 +363,214 @@ fn connect_daemon() -> Result<terminal_daemon::Control, String> {
             socket.display()
         )
     })
+}
+
+/// `terry daemon restart [--force] [--http ADDR] [--token-file PATH]`.
+///
+/// Stops the daemon and starts a fresh one from this binary, so an app upgrade
+/// does not leave the old build serving. Restarting ends every persisted
+/// session, so it asks for `--force` when there are any.
+fn run_daemon_restart(args: &[String]) -> i32 {
+    let mut force = false;
+    let mut http: Option<String> = None;
+    let mut token_file: Option<PathBuf> = None;
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--force" | "-f" => force = true,
+            "--http" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("--http 需要一个 host:port");
+                    return 2;
+                };
+                http = Some(value.clone());
+                index += 1;
+            }
+            "--token-file" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("--token-file 需要一个路径");
+                    return 2;
+                };
+                token_file = Some(PathBuf::from(value));
+                index += 1;
+            }
+            "--help" | "-h" => {
+                println!(
+                    "用法: terry daemon restart [--force] [--http ADDR] [--token-file PATH]\n\n\
+                     用当前二进制重新启动终端守护进程。\n\
+                     重启会结束所有持久会话（其中的进程也会退出）；有会话时必须加 --force。\n\
+                     原来用 --http 启动的 daemon 会自动沿用相同的地址和令牌文件。"
+                );
+                return 0;
+            }
+            other => {
+                eprintln!("未知参数: {other}");
+                return 2;
+            }
+        }
+        index += 1;
+    }
+
+    let socket = terminal_daemon::socket_path();
+    let mut killed = 0usize;
+
+    match terminal_daemon::Control::connect(&socket) {
+        Ok(mut control) => {
+            // `Info` is the version handshake; daemons older than it cannot
+            // answer, but `List` predates the handshake and still works.
+            let info = control.info().ok();
+            // Asking an old daemon for `Info` makes it drop this connection,
+            // so reconnect before checking whether a restart would lose
+            // anything.
+            if info.is_none() {
+                control = match terminal_daemon::Control::connect(&socket) {
+                    Ok(control) => control,
+                    Err(error) => {
+                        eprintln!("无法重新连接 daemon: {error}");
+                        return 1;
+                    }
+                };
+            }
+            let sessions = match control.list() {
+                Ok(sessions) => sessions,
+                Err(error) => {
+                    if !force {
+                        eprintln!(
+                            "无法读取 daemon 的会话列表（{error}）；为避免误杀，请加 --force 确认重启。"
+                        );
+                        return 2;
+                    }
+                    Vec::new()
+                }
+            };
+
+            if !sessions.is_empty() && !force {
+                eprintln!(
+                    "daemon 上还有 {} 个持久会话，重启会结束它们（其中的进程也会退出）：",
+                    sessions.len()
+                );
+                for session in &sessions {
+                    eprintln!(
+                        "  {}{}",
+                        session.session,
+                        if session.attached {
+                            "（正在显示）"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                eprintln!("确认后加 --force。");
+                return 2;
+            }
+            killed = sessions.len();
+
+            // Keep the endpoint the running daemon was serving unless the
+            // caller asked for something else.
+            if http.is_none() {
+                http = info.as_ref().and_then(|info| info.http.clone());
+            }
+            if token_file.is_none() {
+                token_file = info
+                    .as_ref()
+                    .and_then(|info| info.token_file.as_deref())
+                    .map(PathBuf::from);
+            }
+
+            match &info {
+                Some(info) => {
+                    println!("停止 daemon（build {}，pid {}）…", info.build_id, info.pid);
+                    if control.shutdown().is_err() {
+                        let _ = terminal_daemon::terminate_daemon(&socket);
+                    }
+                }
+                None => {
+                    println!("停止旧版 daemon（不支持版本握手）…");
+                    if http.is_none() {
+                        eprintln!(
+                            "旧版 daemon 无法报告 HTTP 参数；如果之前开了 HTTP，请加 --http 重新指定。"
+                        );
+                    }
+                    match terminal_daemon::terminate_daemon(&socket) {
+                        Ok(pids) if pids.is_empty() => {
+                            eprintln!("找不到正在使用 {} 的 daemon 进程", socket.display());
+                            return 1;
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            eprintln!("结束旧版 daemon 失败: {error}");
+                            return 1;
+                        }
+                    }
+                }
+            }
+
+            if !terminal_daemon::wait_until_stopped(&socket, Duration::from_secs(3)) {
+                eprintln!("daemon 没有在 3 秒内退出");
+                return 1;
+            }
+        }
+        Err(_) => println!("没有运行中的 daemon，直接启动"),
+    }
+
+    if let Err(error) = spawn_daemon(&socket, http.as_deref(), token_file.as_deref()) {
+        eprintln!("启动 daemon 失败: {error}");
+        return 1;
+    }
+    if !terminal_daemon::wait_until_running(&socket, Duration::from_secs(5)) {
+        eprintln!("daemon 没有在 5 秒内启动");
+        return 1;
+    }
+
+    match terminal_daemon::Control::connect(&socket).and_then(|mut control| control.info()) {
+        Ok(info) => {
+            println!("daemon 已重启（build {}，pid {}）", info.build_id, info.pid);
+            if let Some(http) = &info.http {
+                println!("HTTP 端点: {http}");
+            }
+            if killed > 0 {
+                println!("已结束 {killed} 个旧会话");
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("新 daemon 已启动但无法握手: {error}");
+            1
+        }
+    }
+}
+
+/// Starts `daemon-serve` from this executable, detached from the terminal.
+fn spawn_daemon(
+    socket: &Path,
+    http: Option<&str>,
+    token_file: Option<&Path>,
+) -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg("daemon-serve")
+        .arg("--socket")
+        .arg(socket)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Some(http) = http {
+        command.arg("--http").arg(http);
+        if let Some(token_file) = token_file {
+            command.arg("--token-file").arg(token_file);
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // Leave the CLI's process group: closing this terminal must not hang
+        // the fresh daemon up with it.
+        command.process_group(0);
+    }
+    command.spawn()?;
+    Ok(())
 }
 
 /// Runs the terminal daemon in this process. Hidden: the GUI starts it

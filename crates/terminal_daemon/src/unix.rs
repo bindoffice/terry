@@ -10,6 +10,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -22,8 +23,8 @@ use terminal_core::Emulator;
 use tokio::sync::broadcast;
 
 use crate::protocol::{
-    Reply, Request, SessionInfo, TAG_INPUT, TAG_JSON, TAG_OUTPUT, read_frame, write_frame,
-    write_json,
+    DaemonInfo, Reply, Request, SessionInfo, TAG_INPUT, TAG_JSON, TAG_OUTPUT, read_frame,
+    write_frame, write_json,
 };
 use crate::{Event, SessionSpec};
 
@@ -57,13 +58,27 @@ struct DaemonState {
     /// endpoint is off: the reaper reads it to avoid killing a session that is
     /// running an agent, and that reasoning has nothing to do with HTTP.
     agents: Arc<crate::agents::AgentRegistry>,
+    /// Where this daemon listens, so a `Shutdown` handler can wake the
+    /// blocked accept loop.
+    socket: PathBuf,
+    /// The optional HTTP endpoint, reported to clients that want to restart
+    /// the daemon with the same options.
+    http: Option<String>,
+    token_file: Option<PathBuf>,
+    /// Set by `Request::Shutdown`; the accept loop checks it after every
+    /// accepted connection.
+    shutdown: AtomicBool,
 }
 
 impl DaemonState {
-    fn new() -> Self {
+    fn new(socket: PathBuf, options: &ServeOptions) -> Self {
         Self {
             registry: Arc::default(),
             agents: Arc::new(crate::agents::AgentRegistry::new()),
+            socket,
+            http: options.http.clone(),
+            token_file: options.token_file.clone(),
+            shutdown: AtomicBool::new(false),
         }
     }
 
@@ -541,6 +556,19 @@ fn list_sessions(state: &DaemonState) -> Vec<SessionInfo> {
     state.list()
 }
 
+fn info_reply(state: &DaemonState) -> DaemonInfo {
+    DaemonInfo {
+        version: crate::version().to_string(),
+        build_id: crate::BUILD_ID.to_string(),
+        pid: std::process::id(),
+        http: state.http.clone(),
+        token_file: state
+            .token_file
+            .as_ref()
+            .map(|path| path.display().to_string()),
+    }
+}
+
 fn kill_session(registry: &Registry, id: &str) -> anyhow::Result<()> {
     let removed = registry.lock().expect("registry mutex poisoned").remove(id);
     let Some(session) = removed else {
@@ -828,7 +856,7 @@ pub fn serve_with_options_and_port(
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
     log::info!("terminal daemon listening on {}", socket.display());
 
-    let state = Arc::new(DaemonState::new());
+    let state = Arc::new(DaemonState::new(socket.to_path_buf(), &options));
 
     // The HTTP listener is opt-in: it can spawn arbitrary programs, so it must
     // be something the user asked for, not a side effect of starting the daemon.
@@ -864,19 +892,32 @@ pub fn serve_with_options_and_port(
         std::mem::forget(server);
     }
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let state = state.clone();
-                thread::spawn(move || {
-                    if let Err(error) = handle_connection(stream, state) {
-                        log::debug!("terminal daemon connection closed: {error}");
-                    }
-                });
+    loop {
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) => {
+                log::warn!("terminal daemon accept failed: {error}");
+                continue;
             }
-            Err(error) => log::warn!("terminal daemon accept failed: {error}"),
+        };
+        // `Shutdown` wakes this loop by connecting to the socket itself. Once
+        // the flag is visible, drop that connection and stop listening.
+        if state.shutdown.load(Ordering::SeqCst) {
+            break;
         }
+        // On some platforms an accepted socket inherits the listener's flags.
+        let _ = stream.set_nonblocking(false);
+        let state = state.clone();
+        thread::spawn(move || {
+            if let Err(error) = handle_connection(stream, state) {
+                log::debug!("terminal daemon connection closed: {error}");
+            }
+        });
     }
+
+    // Leave no socket behind: clients detect a stopped daemon by `connect`
+    // failing, and the next daemon binds a fresh file.
+    let _ = std::fs::remove_file(socket);
     Ok(())
 }
 
@@ -942,6 +983,34 @@ fn handle_connection(stream: UnixStream, state: Arc<DaemonState>) -> anyhow::Res
             Request::ReadScreen { session, lines } => {
                 let reply = read_screen(&registry, &session, lines);
                 write_json(&mut writer, &reply)?;
+            }
+            Request::Info => {
+                write_json(&mut writer, &Reply::Info(info_reply(&state)))?;
+            }
+            Request::Shutdown => {
+                // Answer first: the caller may wait for this before starting
+                // the replacement daemon.
+                write_json(&mut writer, &Reply::Info(info_reply(&state)))?;
+
+                // End the sessions explicitly. A `serve` embedded in another
+                // process (tests, `terry daemon serve` in the foreground) keeps
+                // running after this function returns, and the caller asked
+                // for the sessions to be gone.
+                let sessions: Vec<String> = state
+                    .registry
+                    .lock()
+                    .expect("registry mutex poisoned")
+                    .keys()
+                    .cloned()
+                    .collect();
+                for session in sessions {
+                    let _ = kill_session(&registry, &session);
+                }
+
+                state.shutdown.store(true, Ordering::SeqCst);
+                // Wake the accept loop, which is blocked in `accept`.
+                let _ = UnixStream::connect(&state.socket);
+                return Ok(());
             }
             Request::Resize { .. } | Request::Detach => {
                 write_json(
@@ -1100,6 +1169,82 @@ pub fn ensure_daemon(socket: &Path) -> anyhow::Result<()> {
     anyhow::bail!("terminal daemon did not start at {}", socket.display())
 }
 
+/// Whether a daemon is listening on `socket`.
+pub fn is_daemon_running(socket: &Path) -> bool {
+    UnixStream::connect(socket).is_ok()
+}
+
+/// Waits until nothing is listening on `socket`.
+pub fn wait_until_stopped(socket: &Path, timeout: Duration) -> bool {
+    wait_for_socket(socket, timeout, false)
+}
+
+/// Waits until something is listening on `socket`.
+pub fn wait_until_running(socket: &Path, timeout: Duration) -> bool {
+    wait_for_socket(socket, timeout, true)
+}
+
+fn wait_for_socket(socket: &Path, timeout: Duration, running: bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if is_daemon_running(socket) == running {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Signals daemons that are too old to understand `Shutdown`.
+///
+/// Such a daemon cannot identify itself either, so the only way to retire it is
+/// to find the process serving this socket by its command line. Both the daemon
+/// entry point and the exact socket path must match, so an unrelated process
+/// that merely mentions the path is left alone.
+pub fn terminate_daemon(socket: &Path) -> anyhow::Result<Vec<u32>> {
+    let socket_arg = socket.display().to_string();
+    let mut system = System::new();
+    // `refresh_processes` refreshes no command lines at all, and the argv is
+    // the only way to recognize a daemon this old.
+    let refresh_kind = ProcessRefreshKind::nothing()
+        .with_cmd(UpdateKind::Always)
+        .without_tasks();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
+
+    let mut signalled = Vec::new();
+    for (pid, process) in system.processes() {
+        let argv: Vec<String> = process
+            .cmd()
+            .iter()
+            .filter_map(|argument| argument.to_str().map(ToOwned::to_owned))
+            .collect();
+        if !argv.iter().any(|argument| argument == &socket_arg) {
+            continue;
+        }
+        let gui_host = argv.iter().any(|argument| argument == "daemon-serve");
+        let standalone = argv
+            .first()
+            .is_some_and(|exe| exe.ends_with("terry-daemon"))
+            && argv.iter().any(|argument| argument == "serve");
+        if !gui_host && !standalone {
+            continue;
+        }
+
+        let pid = pid.as_u32();
+        if pid == std::process::id() {
+            continue;
+        }
+        // The daemon installs no signal handlers; SIGTERM is enough.
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+        signalled.push(pid);
+    }
+    Ok(signalled)
+}
+
 /// Control connection: spawn, list, kill.
 pub struct Control {
     reader: BufReader<UnixStream>,
@@ -1185,6 +1330,31 @@ impl Control {
             lines: None,
         })? {
             Reply::Screen { screen } => Ok(screen),
+            Reply::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// The daemon's build identity.
+    ///
+    /// A daemon older than the handshake cannot parse this request; it drops
+    /// the connection, so callers should treat the error as "unknown build"
+    /// rather than as a broken daemon.
+    pub fn info(&mut self) -> anyhow::Result<DaemonInfo> {
+        match self.request(&Request::Info)? {
+            Reply::Info(info) => Ok(info),
+            Reply::Error { message } => anyhow::bail!(message),
+            other => anyhow::bail!("unexpected reply: {other:?}"),
+        }
+    }
+
+    /// Asks the daemon to stop and end every session it owns.
+    ///
+    /// Returns the identity it reported on the way out, so a caller can say
+    /// which build it just retired.
+    pub fn shutdown(&mut self) -> anyhow::Result<DaemonInfo> {
+        match self.request(&Request::Shutdown)? {
+            Reply::Info(info) => Ok(info),
             Reply::Error { message } => anyhow::bail!(message),
             other => anyhow::bail!("unexpected reply: {other:?}"),
         }
