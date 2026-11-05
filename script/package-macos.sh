@@ -262,6 +262,17 @@ if [[ "$VERSION" =~ ^([0-9]{4})([0-9]{2})([0-9]{2})$ ]]; then
     || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string ${VERSION}" "$PLIST"
 fi
 
+# macOS 15+ gates connections to LAN hosts behind the Local Network privacy
+# prompt. Without a usage description the system never lists Terry under
+# System Settings → Privacy & Security → Local Network and silently denies the
+# connection; ssh reports that denial as "No route to host" even though
+# internet connections keep working. ssh has no bundle of its own, so the
+# permission is attributed to Terry as the responsible app.
+PLIST="${APP_PATH}/Contents/Info.plist"
+LOCAL_NETWORK_REASON="Terry needs local network access to open SSH and tmux connections to hosts on your LAN."
+/usr/libexec/PlistBuddy -c "Set :NSLocalNetworkUsageDescription ${LOCAL_NETWORK_REASON}" "$PLIST" \
+  || /usr/libexec/PlistBuddy -c "Add :NSLocalNetworkUsageDescription string ${LOCAL_NETWORK_REASON}" "$PLIST"
+
 SIGN_IDENTITY="$(resolve_signing_identity)"
 sign_app "$APP_PATH" "$SIGN_IDENTITY"
 
