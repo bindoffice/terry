@@ -36,14 +36,14 @@ jobs:
       matrix:
         include:
           - name: macOS aarch64
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
             artifact: terry-macos-aarch64
             package: macos
           # Built on an Apple Silicon runner and cross-compiled to x86_64 with
           # the Xcode SDK (no Intel runner needed).
           - name: macOS x86_64
-            os: macos-14
+            os: macos-15
             target: x86_64-apple-darwin
             artifact: terry-macos-x86_64
             package: macos
