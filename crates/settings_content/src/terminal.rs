@@ -249,6 +249,12 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: true
     pub shell_integration: Option<bool>,
+    /// Whether Tab completes local filesystem paths at the shell prompt and
+    /// opens a candidate menu when several entries match. This requires shell
+    /// integration so Terry knows when the shell is waiting for command input.
+    ///
+    /// Default: true
+    pub path_completion: Option<bool>,
     /// Whether terminal applications may read the system clipboard through
     /// OSC 52. Writing to the clipboard is always allowed, but reading lets a
     /// remote shell exfiltrate whatever you last copied, so it is opt-in.

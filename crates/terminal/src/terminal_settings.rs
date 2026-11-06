@@ -226,6 +226,8 @@ pub struct TerminalSettings {
     /// picker also bootstrap zsh, fish, and bash integration on the remote
     /// host.
     pub shell_integration: bool,
+    /// Whether Tab completes local filesystem paths at the shell prompt.
+    pub path_completion: bool,
     /// Allow applications to read the clipboard via OSC 52. Writing is always
     /// allowed; reading is opt-in because remote shells can use it to read
     /// local clipboard contents.
@@ -367,6 +369,7 @@ impl settings::Settings for TerminalSettings {
             image_display: user_content.image_display.unwrap_or_default(),
             max_image_memory: user_content.max_image_memory.unwrap_or(512 * 1024 * 1024),
             shell_integration: user_content.shell_integration.unwrap_or(true),
+            path_completion: user_content.path_completion.unwrap_or(true),
             clipboard_read: user_content.clipboard_read.unwrap_or(false),
             notify_on_command_finish: user_content.notify_on_command_finish.unwrap_or(false),
             confirm_multiline_paste: user_content.confirm_multiline_paste.unwrap_or(true),
@@ -545,6 +548,18 @@ mod tests {
         )
         .unwrap();
         assert!(TerminalSettings::from_settings(&content).persistent_sessions);
+    }
+
+    #[test]
+    fn path_completion_is_enabled_by_default_and_can_be_disabled() {
+        let content = SettingsContent::parse_json_with_comments("{}").unwrap();
+        assert!(TerminalSettings::from_settings(&content).path_completion);
+
+        let content = SettingsContent::parse_json_with_comments(
+            r#"{ "terminal": { "path_completion": false } }"#,
+        )
+        .unwrap();
+        assert!(!TerminalSettings::from_settings(&content).path_completion);
     }
 
     #[test]

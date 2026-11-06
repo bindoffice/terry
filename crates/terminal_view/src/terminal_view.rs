@@ -1,5 +1,6 @@
 mod persistence;
 pub mod terminal_element;
+mod terminal_completion;
 mod terminal_hint_picker;
 mod terminal_link_picker;
 pub mod terminal_panel;
@@ -43,6 +44,9 @@ use terminal::{
     ScrollToBottom, ScrollToTop, Search, ShowCharacterPalette, TaskState, TaskStatus, Terminal,
     TerminalBounds, ToggleViMode,
     terminal_settings::{CursorShape, TerminalSettings},
+};
+use terminal_completion::{
+    CompletionCandidate, CompletionToken, common_name_prefix, find_candidates, parse_last_word,
 };
 use terminal_element::TerminalElement;
 use terminal_hint_picker::{TerminalHintPicker, execute_hint};
@@ -213,6 +217,34 @@ fn viewport_line_for_point(point: Point, display_offset: usize) -> Option<usize>
     }
 }
 
+fn has_completion_command_modifiers(keystroke: &Keystroke) -> bool {
+    keystroke.modifiers.control
+        || keystroke.modifiers.alt
+        || keystroke.modifiers.platform
+        || keystroke.modifiers.function
+}
+
+fn is_plain_tab(keystroke: &Keystroke) -> bool {
+    keystroke.key == "tab"
+        && !keystroke.modifiers.shift
+        && !has_completion_command_modifiers(keystroke)
+}
+
+fn is_shift_tab(keystroke: &Keystroke) -> bool {
+    keystroke.key == "tab"
+        && keystroke.modifiers.shift
+        && !has_completion_command_modifiers(keystroke)
+}
+
+fn is_accept_completion(keystroke: &Keystroke) -> bool {
+    !has_completion_command_modifiers(keystroke)
+        && matches!(keystroke.key.as_str(), "enter" | "right")
+}
+
+fn is_escape(keystroke: &Keystroke) -> bool {
+    keystroke.key == "escape" && !has_completion_command_modifiers(keystroke)
+}
+
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Event to transmit the scroll from the element to the view
@@ -296,6 +328,25 @@ pub struct BlockContext<'a, 'b> {
     pub dimensions: TerminalBounds,
 }
 
+const MAX_COMPLETION_CANDIDATES: usize = 64;
+const MAX_VISIBLE_COMPLETION_CANDIDATES: usize = 8;
+
+enum CompletionState {
+    Loading {
+        generation: u64,
+        token: CompletionToken,
+        command_input: String,
+        trigger: Keystroke,
+    },
+    Open {
+        token: CompletionToken,
+        current_prefix: String,
+        candidates: Vec<CompletionCandidate>,
+        total_matches: usize,
+        selected: usize,
+    },
+}
+
 ///A terminal view, maintains the PTY's file handles and communicates with the terminal
 pub struct TerminalView {
     terminal: Entity<Terminal>,
@@ -341,6 +392,10 @@ pub struct TerminalView {
     self_handle: WeakEntity<Self>,
     rename_editor: Option<Entity<Editor>>,
     rename_editor_subscription: Option<Subscription>,
+    completion: Option<CompletionState>,
+    completion_task: Task<()>,
+    completion_generation: u64,
+    completion_consumed_key: Option<Keystroke>,
     _subscriptions: Vec<Subscription>,
     _terminal_subscriptions: Vec<Subscription>,
 }
@@ -500,6 +555,10 @@ impl TerminalView {
             self_handle: cx.entity().downgrade(),
             rename_editor: None,
             rename_editor_subscription: None,
+            completion: None,
+            completion_task: Task::ready(()),
+            completion_generation: 0,
+            completion_consumed_key: None,
             _subscriptions: subscriptions,
             _terminal_subscriptions: terminal_subscriptions,
         }
@@ -1954,6 +2013,374 @@ impl ScrollbarVisibility for TerminalScrollbarSettingsWrapper {
 }
 
 impl TerminalView {
+    fn handle_completion_key_down(
+        &mut self,
+        keystroke: &Keystroke,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let plain_tab = is_plain_tab(keystroke);
+        let reverse_tab = is_shift_tab(keystroke);
+
+        if let Some(CompletionState::Loading { .. }) = self.completion.as_mut()
+            && (plain_tab || reverse_tab)
+        {
+            return true;
+        }
+        if let Some(CompletionState::Open {
+            candidates,
+            selected,
+            ..
+        }) = self.completion.as_mut()
+            && (plain_tab || reverse_tab)
+        {
+            if !candidates.is_empty() {
+                if reverse_tab {
+                    *selected = if *selected == 0 {
+                        candidates.len() - 1
+                    } else {
+                        *selected - 1
+                    };
+                } else {
+                    *selected = (*selected + 1) % candidates.len();
+                }
+                cx.notify();
+            }
+            return true;
+        }
+
+        let Some(state) = self.completion.take() else {
+            return plain_tab && self.start_path_completion(keystroke, cx);
+        };
+
+        match state {
+            CompletionState::Loading { .. } => {
+                self.cancel_completion_task();
+                cx.notify();
+                if is_escape(keystroke) {
+                    true
+                } else {
+                    false
+                }
+            }
+            CompletionState::Open { .. } => {
+                if is_escape(keystroke) {
+                    self.cancel_completion_task();
+                    cx.notify();
+                    true
+                } else if is_accept_completion(keystroke) {
+                    self.accept_completion(state, cx);
+                    true
+                } else {
+                    self.cancel_completion_task();
+                    cx.notify();
+                    false
+                }
+            }
+        }
+    }
+
+    fn start_path_completion(&mut self, trigger: &Keystroke, cx: &mut Context<Self>) -> bool {
+        if !TerminalSettings::get_global(cx).path_completion {
+            return false;
+        }
+
+        let Some(project) = self.project.upgrade() else {
+            return false;
+        };
+        let terminal = self.terminal.read(cx);
+        if terminal.vi_mode_enabled()
+            || terminal.last_content.mode.contains(Modes::ALT_SCREEN)
+            || terminal.ssh_session().is_some()
+        {
+            return false;
+        }
+
+        let Some(cwd) = terminal.working_directory() else {
+            return false;
+        };
+        let Some(command_input) = terminal.current_command_input() else {
+            return false;
+        };
+        let Some(token) = parse_last_word(&command_input) else {
+            return false;
+        };
+        if !token.is_eligible() {
+            return false;
+        }
+
+        let fs = project.read(cx).fs().clone();
+
+        self.completion_generation = self.completion_generation.wrapping_add(1);
+        let generation = self.completion_generation;
+        self.completion = Some(CompletionState::Loading {
+            generation,
+            token: token.clone(),
+            command_input,
+            trigger: trigger.clone(),
+        });
+
+        self.completion_task = cx.spawn(async move |this, cx| {
+            let task = cx.background_spawn(async move {
+                find_candidates(fs.as_ref(), &cwd, &token).await
+            });
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.finish_path_completion(generation, result, cx)
+            })
+            .ok();
+        });
+        cx.notify();
+        true
+    }
+
+    fn finish_path_completion(
+        &mut self,
+        generation: u64,
+        result: anyhow::Result<Vec<CompletionCandidate>>,
+        cx: &mut Context<Self>,
+    ) {
+        let is_current = matches!(
+            &self.completion,
+            Some(CompletionState::Loading {
+                generation: current,
+                ..
+            }) if *current == generation
+        );
+        if !is_current {
+            return;
+        }
+
+        let Some(CompletionState::Loading {
+            token,
+            command_input,
+            trigger,
+            ..
+        }) = self.completion.take()
+        else {
+            return;
+        };
+
+        let command_unchanged = self
+            .terminal
+            .read(cx)
+            .current_command_input()
+            .is_some_and(|current| current == command_input);
+        if !command_unchanged {
+            cx.notify();
+            return;
+        }
+
+        let Ok(candidates) = result else {
+            self.process_keystroke(&trigger, cx);
+            cx.notify();
+            return;
+        };
+        if candidates.is_empty() {
+            self.process_keystroke(&trigger, cx);
+            cx.notify();
+            return;
+        }
+
+        let shell_kind = self
+            .terminal
+            .read(cx)
+            .shell()
+            .shell_kind(cfg!(windows));
+        if candidates.len() == 1 {
+            let text = token.candidate_text(&candidates[0], &token.file_prefix, shell_kind);
+            self.send_completion_text(&text, cx);
+            cx.notify();
+            return;
+        }
+
+        let common_prefix = common_name_prefix(&candidates);
+        let mut current_prefix = token.file_prefix.clone();
+        if common_prefix.len() > current_prefix.len() && common_prefix.starts_with(&current_prefix) {
+            let text = token.remaining_text(&common_prefix, &current_prefix, shell_kind);
+            self.send_completion_text(&text, cx);
+            current_prefix = common_prefix;
+        }
+
+        let total_matches = candidates.len();
+        let candidates = candidates
+            .into_iter()
+            .take(MAX_COMPLETION_CANDIDATES)
+            .collect();
+        self.completion = Some(CompletionState::Open {
+            token,
+            current_prefix,
+            candidates,
+            total_matches,
+            selected: 0,
+        });
+        cx.notify();
+    }
+
+    fn accept_completion(&mut self, state: CompletionState, cx: &mut Context<Self>) {
+        let CompletionState::Open {
+            token,
+            current_prefix,
+            candidates,
+            selected,
+            ..
+        } = state
+        else {
+            return;
+        };
+        let Some(candidate) = candidates.get(selected) else {
+            cx.notify();
+            return;
+        };
+        let shell_kind = self
+            .terminal
+            .read(cx)
+            .shell()
+            .shell_kind(cfg!(windows));
+        let text = token.candidate_text(candidate, &current_prefix, shell_kind);
+        self.send_completion_text(&text, cx);
+        cx.notify();
+    }
+
+    fn send_completion_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        self.terminal
+            .update(cx, |terminal, _| terminal.input(text.as_bytes().to_vec()));
+    }
+
+    fn cancel_completion_task(&mut self) {
+        self.completion_generation = self.completion_generation.wrapping_add(1);
+        self.completion_task = Task::ready(());
+    }
+
+    fn render_completion_overlay(&self, cx: &App) -> Option<AnyElement> {
+        let CompletionState::Open {
+            token,
+            candidates,
+            total_matches,
+            selected,
+            ..
+        } = self.completion.as_ref()?
+        else {
+            return None;
+        };
+
+        let terminal = self.terminal.read(cx);
+        let content = terminal.last_content();
+        if content.display_offset != 0 {
+            return None;
+        }
+
+        let shell_kind = terminal.shell().shell_kind(cfg!(windows));
+        let bounds = content.terminal_bounds;
+        let cursor_line = content.cursor.point.line.max(0);
+        let visible_candidates = candidates
+            .len()
+            .min(MAX_VISIBLE_COMPLETION_CANDIDATES);
+        let estimated_rows = visible_candidates.saturating_add(1) as i32;
+        let top_cells = if cursor_line + 1 + estimated_rows > bounds.num_lines() as i32 {
+            (cursor_line - estimated_rows).max(0)
+        } else {
+            cursor_line + 1
+        };
+
+        let menu_width = cmp::min(px(460.), bounds.width());
+        let left = cmp::min(
+            bounds.cell_width() * content.cursor.point.column as f32,
+            cmp::max(bounds.width() - menu_width, Pixels::ZERO),
+        );
+        let top = bounds.line_height() * top_cells as f32;
+        let theme = self.theme(cx);
+        let colors = theme.colors();
+        let directory_label = if token.directory_prefix.is_empty() {
+            ".".to_string()
+        } else {
+            token.directory_prefix.clone()
+        };
+        let first_visible = if candidates.len() <= visible_candidates {
+            0
+        } else {
+            selected
+                .saturating_sub(visible_candidates / 2)
+                .min(candidates.len() - visible_candidates)
+        };
+
+        let remaining = total_matches.saturating_sub(candidates.len());
+        let rows = candidates
+            .iter()
+            .enumerate()
+            .skip(first_visible)
+            .take(visible_candidates)
+            .map(|(ix, candidate)| {
+                let icon = if candidate.is_dir {
+                    IconName::Folder
+                } else {
+                    IconName::File
+                };
+                h_flex()
+                    .id(("terminal-path-completion", ix))
+                    .w_full()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .when(ix == *selected, |row| {
+                        row.bg(colors.ghost_element_selected)
+                    })
+                    .child(Icon::new(icon).size(IconSize::Small))
+                    .child(Label::new(candidate.display_name(shell_kind)).truncate())
+            });
+
+        Some(
+            v_flex()
+                .id("terminal-path-completion-menu")
+                .absolute()
+                .left(left)
+                .top(top)
+                .w(menu_width)
+                .max_h(px(320.))
+                .overflow_hidden()
+                .occlude()
+                .rounded_md()
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.elevated_surface_background)
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .child(
+                            Label::new(directory_label)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
+                        .child(
+                            Label::new(format!(
+                                "{} / {}",
+                                selected.saturating_add(1),
+                                total_matches
+                            ))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                        ),
+                )
+                .child(v_flex().w_full().p_1().children(rows))
+                .when(remaining > 0, |menu| {
+                    menu.child(h_flex().px_2().pb_1().child(
+                        Label::new(format!("+{remaining}"))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ))
+                })
+                .into_any_element(),
+        )
+    }
+
     /// Attempts to process a keystroke in the terminal. Returns true if handled.
     ///
     /// In vi mode, explicitly triggers a re-render because vi navigation (like j/k)
@@ -2005,12 +2432,22 @@ impl TerminalView {
         } else {
             KeyEventType::Press
         };
+        if self.handle_completion_key_down(&event.keystroke, cx) {
+            self.completion_consumed_key = Some(event.keystroke.clone());
+            cx.stop_propagation();
+            return;
+        }
         if self.process_key_event(&event.keystroke, event_type, cx) {
             cx.stop_propagation();
         }
     }
 
     fn key_up(&mut self, event: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.completion_consumed_key.as_ref() == Some(&event.keystroke) {
+            self.completion_consumed_key = None;
+            cx.stop_propagation();
+            return;
+        }
         if self.process_key_event(&event.keystroke, KeyEventType::Release, cx) {
             cx.stop_propagation();
         }
@@ -2038,6 +2475,10 @@ impl TerminalView {
 
     fn focus_out(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.blink_manager.update(cx, BlinkManager::disable);
+        if self.completion.take().is_some() {
+            self.cancel_completion_task();
+        }
+        self.completion_consumed_key = None;
         self.terminal.update(cx, |terminal, _| {
             terminal.focus_out();
             terminal.set_cursor_shape(CursorShape::Hollow);
@@ -2214,6 +2655,7 @@ impl Render for TerminalView {
                 )
                 .with_priority(1)
             }))
+            .children(self.render_completion_overlay(cx))
     }
 }
 
@@ -3085,6 +3527,77 @@ mod tests {
 
     // CSI `1;2A` = cursor-up with the xterm Shift modifier (`1 + 1` for Shift).
     const SHIFT_UP_ESCAPE: &[u8] = b"\x1b[1;2A";
+
+    #[gpui::test]
+    async fn escape_cancels_loading_path_completion(cx: &mut TestAppContext) {
+        let (project, _workspace, window_handle) = init_test_with_window(cx).await;
+        let (_pane, _terminal, terminal_view) =
+            add_display_only_terminal(&project, window_handle, true, cx);
+
+        terminal_view.update(cx, |view, cx| {
+            view.completion = Some(CompletionState::Loading {
+                generation: 1,
+                token: parse_last_word("ls sr").unwrap(),
+                command_input: "ls sr".to_string(),
+                trigger: Keystroke::parse("tab").unwrap(),
+            });
+
+            assert!(view.handle_completion_key_down(&Keystroke::parse("escape").unwrap(), cx));
+            assert!(view.completion.is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn path_completion_menu_cycles_and_accepts_candidates(cx: &mut TestAppContext) {
+        let (project, _workspace, window_handle) = init_test_with_window(cx).await;
+        let (_pane, terminal, terminal_view) =
+            add_display_only_terminal(&project, window_handle, true, cx);
+
+        terminal_view.update(cx, |view, cx| {
+            view.completion = Some(CompletionState::Open {
+                token: parse_last_word("ls f").unwrap(),
+                current_prefix: "f".to_string(),
+                candidates: vec![
+                    CompletionCandidate {
+                        name: "foo".to_string(),
+                        is_dir: false,
+                    },
+                    CompletionCandidate {
+                        name: "src".to_string(),
+                        is_dir: true,
+                    },
+                ],
+                total_matches: 2,
+                selected: 0,
+            });
+
+            assert!(view.handle_completion_key_down(&Keystroke::parse("tab").unwrap(), cx));
+            assert!(
+                matches!(
+                    view.completion.as_ref(),
+                    Some(CompletionState::Open { selected: 1, .. })
+                ),
+                "Tab should select the next candidate"
+            );
+
+            assert!(view.handle_completion_key_down(&Keystroke::parse("shift-tab").unwrap(), cx));
+            assert!(
+                matches!(
+                    view.completion.as_ref(),
+                    Some(CompletionState::Open { selected: 0, .. })
+                ),
+                "Shift+Tab should select the previous candidate"
+            );
+
+            assert!(view.handle_completion_key_down(&Keystroke::parse("enter").unwrap(), cx));
+            assert!(view.completion.is_none());
+        });
+
+        assert_eq!(
+            terminal.update(cx, |terminal, _| terminal.take_input_log()),
+            vec![b"oo ".to_vec()]
+        );
+    }
 
     #[gpui::test]
     async fn edit_menu_copy_and_paste_are_available_when_terminal_is_focused(

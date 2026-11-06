@@ -1218,6 +1218,36 @@ pub(super) fn last_command_input_text(term: &Term<ZedListener>) -> Option<String
     }
 }
 
+pub(super) fn current_command_input_text(term: &Term<ZedListener>) -> Option<String> {
+    let start = term.prompt_end_mark()?;
+    let cursor = term.grid().cursor.point;
+    if cursor < start {
+        return None;
+    }
+
+    let topmost = term.topmost_line();
+    if cursor.line < topmost {
+        return None;
+    }
+
+    let start = if start.line < topmost {
+        AlacPoint::new(topmost, Column(0))
+    } else {
+        start
+    };
+
+    // Appending a completion is only safe when the cursor is at the end of the
+    // current input line. Otherwise accepting a candidate would insert text in
+    // the middle of the command rather than extending it.
+    for column in (cursor.column.0 + 1)..term.grid().columns() {
+        if term.grid()[AlacPoint::new(cursor.line, Column(column))].c != ' ' {
+            return None;
+        }
+    }
+
+    Some(term.bounds_to_string(start, cursor))
+}
+
 pub(super) fn total_lines(term: &Term<ZedListener>) -> usize {
     term.total_lines()
 }

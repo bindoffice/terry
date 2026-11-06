@@ -3282,6 +3282,12 @@ impl<T> Term<T> {
         self.prompt_marks.back().copied()
     }
 
+    /// Where the currently open prompt ended (`OSC 133;B`), if the shell is
+    /// waiting for command input.
+    pub fn prompt_end_mark(&self) -> Option<Point> {
+        self.prompt_end_mark
+    }
+
     /// Exit code reported for the previously finished command
     /// (`OSC 133;D;<code>`), if any.
     pub fn last_exit_code(&self) -> Option<i64> {

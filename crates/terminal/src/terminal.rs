@@ -84,8 +84,9 @@ use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, OutputTap, PtySender, RegexSearches,
     ResizeTap, append_text_to_term, apply_config, clear_saved_screen, columns, content_text,
-    display_offset, display_only_term_config, find_all_visible_links, find_from_terminal_point,
-    full_content_range, last_command_input_text, last_command_output_range,
+    current_command_input_text, display_offset, display_only_term_config,
+    find_all_visible_links, find_from_terminal_point, full_content_range, last_command_input_text,
+    last_command_output_range,
     last_command_output_text, last_prompt_mark as last_term_prompt_mark, make_content, new_term,
     open_pty, prompt_marks as term_prompt_marks, pty_options, pty_term_config, resize,
     screen_lines, scroll_display, scroll_to_point, scroll_to_point_aligned, search_matches,
@@ -2288,6 +2289,15 @@ impl Terminal {
     /// The most recent prompt mark, if any.
     pub fn last_prompt_mark(&self) -> Option<Point> {
         last_term_prompt_mark(&self.term.lock_unfair())
+    }
+
+    /// The command line currently being edited after the latest shell prompt.
+    ///
+    /// Returns `None` when shell integration has not reported an active prompt
+    /// (`OSC 133;B`), so callers can safely fall back to the shell's own input
+    /// handling outside of a command prompt.
+    pub fn current_command_input(&self) -> Option<String> {
+        current_command_input_text(&self.term.lock_unfair())
     }
 
     /// First visible row of the viewport, in grid coordinates.
@@ -4615,6 +4625,47 @@ mod tests {
 
         assert_eq!(previous_prompt_mark(&marks, 8), Some(Point::new(2, 0)));
         assert_eq!(next_prompt_mark(&marks, 2), Some(Point::new(8, 0)));
+    }
+
+    #[gpui::test]
+    async fn current_command_input_tracks_prompt_lifecycle(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"$ \x1b]133;A\x07\x1b]133;B\x07ls src/te", cx);
+            assert_eq!(
+                terminal.current_command_input(),
+                Some("ls src/te".to_string())
+            );
+
+            // Rewrite the line with the cursor one cell before the existing
+            // trailing character.
+            terminal.write_output(b"\rls src/t", cx);
+            assert_eq!(
+                terminal.current_command_input(),
+                None,
+                "completion must not append text while the cursor is inside the command"
+            );
+            terminal.write_output(b"e", cx);
+
+            terminal.write_output(b"\x1b]133;C\x07", cx);
+            assert_eq!(terminal.current_command_input(), None);
+        });
     }
 
     #[test]

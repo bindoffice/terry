@@ -960,6 +960,7 @@ impl VsCodeSettings {
             scrollbar: None,
             scroll_multiplier: None,
             shell_integration: None,
+            path_completion: None,
             toolbar: None,
             show_count_badge: None,
             flexible: None,
