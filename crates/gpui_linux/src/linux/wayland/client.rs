@@ -423,11 +423,15 @@ impl WaylandClientStatePtr {
     pub fn enable_ime(&self) {
         let client = self.get_client();
         let mut state = client.borrow_mut();
-        state.ime_enabled = Some(true);
-        state.last_ime_cursor_rectangle = None;
         let Some(text_input) = state.text_input.take() else {
+            // The seat has no text-input object (yet). Do not record the
+            // state as enabled, or `update_ime_enabled` will believe the IME
+            // is active and never retry once the object shows up.
+            state.ime_enabled = None;
             return;
         };
+        state.ime_enabled = Some(true);
+        state.last_ime_cursor_rectangle = None;
 
         text_input.enable();
         text_input.set_content_type(ContentHint::None, ContentPurpose::Normal);
@@ -1563,6 +1567,12 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
                     state.composing = false;
                 }
 
+                // The new text-input object starts disabled. Forget the state
+                // recorded for the old one so `update_ime_enabled` re-enables
+                // it instead of believing the IME is already active.
+                state.ime_enabled = None;
+                state.last_ime_cursor_rectangle = None;
+
                 state.text_input = state
                     .globals
                     .text_input_manager
@@ -1656,6 +1666,11 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 if let Some(window) = state.keyboard_focused_window.clone() {
                     drop(state);
                     window.set_focused(true);
+                    // Re-assert text input as soon as the window regains
+                    // keyboard focus. Waiting for the next frame leaves a gap
+                    // where the first keystroke is delivered as raw text
+                    // instead of reaching the IME.
+                    window.update_ime_enabled();
                 }
             }
             wl_keyboard::Event::Leave { surface, .. } => {
@@ -1847,12 +1862,45 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
         let mut state = client.borrow_mut();
         match event {
             zwp_text_input_v3::Event::Enter { .. } => {
+                // Text-input focus follows keyboard focus, so the compositor
+                // sends `enter` on its own when a window is focused again.
+                // Requests are ignored between `leave` and `enter`, which
+                // means an `enable` sent in response to the keyboard focus
+                // may have been dropped. Re-send the full state now that the
+                // enters are through, so the IME gets a fresh cursor
+                // rectangle and content type for the focused window.
+                if state.ime_enabled == Some(true) {
+                    state.ime_enabled = None;
+                }
+                let window = state.keyboard_focused_window.clone();
                 drop(state);
-                this.enable_ime();
+                if let Some(window) = window {
+                    window.update_ime_enabled();
+                }
             }
-            zwp_text_input_v3::Event::Leave { .. } => {
+            zwp_text_input_v3::Event::Leave { surface } => {
+                // Do not disable the text input here. Disabling it would make
+                // the next keystroke after switching back to the window race
+                // against the re-enable and land in the terminal as raw text.
+                // Keeping it enabled lets the compositor route keys to the
+                // IME as soon as it restores text-input focus; the next
+                // `update_ime_enabled` call re-asserts the desired state.
+                state.composing = false;
+                state.ime_pre_edit = None;
+                // Forget our "enabled" bookkeeping (but do not send a disable
+                // request) so the next `update_ime_enabled` re-asserts the
+                // state. A cached `false` from an intentional disable stays,
+                // since this leave only confirms it.
+                if state.ime_enabled == Some(true) {
+                    state.ime_enabled = None;
+                }
+                let window = get_window(&mut state, &surface.id());
                 drop(state);
-                this.disable_ime();
+                if let Some(window) = window {
+                    // The compositor asks the client to drop its pre-edit
+                    // string when text-input focus goes away.
+                    window.handle_ime(ImeInput::UnmarkText);
+                }
             }
             zwp_text_input_v3::Event::CommitString { text } => {
                 state.composing = false;
