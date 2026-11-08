@@ -84,7 +84,7 @@ use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, OutputTap, PtySender, RegexSearches,
     ResizeTap, append_text_to_term, apply_config, clear_saved_screen, columns, content_text,
-    current_command_input_text, display_offset, display_only_term_config,
+    current_command_input_text, current_line_input_text, display_offset, display_only_term_config,
     find_all_visible_links, find_from_terminal_point, full_content_range, last_command_input_text,
     last_command_output_range,
     last_command_output_text, last_prompt_mark as last_term_prompt_mark, make_content, new_term,
@@ -2298,6 +2298,15 @@ impl Terminal {
     /// handling outside of a command prompt.
     pub fn current_command_input(&self) -> Option<String> {
         current_command_input_text(&self.term.lock_unfair())
+    }
+
+    /// The visible text before the cursor on its current grid line.
+    ///
+    /// This is a fallback for shells that have not loaded Terry's OSC 133
+    /// integration. Callers must additionally ensure a command is not running
+    /// before treating the line as shell input.
+    pub fn current_line_input(&self) -> Option<String> {
+        current_line_input_text(&self.term.lock_unfair())
     }
 
     /// First visible row of the viewport, in grid coordinates.
@@ -4665,6 +4674,35 @@ mod tests {
 
             terminal.write_output(b"\x1b]133;C\x07", cx);
             assert_eq!(terminal.current_command_input(), None);
+        });
+    }
+
+    #[gpui::test]
+    async fn current_line_input_falls_back_without_prompt_marks(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"user@host:~$ ls src/te", cx);
+            assert_eq!(terminal.current_command_input(), None);
+            assert_eq!(
+                terminal.current_line_input(),
+                Some("user@host:~$ ls src/te".to_string())
+            );
         });
     }
 

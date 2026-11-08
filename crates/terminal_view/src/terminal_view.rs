@@ -340,6 +340,10 @@ pub struct BlockContext<'a, 'b> {
 
 const MAX_COMPLETION_CANDIDATES: usize = 64;
 const MAX_VISIBLE_COMPLETION_CANDIDATES: usize = 8;
+const COMPLETION_MENU_GAP: f32 = 8.0;
+const COMPLETION_MENU_CHROME_HEIGHT: f32 = 72.0;
+const COMPLETION_MENU_ROW_HEIGHT: f32 = 28.0;
+const MAX_COMPLETION_MENU_HEIGHT: f32 = 320.0;
 
 enum CompletionState {
     Loading {
@@ -355,6 +359,91 @@ enum CompletionState {
         total_matches: usize,
         selected: usize,
     },
+}
+
+struct CompletionMenuLayout {
+    left: Pixels,
+    top: Option<Pixels>,
+    bottom: Option<Pixels>,
+    max_height: Pixels,
+    visible_candidates: usize,
+}
+
+fn completion_command_input(terminal: &Terminal) -> Option<String> {
+    terminal.current_command_input().or_else(|| {
+        if terminal.is_running_command() {
+            None
+        } else {
+            terminal.current_line_input()
+        }
+    })
+}
+
+fn completion_menu_layout(
+    bounds: TerminalBounds,
+    cursor_line: i32,
+    cursor_column: usize,
+    candidate_count: usize,
+) -> CompletionMenuLayout {
+    let content_width = f32::from(bounds.width());
+    let content_height = f32::from(bounds.height());
+    let line_height = f32::from(bounds.line_height());
+    let cursor_line = cursor_line.max(0) as f32;
+    let cursor_top = line_height * cursor_line;
+    let cursor_bottom = cursor_top + line_height;
+
+    let preferred_rows = candidate_count
+        .min(MAX_VISIBLE_COMPLETION_CANDIDATES)
+        .max(1);
+    let preferred_height =
+        COMPLETION_MENU_CHROME_HEIGHT + COMPLETION_MENU_ROW_HEIGHT * preferred_rows as f32;
+    let preferred_height = preferred_height.min(MAX_COMPLETION_MENU_HEIGHT);
+    let space_below = (content_height - cursor_bottom - COMPLETION_MENU_GAP).max(0.0);
+    let space_above = (cursor_top - COMPLETION_MENU_GAP).max(0.0);
+
+    // Prefer opening below the command. When the prompt is near the bottom,
+    // anchor the menu above the command line so it remains fully visible.
+    let place_above = space_below < preferred_height && space_above > space_below;
+    let available_height = if place_above {
+        space_above
+    } else {
+        space_below
+    };
+    let rows_that_fit = ((available_height - COMPLETION_MENU_CHROME_HEIGHT)
+        / COMPLETION_MENU_ROW_HEIGHT)
+        .floor()
+        .max(1.0) as usize;
+    let visible_candidates = preferred_rows
+        .min(rows_that_fit)
+        .min(candidate_count.max(1));
+    let estimated_height = (COMPLETION_MENU_CHROME_HEIGHT
+        + COMPLETION_MENU_ROW_HEIGHT * visible_candidates as f32)
+        .min(MAX_COMPLETION_MENU_HEIGHT);
+
+    let menu_width = 460.0_f32.min(content_width);
+    let left = (f32::from(bounds.cell_width()) * cursor_column as f32)
+        .min((content_width - menu_width).max(0.0))
+        .max(0.0);
+    let max_height = estimated_height.min(available_height.max(1.0));
+
+    let (top, bottom) = if place_above {
+        (
+            None,
+            Some(px(
+                (content_height - cursor_top + COMPLETION_MENU_GAP).max(0.0)
+            )),
+        )
+    } else {
+        (Some(px(cursor_bottom + COMPLETION_MENU_GAP)), None)
+    };
+
+    CompletionMenuLayout {
+        left: px(left),
+        top,
+        bottom,
+        max_height: px(max_height),
+        visible_candidates,
+    }
 }
 
 ///A terminal view, maintains the PTY's file handles and communicates with the terminal
@@ -2115,7 +2204,8 @@ impl TerminalView {
         let Some(cwd) = terminal.working_directory() else {
             return false;
         };
-        let Some(command_input) = terminal.current_command_input() else {
+        let command_input = completion_command_input(terminal);
+        let Some(command_input) = command_input else {
             return false;
         };
         let Some(token) = parse_last_word(&command_input) else {
@@ -2177,10 +2267,7 @@ impl TerminalView {
             return;
         };
 
-        let command_unchanged = self
-            .terminal
-            .read(cx)
-            .current_command_input()
+        let command_unchanged = completion_command_input(self.terminal.read(cx))
             .is_some_and(|current| current == command_input);
         if !command_unchanged {
             cx.notify();
@@ -2194,6 +2281,15 @@ impl TerminalView {
         };
         if candidates.is_empty() {
             self.process_keystroke(&trigger, cx);
+            cx.notify();
+            return;
+        }
+
+        if candidates.len() == 1 {
+            let shell_kind = self.terminal.read(cx).shell().shell_kind(cfg!(windows));
+            let text = token.candidate_text(&candidates[0], &token.file_prefix, shell_kind);
+            self.send_completion_text(&text, cx);
+            self.cancel_completion_task();
             cx.notify();
             return;
         }
@@ -2310,17 +2406,9 @@ impl TerminalView {
             return None;
         }
 
-        let visible_candidates = candidates.len().min(MAX_VISIBLE_COMPLETION_CANDIDATES);
-
+        let layout = completion_menu_layout(bounds, cursor_line, cursor_column, candidates.len());
+        let visible_candidates = layout.visible_candidates;
         let menu_width = cmp::min(px(460.), bounds.width());
-        let left = cmp::min(
-            bounds.cell_width() * cursor_column as f32,
-            cmp::max(bounds.width() - menu_width, Pixels::ZERO),
-        );
-        // Keep the picker attached to the line immediately below the current
-        // input. Never flip it above the cursor: doing so covers the path the
-        // user is editing.
-        let top = bounds.line_height() * (cursor_line + 1) as f32;
         let theme = self.theme(cx);
         let colors = theme.colors();
         let directory_label = if token.directory_prefix.is_empty() {
@@ -2365,72 +2453,81 @@ impl TerminalView {
                     .child(Label::new(candidate.display_name(shell_kind)).truncate())
             });
 
+        let menu = v_flex()
+            .id("terminal-path-completion-menu")
+            .absolute()
+            .left(layout.left)
+            .w(menu_width)
+            .max_h(layout.max_height)
+            .overflow_hidden()
+            .occlude()
+            .rounded_md()
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.elevated_surface_background);
+        let menu = if let Some(top) = layout.top {
+            menu.top(top)
+        } else if let Some(bottom) = layout.bottom {
+            menu.bottom(bottom)
+        } else {
+            menu
+        };
+
         Some(
-            v_flex()
-                .id("terminal-path-completion-menu")
-                .absolute()
-                .left(left)
-                .top(top)
-                .w(menu_width)
-                .max_h(px(320.))
-                .overflow_hidden()
-                .occlude()
-                .rounded_md()
-                .border_1()
-                .border_color(colors.border)
-                .bg(colors.elevated_surface_background)
-                .child(
-                    h_flex()
-                        .w_full()
-                        .justify_between()
-                        .gap_2()
-                        .px_2()
-                        .py_1()
-                        .child(
-                            Label::new(directory_label)
-                                .size(LabelSize::Small)
-                                .color(Color::Muted)
-                                .truncate(),
-                        )
-                        .child(
-                            Label::new(format!(
-                                "{} / {}",
-                                selected.saturating_add(1),
-                                total_matches
-                            ))
+            menu.child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .child(
+                        Label::new(directory_label)
                             .size(LabelSize::Small)
-                            .color(Color::Muted),
-                        ),
-                )
-                .child(v_flex().w_full().p_1().children(rows))
-                .when(remaining > 0, |menu| {
-                    menu.child(h_flex().px_2().pb_1().child(
+                            .color(Color::Muted)
+                            .truncate(),
+                    )
+                    .child(
+                        Label::new(format!(
+                            "{} / {}",
+                            selected.saturating_add(1),
+                            total_matches
+                        ))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    ),
+            )
+            .child(v_flex().w_full().p_1().children(rows))
+            .when(remaining > 0, |menu| {
+                menu.child(
+                    h_flex().px_2().pb_1().child(
                         Label::new(format!("+{remaining}"))
                             .size(LabelSize::Small)
                             .color(Color::Muted),
-                    ))
-                })
-                .child(
-                    h_flex()
-                        .w_full()
-                        .justify_between()
-                        .gap_2()
-                        .border_t_1()
-                        .border_color(colors.border)
-                        .px_2()
-                        .py_1()
-                        .child(
-                            Label::new("Up/Down / Tab")
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        )
-                        .child(
-                            Label::new("Enter / Right")
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        ),
+                    ),
                 )
-                .into_any_element(),
+            })
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_2()
+                    .border_t_1()
+                    .border_color(colors.border)
+                    .px_2()
+                    .py_1()
+                    .child(
+                        Label::new("Up/Down / Tab")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new("Enter / Right")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
+            )
+            .into_any_element(),
         )
     }
 
@@ -3575,6 +3672,43 @@ mod tests {
         assert_eq!(written, expected_text);
     }
 
+    #[test]
+    fn completion_menu_opens_below_with_a_gap_from_the_command_line() {
+        let bounds = TerminalBounds::new(
+            px(20.),
+            px(10.),
+            gpui::Bounds {
+                origin: gpui::point(px(10.), px(30.)),
+                size: gpui::size(px(500.), px(400.)),
+            },
+        );
+
+        let layout = completion_menu_layout(bounds, 2, 4, 3);
+        assert_eq!(layout.top, Some(px(20. * 3. + COMPLETION_MENU_GAP)));
+        assert_eq!(layout.bottom, None);
+        assert_eq!(layout.visible_candidates, 3);
+    }
+
+    #[test]
+    fn completion_menu_flips_above_when_the_prompt_is_near_the_bottom() {
+        let bounds = TerminalBounds::new(
+            px(20.),
+            px(10.),
+            gpui::Bounds {
+                origin: gpui::point(px(10.), px(30.)),
+                size: gpui::size(px(500.), px(400.)),
+            },
+        );
+
+        let layout = completion_menu_layout(bounds, 19, 4, 3);
+        assert_eq!(layout.top, None);
+        assert_eq!(
+            layout.bottom,
+            Some(px(400. - 20. * 19. + COMPLETION_MENU_GAP))
+        );
+        assert_eq!(layout.visible_candidates, 3);
+    }
+
     // DEC private mode 1049: a program writes this to enter the alternate screen buffer.
     const ENTER_ALT_SCREEN: &[u8] = b"\x1b[?1049h";
 
@@ -3798,14 +3932,14 @@ mod tests {
             add_display_only_terminal(&project, window_handle, true, cx);
 
         terminal.update(cx, |terminal, cx| {
-            terminal.write_output(b"$ \x1b]133;A\x07\x1b]133;B\x07ls f", cx);
+            terminal.write_output(b"user@host:~$ ls f", cx);
         });
 
         terminal_view.update(cx, |view, cx| {
             view.completion = Some(CompletionState::Loading {
                 generation: 1,
                 token: parse_last_word("ls f").unwrap(),
-                command_input: "ls f".to_string(),
+                command_input: "user@host:~$ ls f".to_string(),
                 trigger: Keystroke::parse("tab").unwrap(),
             });
             view.finish_path_completion(
@@ -3841,6 +3975,43 @@ mod tests {
                 .update(cx, |terminal, _| terminal.take_input_log())
                 .is_empty(),
             "opening the picker must not write anything to the shell"
+        );
+    }
+
+    #[gpui::test]
+    async fn single_path_completion_is_inserted_without_opening_the_menu(cx: &mut TestAppContext) {
+        let (project, _workspace, window_handle) = init_test_with_window(cx).await;
+        let (_pane, terminal, terminal_view) =
+            add_display_only_terminal(&project, window_handle, true, cx);
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"$ \x1b]133;A\x07\x1b]133;B\x07ls f", cx);
+        });
+
+        terminal_view.update(cx, |view, cx| {
+            view.completion = Some(CompletionState::Loading {
+                generation: 1,
+                token: parse_last_word("ls f").unwrap(),
+                command_input: "ls f".to_string(),
+                trigger: Keystroke::parse("tab").unwrap(),
+            });
+            view.finish_path_completion(
+                1,
+                Ok(vec![CompletionCandidate {
+                    name: "foo".to_string(),
+                    is_dir: false,
+                }]),
+                cx,
+            );
+            assert!(
+                view.completion.is_none(),
+                "A single match should complete immediately without opening the menu"
+            );
+        });
+
+        assert_eq!(
+            terminal.update(cx, |terminal, _| terminal.take_input_log()),
+            vec![b"oo ".to_vec()]
         );
     }
 
