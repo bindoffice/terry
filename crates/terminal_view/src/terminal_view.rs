@@ -236,6 +236,16 @@ fn is_shift_tab(keystroke: &Keystroke) -> bool {
         && !has_completion_command_modifiers(keystroke)
 }
 
+fn is_previous_completion(keystroke: &Keystroke) -> bool {
+    is_shift_tab(keystroke)
+        || (keystroke.key == "up" && !has_completion_command_modifiers(keystroke))
+}
+
+fn is_next_completion(keystroke: &Keystroke) -> bool {
+    is_plain_tab(keystroke)
+        || (keystroke.key == "down" && !has_completion_command_modifiers(keystroke))
+}
+
 fn is_accept_completion(keystroke: &Keystroke) -> bool {
     !has_completion_command_modifiers(keystroke)
         && matches!(keystroke.key.as_str(), "enter" | "right")
@@ -1594,6 +1604,13 @@ impl TerminalView {
         if let Some(keystroke) = Keystroke::parse(&text.0).log_err() {
             self.clear_bell(cx);
             self.blink_manager.update(cx, BlinkManager::pause_blinking);
+            // Enter, Escape and the arrow keys are keymap actions in the
+            // terminal. Route them through the completion menu first so they
+            // do not reach the shell while a candidate is selected.
+            if self.handle_completion_key_down(&keystroke, cx) {
+                self.completion_consumed_key = Some(keystroke);
+                return;
+            }
             self.process_keystroke(&keystroke, cx);
         }
     }
@@ -2018,11 +2035,11 @@ impl TerminalView {
         keystroke: &Keystroke,
         cx: &mut Context<Self>,
     ) -> bool {
-        let plain_tab = is_plain_tab(keystroke);
-        let reverse_tab = is_shift_tab(keystroke);
+        let next_candidate = is_next_completion(keystroke);
+        let previous_candidate = is_previous_completion(keystroke);
 
         if let Some(CompletionState::Loading { .. }) = self.completion.as_mut()
-            && (plain_tab || reverse_tab)
+            && (next_candidate || previous_candidate)
         {
             return true;
         }
@@ -2031,10 +2048,10 @@ impl TerminalView {
             selected,
             ..
         }) = self.completion.as_mut()
-            && (plain_tab || reverse_tab)
+            && (next_candidate || previous_candidate)
         {
             if !candidates.is_empty() {
-                if reverse_tab {
+                if previous_candidate {
                     *selected = if *selected == 0 {
                         candidates.len() - 1
                     } else {
@@ -2049,7 +2066,7 @@ impl TerminalView {
         }
 
         let Some(state) = self.completion.take() else {
-            return plain_tab && self.start_path_completion(keystroke, cx);
+            return is_plain_tab(keystroke) && self.start_path_completion(keystroke, cx);
         };
 
         match state {
@@ -2393,6 +2410,26 @@ impl TerminalView {
                             .color(Color::Muted),
                     ))
                 })
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .gap_2()
+                        .border_t_1()
+                        .border_color(colors.border)
+                        .px_2()
+                        .py_1()
+                        .child(
+                            Label::new("Up/Down / Tab")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new("Enter / Right")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
+                )
                 .into_any_element(),
         )
     }
@@ -3605,6 +3642,31 @@ mod tests {
                 "Shift+Tab should select the previous candidate"
             );
 
+            assert!(view.handle_completion_key_down(&Keystroke::parse("down").unwrap(), cx));
+            assert!(
+                matches!(
+                    view.completion.as_ref(),
+                    Some(CompletionState::Open { selected: 1, .. })
+                ),
+                "Down should select the next candidate"
+            );
+
+            assert!(view.handle_completion_key_down(&Keystroke::parse("up").unwrap(), cx));
+            assert!(
+                matches!(
+                    view.completion.as_ref(),
+                    Some(CompletionState::Open { selected: 0, .. })
+                ),
+                "Up should select the previous candidate"
+            );
+
+            assert!(
+                terminal
+                    .update(cx, |terminal, _| terminal.take_input_log())
+                    .is_empty(),
+                "Changing the selected candidate must not write to the shell"
+            );
+
             assert!(view.handle_completion_key_down(&Keystroke::parse("enter").unwrap(), cx));
             assert!(view.completion.is_none());
         });
@@ -3612,6 +3674,120 @@ mod tests {
         assert_eq!(
             terminal.update(cx, |terminal, _| terminal.take_input_log()),
             vec![b"oo ".to_vec()]
+        );
+    }
+
+    #[gpui::test]
+    async fn enter_accepts_path_completion_without_reaching_the_shell(
+        cx: &mut TestAppContext,
+    ) {
+        let (project, _workspace, window_handle) = init_test_with_window(cx).await;
+        cx.update(load_default_keymap);
+        let (_pane, terminal, terminal_view) =
+            add_display_only_terminal(&project, window_handle, true, cx);
+
+        terminal_view.update(cx, |view, _| {
+            view.completion = Some(CompletionState::Open {
+                token: parse_last_word("ls f").unwrap(),
+                current_prefix: "f".to_string(),
+                candidates: vec![
+                    CompletionCandidate {
+                        name: "foo".to_string(),
+                        is_dir: false,
+                    },
+                    CompletionCandidate {
+                        name: "src".to_string(),
+                        is_dir: true,
+                    },
+                ],
+                total_matches: 2,
+                selected: 1,
+            });
+        });
+
+        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert!(
+            terminal_view.update(&mut cx, |view, _| view.completion.is_none()),
+            "Enter should close the completion menu"
+        );
+        assert_eq!(
+            terminal.update(&mut cx, |terminal, _| terminal.take_input_log()),
+            vec![b"src/".to_vec()],
+            "Enter should only write the selected completion to the shell"
+        );
+    }
+
+    #[gpui::test]
+    async fn arrow_keys_and_escape_drive_path_completion_with_default_keymap(
+        cx: &mut TestAppContext,
+    ) {
+        let (project, _workspace, window_handle) = init_test_with_window(cx).await;
+        cx.update(load_default_keymap);
+        let (_pane, terminal, terminal_view) =
+            add_display_only_terminal(&project, window_handle, true, cx);
+
+        terminal_view.update(cx, |view, _| {
+            view.completion = Some(CompletionState::Open {
+                token: parse_last_word("ls f").unwrap(),
+                current_prefix: "f".to_string(),
+                candidates: vec![
+                    CompletionCandidate {
+                        name: "foo".to_string(),
+                        is_dir: false,
+                    },
+                    CompletionCandidate {
+                        name: "src".to_string(),
+                        is_dir: true,
+                    },
+                ],
+                total_matches: 2,
+                selected: 0,
+            });
+        });
+
+        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.simulate_keystrokes("down");
+        assert!(
+            terminal_view.read_with(&cx, |view, _| {
+                matches!(
+                    view.completion.as_ref(),
+                    Some(CompletionState::Open { selected: 1, .. })
+                )
+            }),
+            "Down should move the selection when the default keymap is active"
+        );
+
+        cx.simulate_keystrokes("up");
+        assert!(
+            terminal_view.read_with(&cx, |view, _| {
+                matches!(
+                    view.completion.as_ref(),
+                    Some(CompletionState::Open { selected: 0, .. })
+                )
+            }),
+            "Up should move the selection when the default keymap is active"
+        );
+
+        cx.simulate_keystrokes("escape");
+        assert!(
+            terminal_view.read_with(&cx, |view, _| view.completion.is_none()),
+            "Escape should close the completion menu"
+        );
+        assert!(
+            terminal
+                .update(&mut cx, |terminal, _| terminal.take_input_log())
+                .is_empty(),
+            "Menu navigation and cancellation must not write to the shell"
         );
     }
 
