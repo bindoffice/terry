@@ -46,7 +46,7 @@ use terminal::{
     terminal_settings::{CursorShape, TerminalSettings},
 };
 use terminal_completion::{
-    CompletionCandidate, CompletionToken, common_name_prefix, find_candidates, parse_last_word,
+    CompletionCandidate, CompletionToken, find_candidates, parse_last_word,
 };
 use terminal_element::TerminalElement;
 use terminal_hint_picker::{TerminalHintPicker, execute_hint};
@@ -2181,26 +2181,10 @@ impl TerminalView {
             return;
         }
 
-        let shell_kind = self
-            .terminal
-            .read(cx)
-            .shell()
-            .shell_kind(cfg!(windows));
-        if candidates.len() == 1 {
-            let text = token.candidate_text(&candidates[0], &token.file_prefix, shell_kind);
-            self.send_completion_text(&text, cx);
-            cx.notify();
-            return;
-        }
-
-        let common_prefix = common_name_prefix(&candidates);
-        let mut current_prefix = token.file_prefix.clone();
-        if common_prefix.len() > current_prefix.len() && common_prefix.starts_with(&current_prefix) {
-            let text = token.remaining_text(&common_prefix, &current_prefix, shell_kind);
-            self.send_completion_text(&text, cx);
-            current_prefix = common_prefix;
-        }
-
+        // Tab only opens the picker. In particular, do not insert the common
+        // prefix here: users should be able to inspect the candidates before
+        // anything is written to the shell.
+        let current_prefix = token.file_prefix.clone();
         let total_matches = candidates.len();
         let candidates = candidates
             .into_iter()
@@ -2238,7 +2222,35 @@ impl TerminalView {
             .shell_kind(cfg!(windows));
         let text = token.candidate_text(candidate, &current_prefix, shell_kind);
         self.send_completion_text(&text, cx);
+        self.completion = None;
+        self.cancel_completion_task();
         cx.notify();
+    }
+
+    fn accept_completion_at(&mut self, selected: usize, cx: &mut Context<Self>) {
+        let Some(state) = self.completion.take() else {
+            return;
+        };
+        let CompletionState::Open {
+            token,
+            current_prefix,
+            candidates,
+            total_matches,
+            ..
+        } = state
+        else {
+            return;
+        };
+        self.accept_completion(
+            CompletionState::Open {
+                token,
+                current_prefix,
+                candidates,
+                total_matches,
+                selected,
+            },
+            cx,
+        );
     }
 
     fn send_completion_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -2254,43 +2266,44 @@ impl TerminalView {
         self.completion_task = Task::ready(());
     }
 
-    fn render_completion_overlay(&self, cx: &App) -> Option<AnyElement> {
-        let CompletionState::Open {
-            token,
-            candidates,
-            total_matches,
-            selected,
-            ..
-        } = self.completion.as_ref()?
-        else {
-            return None;
+    fn render_completion_overlay(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (token, candidates, total_matches, selected) = match self.completion.as_ref()? {
+            CompletionState::Open {
+                token,
+                candidates,
+                total_matches,
+                selected,
+                ..
+            } => (token.clone(), candidates.clone(), *total_matches, *selected),
+            CompletionState::Loading { .. } => return None,
         };
 
-        let terminal = self.terminal.read(cx);
-        let content = terminal.last_content();
-        if content.display_offset != 0 {
+        let (display_offset, shell_kind, bounds, cursor_line, cursor_column) = {
+            let terminal = self.terminal.read(cx);
+            let content = terminal.last_content();
+            (
+                content.display_offset,
+                terminal.shell().shell_kind(cfg!(windows)),
+                content.terminal_bounds,
+                content.cursor.point.line.max(0),
+                content.cursor.point.column,
+            )
+        };
+        if display_offset != 0 {
             return None;
         }
 
-        let shell_kind = terminal.shell().shell_kind(cfg!(windows));
-        let bounds = content.terminal_bounds;
-        let cursor_line = content.cursor.point.line.max(0);
-        let visible_candidates = candidates
-            .len()
-            .min(MAX_VISIBLE_COMPLETION_CANDIDATES);
-        let estimated_rows = visible_candidates.saturating_add(1) as i32;
-        let top_cells = if cursor_line + 1 + estimated_rows > bounds.num_lines() as i32 {
-            (cursor_line - estimated_rows).max(0)
-        } else {
-            cursor_line + 1
-        };
+        let visible_candidates = candidates.len().min(MAX_VISIBLE_COMPLETION_CANDIDATES);
 
         let menu_width = cmp::min(px(460.), bounds.width());
         let left = cmp::min(
-            bounds.cell_width() * content.cursor.point.column as f32,
+            bounds.cell_width() * cursor_column as f32,
             cmp::max(bounds.width() - menu_width, Pixels::ZERO),
         );
-        let top = bounds.line_height() * top_cells as f32;
+        // Keep the picker attached to the line immediately below the current
+        // input. Never flip it above the cursor: doing so covers the path the
+        // user is editing.
+        let top = bounds.line_height() * (cursor_line + 1) as f32;
         let theme = self.theme(cx);
         let colors = theme.colors();
         let directory_label = if token.directory_prefix.is_empty() {
@@ -2325,7 +2338,10 @@ impl TerminalView {
                     .px_2()
                     .py_1()
                     .rounded_sm()
-                    .when(ix == *selected, |row| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.accept_completion_at(ix, cx);
+                    }))
+                    .when(ix == selected, |row| {
                         row.bg(colors.ghost_element_selected)
                     })
                     .child(Icon::new(icon).size(IconSize::Small))
@@ -3596,6 +3612,87 @@ mod tests {
         assert_eq!(
             terminal.update(cx, |terminal, _| terminal.take_input_log()),
             vec![b"oo ".to_vec()]
+        );
+    }
+
+    #[gpui::test]
+    async fn path_completion_tab_opens_picker_without_inserting_text(cx: &mut TestAppContext) {
+        let (project, _workspace, window_handle) = init_test_with_window(cx).await;
+        let (_pane, terminal, terminal_view) =
+            add_display_only_terminal(&project, window_handle, true, cx);
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"$ \x1b]133;A\x07\x1b]133;B\x07ls f", cx);
+        });
+
+        terminal_view.update(cx, |view, cx| {
+            view.completion = Some(CompletionState::Loading {
+                generation: 1,
+                token: parse_last_word("ls f").unwrap(),
+                command_input: "ls f".to_string(),
+                trigger: Keystroke::parse("tab").unwrap(),
+            });
+            view.finish_path_completion(
+                1,
+                Ok(vec![
+                    CompletionCandidate {
+                        name: "foo".to_string(),
+                        is_dir: false,
+                    },
+                    CompletionCandidate {
+                        name: "src".to_string(),
+                        is_dir: true,
+                    },
+                ]),
+                cx,
+            );
+
+            assert!(
+                matches!(
+                    view.completion.as_ref(),
+                    Some(CompletionState::Open {
+                        current_prefix,
+                        selected: 0,
+                        ..
+                    }) if current_prefix == "f"
+                ),
+                "Tab should open the picker without committing the common prefix"
+            );
+        });
+
+        assert!(
+            terminal
+                .update(cx, |terminal, _| terminal.take_input_log())
+                .is_empty(),
+            "opening the picker must not write anything to the shell"
+        );
+    }
+
+    #[gpui::test]
+    async fn accepting_path_completion_closes_picker(cx: &mut TestAppContext) {
+        let (project, _workspace, window_handle) = init_test_with_window(cx).await;
+        let (_pane, terminal, terminal_view) =
+            add_display_only_terminal(&project, window_handle, true, cx);
+
+        terminal_view.update(cx, |view, cx| {
+            view.completion = Some(CompletionState::Open {
+                token: parse_last_word("cd f").unwrap(),
+                current_prefix: "f".to_string(),
+                candidates: vec![CompletionCandidate {
+                    name: "foo".to_string(),
+                    is_dir: true,
+                }],
+                total_matches: 1,
+                selected: 0,
+            });
+
+            view.accept_completion_at(0, cx);
+            assert!(view.completion.is_none());
+        });
+
+        assert_eq!(
+            terminal.update(cx, |terminal, _| terminal.take_input_log()),
+            vec![b"oo/".to_vec()]
         );
     }
 

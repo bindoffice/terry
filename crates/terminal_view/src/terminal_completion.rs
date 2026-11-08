@@ -293,28 +293,6 @@ pub(crate) async fn find_candidates(
     Ok(candidates)
 }
 
-pub(crate) fn common_name_prefix(candidates: &[CompletionCandidate]) -> String {
-    let Some(first) = candidates.first() else {
-        return String::new();
-    };
-    let mut prefix = first.name.clone();
-
-    for candidate in &candidates[1..] {
-        let common_len = prefix
-            .chars()
-            .zip(candidate.name.chars())
-            .take_while(|(left, right)| left == right)
-            .map(|(character, _)| character.len_utf8())
-            .sum();
-        prefix.truncate(common_len);
-        if prefix.is_empty() {
-            break;
-        }
-    }
-
-    prefix
-}
-
 fn escape_suffix(suffix: &str, quote: CompletionQuote, shell_kind: ShellKind) -> String {
     let mut escaped = String::with_capacity(suffix.len());
     for character in suffix.chars() {
@@ -447,21 +425,6 @@ mod tests {
     fn allows_path_like_first_word() {
         assert!(parse_last_word("./scr").unwrap().is_eligible());
         assert!(!parse_last_word("cargo").unwrap().is_eligible());
-    }
-
-    #[test]
-    fn computes_unicode_safe_common_prefix() {
-        let candidates = vec![
-            CompletionCandidate {
-                name: "测试-one".into(),
-                is_dir: false,
-            },
-            CompletionCandidate {
-                name: "测试-two".into(),
-                is_dir: true,
-            },
-        ];
-        assert_eq!(common_name_prefix(&candidates), "测试-");
     }
 
     #[test]
