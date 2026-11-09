@@ -4662,6 +4662,24 @@ mod tests {
                 Some("ls src/te".to_string())
             );
 
+            let columns = terminal.last_content.terminal_bounds.num_columns();
+            let right_prompt = " git:(main)";
+            let right_prompt_column = columns.saturating_sub(right_prompt.len());
+            terminal.write_output(
+                format!(
+                    "\x1b7\x1b[1;{}H{}\x1b8",
+                    right_prompt_column + 1,
+                    right_prompt
+                )
+                .as_bytes(),
+                cx,
+            );
+            assert_eq!(
+                terminal.current_command_input(),
+                Some("ls src/te".to_string()),
+                "a zsh RPROMPT must not look like text after the cursor"
+            );
+
             // Rewrite the line with the cursor one cell before the existing
             // trailing character.
             terminal.write_output(b"\rls src/t", cx);
@@ -4698,10 +4716,23 @@ mod tests {
 
         terminal.update(cx, |terminal, cx| {
             terminal.write_output(b"user@host:~$ ls src/te", cx);
+            let columns = terminal.last_content.terminal_bounds.num_columns();
+            let right_prompt = " git:(main)";
+            let right_prompt_column = columns.saturating_sub(right_prompt.len());
+            terminal.write_output(
+                format!(
+                    "\x1b7\x1b[1;{}H{}\x1b8",
+                    right_prompt_column + 1,
+                    right_prompt
+                )
+                .as_bytes(),
+                cx,
+            );
             assert_eq!(terminal.current_command_input(), None);
             assert_eq!(
                 terminal.current_line_input(),
-                Some("user@host:~$ ls src/te".to_string())
+                Some("user@host:~$ ls src/te".to_string()),
+                "the fallback must ignore a zsh RPROMPT"
             );
         });
     }

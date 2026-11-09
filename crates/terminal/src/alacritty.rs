@@ -1236,16 +1236,11 @@ pub(super) fn current_command_input_text(term: &Term<ZedListener>) -> Option<Str
         start
     };
 
-    // Appending a completion is only safe when the cursor is at the end of the
-    // current input line. Otherwise accepting a candidate would insert text in
-    // the middle of the command rather than extending it.
-    for column in (cursor.column.0 + 1)..term.grid().columns() {
-        if term.grid()[AlacPoint::new(cursor.line, Column(column))].c != ' ' {
-            return None;
-        }
+    if !cursor_is_at_input_end(term, cursor) {
+        return None;
     }
 
-    Some(term.bounds_to_string(start, cursor))
+    Some(text_before_cursor(term, start, cursor))
 }
 
 pub(super) fn current_line_input_text(term: &Term<ZedListener>) -> Option<String> {
@@ -1254,17 +1249,46 @@ pub(super) fn current_line_input_text(term: &Term<ZedListener>) -> Option<String
         return None;
     }
 
-    // Appending a completion is only safe when the cursor is at the end of the
-    // current input line. Otherwise accepting a candidate would insert text in
-    // the middle of the command rather than extending it.
+    if !cursor_is_at_input_end(term, cursor) {
+        return None;
+    }
+
+    let text = text_before_cursor(term, AlacPoint::new(cursor.line, Column(0)), cursor);
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn text_before_cursor(term: &Term<ZedListener>, start: AlacPoint, cursor: AlacPoint) -> String {
+    if cursor == start {
+        return String::new();
+    }
+
+    let end = if cursor.column.0 == 0 {
+        AlacPoint::new(Line(cursor.line.0 - 1), term.last_column())
+    } else {
+        AlacPoint::new(cursor.line, Column(cursor.column.0 - 1))
+    };
+    term.bounds_to_string(start, end)
+}
+
+fn cursor_is_at_input_end(term: &Term<ZedListener>, cursor: AlacPoint) -> bool {
+    let mut first_non_space = None;
+    let mut last_non_space = None;
     for column in (cursor.column.0 + 1)..term.grid().columns() {
         if term.grid()[AlacPoint::new(cursor.line, Column(column))].c != ' ' {
-            return None;
+            first_non_space.get_or_insert(column);
+            last_non_space = Some(column);
         }
     }
 
-    let text = term.bounds_to_string(AlacPoint::new(cursor.line, Column(0)), cursor);
-    (!text.trim().is_empty()).then_some(text)
+    let (Some(first_non_space), Some(last_non_space)) = (first_non_space, last_non_space) else {
+        return true;
+    };
+
+    // Text immediately after the cursor belongs to the command. Zsh's RPROMPT
+    // is printed after a gap on the right edge, so it must not count as command
+    // input that the cursor is sitting inside of.
+    first_non_space > cursor.column.0 + 1
+        && last_non_space >= term.grid().columns().saturating_sub(2)
 }
 
 pub(super) fn total_lines(term: &Term<ZedListener>) -> usize {

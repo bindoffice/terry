@@ -3926,6 +3926,34 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn tab_starts_path_completion_with_default_keymap(cx: &mut TestAppContext) {
+        let (project, _workspace, window_handle) = init_test_with_window(cx).await;
+        create_file_wt(project.clone(), "/tmp/root.txt", cx).await;
+        cx.update(load_default_keymap);
+        let (_pane, terminal, _terminal_view) =
+            add_display_only_terminal(&project, window_handle, true, cx);
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]7;file:///tmp\x07", cx);
+            terminal.write_output(b"$ \x1b]133;A\x07\x1b]133;B\x07ls ro", cx);
+        });
+        cx.run_until_parked();
+
+        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("tab");
+
+        let input_log = terminal.update(&mut cx, |terminal, _| terminal.take_input_log());
+        assert!(
+            input_log == vec![b"ot.txt ".to_vec()],
+            "Tab should run Terry's path completion instead of reaching the shell \
+             (input_log: {input_log:?})"
+        );
+    }
+
+    #[gpui::test]
     async fn path_completion_tab_opens_picker_without_inserting_text(cx: &mut TestAppContext) {
         let (project, _workspace, window_handle) = init_test_with_window(cx).await;
         let (_pane, terminal, terminal_view) =
