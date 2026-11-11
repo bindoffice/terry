@@ -7615,6 +7615,50 @@ impl TerminalListPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !crate::local_network::ssh_target_may_need_local_network(&target) {
+            self.connect_ssh_now(target, remote_tmux, window, cx);
+            return;
+        }
+
+        cx.spawn_in(window, async move |this, cx| {
+            let permission = cx
+                .background_executor()
+                .spawn(async { crate::local_network::probe_permission() })
+                .await;
+            this.update_in(cx, |this, window, cx| match permission {
+                crate::local_network::LocalNetworkPermission::Denied => {
+                    let title = i18n::t("local_network_permission_title");
+                    let detail = i18n::t("local_network_permission_detail");
+                    let answer = window.prompt(
+                        PromptLevel::Warning,
+                        &title,
+                        Some(&detail),
+                        &[i18n::t_str("open_system_settings"), i18n::t_str("cancel")],
+                        cx,
+                    );
+                    cx.spawn_in(window, async move |this, cx| {
+                        if answer.await == Ok(0) {
+                            this.update(cx, |_, cx| {
+                                cx.open_url(crate::local_network::SETTINGS_URL);
+                            })?;
+                        }
+                        anyhow::Ok(())
+                    })
+                    .detach_and_log_err(cx);
+                }
+                _ => this.connect_ssh_now(target, remote_tmux, window, cx),
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn connect_ssh_now(
+        &mut self,
+        target: crate::remote_hosts::SshTarget,
+        remote_tmux: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (program, args, title) = {
             let settings = TerminalSettings::get_global(cx);
             let options = crate::remote_hosts::SshOptions {

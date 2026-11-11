@@ -71,6 +71,15 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
                 "broadcast_input_confirm_detail",
                 "Keystrokes will be sent to every terminal in this group. Make sure no destructive command is running.",
             );
+            m.insert(
+                "local_network_permission_title",
+                "Local Network Access Required",
+            );
+            m.insert(
+                "local_network_permission_detail",
+                "Terry needs local network access to connect to SSH hosts on your LAN. Enable Terry under System Settings > Privacy & Security > Local Network.",
+            );
+            m.insert("open_system_settings", "Open System Settings");
             m.insert("enable", "Enable");
             m.insert("files", "Files");
             m.insert("up_one_level", "Up One Level");
@@ -590,6 +599,12 @@ pub static TRANSLATIONS: LazyLock<HashMap<&'static str, HashMap<&'static str, &'
                 "broadcast_input_confirm_detail",
                 "按键会发送到该分组内的所有终端。请确认没有正在执行的危险命令。",
             );
+            m.insert("local_network_permission_title", "需要本地网络权限");
+            m.insert(
+                "local_network_permission_detail",
+                "Terry 需要访问本地网络才能连接局域网内的 SSH 主机。请在“系统设置”>“隐私与安全性”>“本地网络”中启用 Terry。",
+            );
+            m.insert("open_system_settings", "打开系统设置");
             m.insert("enable", "开启");
             m.insert("files", "文件");
             m.insert("up_one_level", "上级目录");

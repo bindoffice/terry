@@ -13,6 +13,7 @@ mod ipc;
 mod keymap_settings;
 mod kittens;
 mod llm_provider_settings;
+mod local_network;
 mod move_to_window;
 mod persistent_sessions;
 mod process_inspector;

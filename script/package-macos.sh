@@ -273,6 +273,13 @@ LOCAL_NETWORK_REASON="Terry needs local network access to open SSH and tmux conn
 /usr/libexec/PlistBuddy -c "Set :NSLocalNetworkUsageDescription ${LOCAL_NETWORK_REASON}" "$PLIST" \
   || /usr/libexec/PlistBuddy -c "Add :NSLocalNetworkUsageDescription string ${LOCAL_NETWORK_REASON}" "$PLIST"
 
+# The permission probe browses this Bonjour service type. macOS requires every
+# browsed service type to be declared before it will present the Local Network
+# alert.
+/usr/libexec/PlistBuddy -c "Delete :NSBonjourServices" "$PLIST" >/dev/null 2>&1 || true
+/usr/libexec/PlistBuddy -c "Add :NSBonjourServices array" "$PLIST"
+/usr/libexec/PlistBuddy -c "Add :NSBonjourServices:0 string _ssh._tcp" "$PLIST"
+
 SIGN_IDENTITY="$(resolve_signing_identity)"
 sign_app "$APP_PATH" "$SIGN_IDENTITY"
 

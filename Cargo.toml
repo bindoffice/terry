@@ -103,7 +103,9 @@ agent_ui.workspace = true
 image.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2.workspace = true
 cocoa.workspace = true
+dispatch2 = "0.3.1"
 objc.workspace = true
 
 [workspace]
