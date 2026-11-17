@@ -17,6 +17,7 @@ pub(crate) struct CompletionToken {
     pub quote: CompletionQuote,
     pub word_index: usize,
     pub path_like: bool,
+    pub directories_only: bool,
 }
 
 impl CompletionToken {
@@ -163,6 +164,14 @@ fn parse_last_word_for_platform(input: &str, windows_paths: bool) -> Option<Comp
     let value = unescape_word(&raw, windows_paths);
     let (directory_prefix, file_prefix) = split_path_prefix(&value, windows_paths);
     let path_like = !directory_prefix.is_empty() || value.starts_with('~');
+    let command = input
+        .rsplit(|character: char| matches!(character, '\n' | ';' | '|' | '&'))
+        .next()
+        .and_then(|segment| segment.split_whitespace().next())
+        .map(|command| unescape_word(command, windows_paths));
+    let directories_only = command.is_some_and(|command| {
+        command == "cd" || (cfg!(windows) && command.eq_ignore_ascii_case("cd"))
+    });
 
     Some(CompletionToken {
         directory_prefix,
@@ -170,6 +179,7 @@ fn parse_last_word_for_platform(input: &str, windows_paths: bool) -> Option<Comp
         quote,
         word_index,
         path_like,
+        directories_only,
     })
 }
 
@@ -281,6 +291,10 @@ pub(crate) async fn find_candidates(
         }
     }))
     .await;
+
+    if token.directories_only {
+        candidates.retain(|candidate| candidate.is_dir);
+    }
 
     candidates.sort_by(|left, right| {
         right
@@ -425,6 +439,59 @@ mod tests {
     fn allows_path_like_first_word() {
         assert!(parse_last_word("./scr").unwrap().is_eligible());
         assert!(!parse_last_word("cargo").unwrap().is_eligible());
+    }
+
+    #[test]
+    fn only_cd_arguments_are_limited_to_directories() {
+        assert!(parse_last_word("cd src").unwrap().directories_only);
+        assert!(
+            parse_last_word("echo done && cd src")
+                .unwrap()
+                .directories_only
+        );
+        assert!(!parse_last_word("cat src").unwrap().directories_only);
+        assert!(
+            !parse_last_word("cd src && cat src")
+                .unwrap()
+                .directories_only
+        );
+    }
+
+    #[gpui::test]
+    async fn cd_completion_filters_out_files(cx: &mut gpui::TestAppContext) {
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/root",
+            serde_json::json!({
+                "src": null,
+                "src.txt": "not a directory",
+            }),
+        )
+        .await;
+
+        let cd_token = parse_last_word("cd sr").unwrap();
+        let cd_candidates = find_candidates(fs.as_ref(), Path::new("/root"), &cd_token)
+            .await
+            .unwrap();
+        assert_eq!(
+            cd_candidates,
+            vec![CompletionCandidate {
+                name: "src".to_string(),
+                is_dir: true,
+            }]
+        );
+
+        let file_token = parse_last_word("cat sr").unwrap();
+        let file_candidates = find_candidates(fs.as_ref(), Path::new("/root"), &file_token)
+            .await
+            .unwrap();
+        assert_eq!(
+            file_candidates
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src", "src.txt"]
+        );
     }
 
     #[test]
