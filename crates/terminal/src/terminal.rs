@@ -1160,6 +1160,8 @@ impl TerminalBuilder {
             osc7_cwd: None,
             osc7_host: None,
             ssh_destination: None,
+            ssh_command_hint: None,
+            command_depth: 0,
             remote_osc7_seen: false,
             local_osc7_after_remote: false,
             block_selection_pressed: false,
@@ -1503,6 +1505,8 @@ impl TerminalBuilder {
                 osc7_cwd: None,
                 osc7_host: None,
                 ssh_destination: None,
+                ssh_command_hint: None,
+                command_depth: 0,
                 remote_osc7_seen: false,
                 local_osc7_after_remote: false,
                 block_selection_pressed: false,
@@ -1709,6 +1713,12 @@ pub struct Terminal {
     /// Destination of the SSH connection this terminal was launched with, for
     /// terminals whose processes are not visible from here (session hosts).
     ssh_destination: Option<String>,
+    /// Destination inferred from the local `ssh` command currently running.
+    /// This covers daemon-backed terminals without remote `OSC 7` integration.
+    ssh_command_hint: Option<SshCommandHint>,
+    /// Nesting depth of `OSC 133;C` commands. Remote-shell commands nest inside
+    /// the local `ssh` command, so the hint survives until the outer command ends.
+    command_depth: usize,
     /// Whether `OSC 7` has ever reported a directory from another host, i.e. the
     /// remote shell is known to be running.
     remote_osc7_seen: bool,
@@ -1843,7 +1853,11 @@ impl Terminal {
                         self.remote_osc7_seen = true;
                         self.local_osc7_after_remote = false;
                     }
-                    _ if self.remote_osc7_seen => self.local_osc7_after_remote = true,
+                    _ if self.remote_osc7_seen => {
+                        self.local_osc7_after_remote = true;
+                        self.ssh_command_hint = None;
+                        self.command_depth = 0;
+                    }
                     _ => {}
                 }
                 self.osc7_host = host;
@@ -1922,6 +1936,19 @@ impl Terminal {
             }
             TerminalBackendEvent::CommandStarted => {
                 self.last_exit_code = None;
+                self.command_depth = self.command_depth.saturating_add(1);
+                if self.ssh_command_hint.is_none()
+                    && let Some(command) = self.running_command_text()
+                    && let Some(destination) = ssh_destination_from_command_text(
+                        &command,
+                        self.shell().shell_kind(self.path_style.is_windows()),
+                    )
+                {
+                    self.ssh_command_hint = Some(SshCommandHint {
+                        destination,
+                        depth: self.command_depth,
+                    });
+                }
                 // The command the user just submitted may not have replaced the
                 // shell as the PTY's foreground process yet, and the process
                 // snapshot is otherwise refreshed only by terminal output. A
@@ -1953,6 +1980,15 @@ impl Terminal {
                 cx.emit(Event::CommandStarted);
             }
             TerminalBackendEvent::CommandFinished(code) => {
+                let completed_depth = self.command_depth;
+                self.command_depth = self.command_depth.saturating_sub(1);
+                if self
+                    .ssh_command_hint
+                    .as_ref()
+                    .is_some_and(|hint| hint.depth >= completed_depth)
+                {
+                    self.ssh_command_hint = None;
+                }
                 // Shell integration reports this when a foreground command has
                 // returned to the prompt. Reset modes here as well as on child
                 // exit: an SSH connection can disappear without the local shell
@@ -2989,6 +3025,11 @@ impl Terminal {
         last_command_input_text(&terminal)
     }
 
+    /// Command line of the command currently running (`OSC 133;C`), if known.
+    pub fn running_command_text(&self) -> Option<String> {
+        self.term.lock_unfair().running_command_text()
+    }
+
     /// Captured output of the command that most recently finished (`OSC 133`).
     pub fn last_command_output(&self) -> Option<String> {
         let terminal = self.term.lock_unfair();
@@ -3607,11 +3648,16 @@ impl Terminal {
                 // No process to inspect. The destination recorded at spawn time
                 // keeps the marker until the shell reports that it is local
                 // again, and a remote `OSC 7` report both proves the connection
-                // is up and names the remote host.
+                // is up and names the remote host. A local `ssh` command is the
+                // remaining signal: remote shell integration may be unavailable,
+                // or the remote hostname may match this machine.
                 if self.local_osc7_after_remote {
                     return None;
                 }
-                self.remote_osc7_host()
+                self.ssh_command_hint
+                    .as_ref()
+                    .map(|hint| hint.destination.clone())
+                    .or_else(|| self.remote_osc7_host())
                     .or_else(|| self.ssh_destination.clone())
                     .map(|destination| SshSession { destination })
             }
@@ -4271,6 +4317,13 @@ pub struct SshSession {
     pub destination: String,
 }
 
+#[derive(Clone, Debug)]
+struct SshCommandHint {
+    destination: String,
+    /// Command nesting depth at which the local `ssh` command started.
+    depth: usize,
+}
+
 impl SshSession {
     /// The SSH session an argv starts, e.g. `["ssh", "-t", "web"]`.
     ///
@@ -4288,12 +4341,103 @@ impl SshSession {
 /// foreground argv without checking the command name first.
 fn ssh_destination_from_argv(argv: &[String]) -> Option<String> {
     let command = argv.first()?;
-    let base = command.rsplit(['/', '\\']).next().unwrap_or(command);
-    let base = base.strip_suffix(".exe").unwrap_or(base);
+    let base = command_basename(command);
     if !base.eq_ignore_ascii_case("ssh") {
         return None;
     }
     ssh_destination(argv)
+}
+
+fn ssh_destination_from_command_text(command: &str, shell_kind: ShellKind) -> Option<String> {
+    let argv = shell_kind.split(command).unwrap_or_else(|| {
+        command
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
+    let mut index = 0;
+
+    while index < argv.len() {
+        let argument = &argv[index];
+        if is_env_assignment(argument) {
+            index += 1;
+            continue;
+        }
+
+        let base = command_basename(argument);
+        if base.eq_ignore_ascii_case("ssh") {
+            return ssh_destination(&argv[index..]);
+        }
+        if matches!(base, "command" | "builtin" | "exec" | "nohup" | "time") {
+            index += 1;
+            while let Some(option) = argv.get(index) {
+                if !option.starts_with('-') {
+                    break;
+                }
+                let takes_separate_value = base == "exec" && option == "-a";
+                index += 1;
+                if takes_separate_value {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if base == "sudo" {
+            index += 1;
+            while let Some(option) = argv.get(index) {
+                if !option.starts_with('-') || option == "-" {
+                    break;
+                }
+                let takes_separate_value = matches!(
+                    option.as_str(),
+                    "-u" | "-g" | "-p" | "-C" | "-D" | "-R" | "-T" | "-U" | "-r" | "-t" | "-c"
+                );
+                index += 1;
+                if takes_separate_value
+                    && argv.get(index).is_some_and(|value| !value.starts_with('-'))
+                {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if base == "env" {
+            index += 1;
+            while let Some(argument) = argv.get(index) {
+                if argument.starts_with('-') {
+                    let takes_separate_value = matches!(argument.as_str(), "-u" | "-C" | "-S");
+                    index += 1;
+                    if takes_separate_value {
+                        index += 1;
+                    }
+                } else if is_env_assignment(argument) {
+                    index += 1;
+                } else {
+                    break;
+                }
+            }
+            continue;
+        }
+        return None;
+    }
+
+    None
+}
+
+fn command_basename(command: &str) -> &str {
+    let base = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    base.strip_suffix(".exe").unwrap_or(base)
+}
+
+fn is_env_assignment(argument: &str) -> bool {
+    let Some((name, _)) = argument.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && !name.as_bytes()[0].is_ascii_digit()
+        && name
+            .chars()
+            .all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 /// Finds the destination argument in an OpenSSH argv, skipping options and
@@ -7074,6 +7218,85 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    async fn test_display_only_terminal_detects_ssh_from_running_command(cx: &mut TestAppContext) {
+        use base64::Engine as _;
+
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+
+        let encode =
+            |command: &str| base64::engine::general_purpose::STANDARD.encode(command.as_bytes());
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]7;file://localhost/home/solos\x07", cx);
+            terminal.write_output(b"$ \x1b]133;A\x07\x1b]133;B\x07", cx);
+            terminal.write_output(b"ssh -p 2222 alice@web\r\n", cx);
+            terminal.write_output(
+                format!("\x1b]133;C;{}\x07", encode("ssh -p 2222 alice@web")).as_bytes(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        terminal.update(cx, |terminal, _| {
+            assert_eq!(
+                terminal.ssh_session(),
+                Some(SshSession {
+                    destination: "alice@web".into()
+                }),
+                "a display-only terminal must recognize the local ssh command"
+            );
+        });
+
+        // The remote shell reports the same hostname as this machine, so OSC 7
+        // alone cannot identify it as remote.
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]7;file://localhost/home/alice\x07", cx);
+            terminal.write_output(b"$ \x1b]133;A\x07\x1b]133;B\x07ls\r\n", cx);
+            terminal.write_output(format!("\x1b]133;C;{}\x07", encode("ls")).as_bytes(), cx);
+            terminal.write_output(b"file.txt\r\n\x1b]133;D;0\x07", cx);
+        });
+        cx.run_until_parked();
+
+        terminal.update(cx, |terminal, _| {
+            assert_eq!(
+                terminal.ssh_session(),
+                Some(SshSession {
+                    destination: "alice@web".into()
+                }),
+                "commands run inside the SSH session must not clear the outer hint"
+            );
+        });
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]133;D;0\x07", cx);
+            terminal.write_output(b"\x1b]7;file://localhost/home/solos\x07", cx);
+        });
+        cx.run_until_parked();
+
+        terminal.update(cx, |terminal, _| {
+            assert_eq!(
+                terminal.ssh_session(),
+                None,
+                "the outer ssh command ending must re-enable local state"
+            );
+        });
+    }
+
     /// A command that takes over the PTY without printing anything (`ssh host`
     /// while it connects) must still be noticed.
     ///
@@ -7200,6 +7423,31 @@ mod tests {
         // An `ssh.exe` path on Windows is still recognised.
         let argv = ["C:\\Windows\\System32\\OpenSSH\\ssh.exe", "web"].map(str::to_string);
         assert_eq!(ssh_destination_from_argv(&argv).as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn ssh_destination_is_inferred_from_running_command_text() {
+        assert_eq!(
+            ssh_destination_from_command_text("ssh -p 2222 alice@web", ShellKind::Posix).as_deref(),
+            Some("alice@web")
+        );
+        assert_eq!(
+            ssh_destination_from_command_text(
+                "FOO=bar command ssh -o ServerAliveInterval=30 web",
+                ShellKind::Posix,
+            )
+            .as_deref(),
+            Some("web")
+        );
+        assert_eq!(
+            ssh_destination_from_command_text("sudo -u deploy ssh web", ShellKind::Posix)
+                .as_deref(),
+            Some("web")
+        );
+        assert_eq!(
+            ssh_destination_from_command_text("grep ssh notes.txt", ShellKind::Posix),
+            None
+        );
     }
 
     #[test]

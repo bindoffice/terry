@@ -3311,6 +3311,28 @@ impl<T> Term<T> {
         self.last_command_text.as_deref()
     }
 
+    /// Command line of the command currently running via `OSC 133;C`, if any.
+    ///
+    /// The payload is preferred because it preserves the exact command text.
+    /// Shell integrations that cannot encode it still leave the input range,
+    /// which is enough to recover the command from the grid.
+    pub fn running_command_text(&self) -> Option<String> {
+        if self.command_start.is_none() {
+            return None;
+        }
+        if let Some(text) = self.last_command_text.as_deref() {
+            let text = text.trim();
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+
+        let (start, end) = self.last_command_input_range?;
+        let text = self.bounds_to_string(start, end);
+        let text = text.trim();
+        (!text.is_empty()).then(|| text.to_string())
+    }
+
     /// Close the currently open prompt and push it onto the marks list.
     fn finish_active_prompt(&mut self) {
         if let Some(mark) = self.active_prompt_mark.take() {

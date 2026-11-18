@@ -3954,6 +3954,39 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn ssh_command_disables_local_path_completion(cx: &mut TestAppContext) {
+        let (project, _workspace, window_handle) = init_test_with_window(cx).await;
+        create_file_wt(project.clone(), "/tmp/root.txt", cx).await;
+        let (_pane, terminal, terminal_view) =
+            add_display_only_terminal(&project, window_handle, true, cx);
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]7;file://localhost/tmp\x07", cx);
+            terminal.write_output(b"$ \x1b]133;A\x07\x1b]133;B\x07ssh web\r\n", cx);
+            terminal.write_output(b"\x1b]133;C\x07", cx);
+            // The remote hostname matches this machine, so OSC 7 cannot prove
+            // that the path belongs to the remote filesystem.
+            terminal.write_output(b"\x1b]7;file://localhost/home/web\x07", cx);
+            terminal.write_output(b"$ \x1b]133;A\x07\x1b]133;B\x07cat ro", cx);
+        });
+        cx.run_until_parked();
+
+        terminal_view.update(cx, |view, cx| {
+            assert!(
+                !view.start_path_completion(&Keystroke::parse("tab").unwrap(), cx),
+                "Tab must be forwarded to the remote shell instead of reading /tmp locally"
+            );
+            assert!(view.completion.is_none());
+        });
+        assert!(
+            terminal
+                .update(cx, |terminal, _| terminal.take_input_log())
+                .is_empty(),
+            "the local completion path must not write anything to the shell"
+        );
+    }
+
+    #[gpui::test]
     async fn path_completion_tab_opens_picker_without_inserting_text(cx: &mut TestAppContext) {
         let (project, _workspace, window_handle) = init_test_with_window(cx).await;
         let (_pane, terminal, terminal_view) =
